@@ -33,12 +33,12 @@ We'll build the graph up in stages (roughly 50 → 100 → 200 → 500 → 1000 
 
 If we only tested one strategy, the risk is a boring result nobody can act on. Testing all four against each other means either outcome is interesting: if they all converge to similar performance despite very different theoretical guarantees, that itself is a finding. If they diverge the way theory predicts, we get an actual evidence-backed recommendation for which strategy to use and when. There's no version of this where the comparison itself fails to produce something worth writing up.
 
-## Suggested work breakdown (4 people — rearrange freely)
+## Suggested work breakdown
 
-- **Person A — Harness + Strategy 1 & 2:** Build the core insertion pipeline/test harness everyone else plugs into. Implement brute-force and embedding-threshold strategies (the two simplest, get real data flowing first).
-- **Person B — Strategy 3 (ANN index):** Implement the FAISS/HNSW-based narrowing strategy. Likely the most "systems engineering"-heavy piece.
-- **Person C — Strategy 4 (bucket-capped/EraRAG-style):** Implement the bucket/tree-based strategy. This is the one with a real theorem behind it (EraRAG, Theorem 4) — worth reading that paper closely, since it's our main anchor citation.
-- **Person D — Corpus, ground truth, and evaluation:** Decide and prepare the dataset we test against (options: reuse an existing structured hierarchy with known-correct answers — like Wikipedia categories, WordNet, or the graphs released by the ACE paper — or hand-build a small labeled set ourselves). Own the placement-accuracy measurement and the eventual results write-up/figures.
+- **Work A — Harness + Strategy 1 & 2:** Build the core insertion pipeline/test harness everyone else plugs into. Implement brute-force and embedding-threshold strategies (the two simplest, get real data flowing first).
+- **Work B — Strategy 3 (ANN index):** Implement the FAISS/HNSW-based narrowing strategy. Likely the most "systems engineering"-heavy piece.
+- Work C — Strategy 4 (bucket-capped/EraRAG-style):** Implement the bucket/tree-based strategy. This is the one with a real theorem behind it (EraRAG, Theorem 4) — worth reading that paper closely, since it's our main anchor citation.
+- **Work D — Corpus, ground truth, and evaluation:** Decide and prepare the dataset we test against (options: reuse an existing structured hierarchy with known-correct answers — like Wikipedia categories, WordNet, or the graphs released by the ACE paper — or hand-build a small labeled set ourselves). Own the placement-accuracy measurement and the eventual results write-up/figures.
 
 ## Rough sequencing
 
