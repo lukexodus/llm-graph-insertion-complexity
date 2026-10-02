@@ -1,1 +1,8 @@
 .obsidian/
+
+# syllabot-specific
+syllabus.json
+syllabus.md
+
+# repositories
+repositories/

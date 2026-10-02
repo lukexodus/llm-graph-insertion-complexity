@@ -1,0 +1,172 @@
+# Complete Context — LLM Graph Insertion Complexity Thesis
+
+**Read this file first, in full, before touching any code or data in this
+repo.** This document assumes you (the reading agent) have no prior memory of
+any conversation about this project — everything you need is either here or
+linked from here.
+
+## 1. What this project is
+
+A fourth-year undergraduate Computer Science thesis (Philippines). The student
+(Luke) is the thesis author and project lead. The full, formal thesis text
+(Chapters 1–3 so far) lives at
+`docs/thesis/An Empirical Complexity Analysis of Candidate-Narrowing
+Strategies for Incremental LLM-Driven Graph Construction.md` — **that file is
+the authoritative statement of the research question, objectives, scope, and
+planned methodology. This document summarizes it for quick orientation; the
+thesis file is the source of truth if the two ever disagree.**
+
+**One-sentence summary:** the thesis empirically measures and compares the
+cost (time, LLM API calls) and accuracy of four different strategies for
+inserting a new concept-node into an already-existing, LLM-constructed
+knowledge graph, as the existing graph's size grows from ~29 nodes to
+~2000 nodes — testing whether a specific published theoretical complexity
+bound (EraRAG's Theorem 4) actually holds in practice.
+
+**Why this matters (the actual research gap, briefly):** published systems
+for LLM-driven incremental knowledge graph construction (iText2KG, DIAL-KG,
+SAC-KG, EraRAG, and others) each propose their own method for deciding where
+a new node connects to an existing graph, but (a) none of them measures
+insertion cost as an explicit function of how large the existing graph
+already is — they report aggregate cost figures instead — and (b) none of
+them compares more than one narrowing strategy head-to-head under identical
+conditions. This thesis fills both gaps. Full literature trail, with every
+source's specific contribution, is in `docs/rrl/catalogue.md`.
+
+## 2. The four strategies being compared (the actual thing being built)
+
+1. **Brute-force comparison** — LLM compares the new node against every
+   single existing node. No filtering. This is the control/baseline;
+   expected to scale badly, by design — that's the point of including it.
+2. **Embedding-similarity thresholding** — compute cosine similarity between
+   the new node's embedding and every existing node's embedding; only nodes
+   above a fixed threshold (~0.6, per iText2KG's published value) get passed
+   to the LLM for a final decision.
+3. **Approximate nearest-neighbor (ANN) retrieval** — use an ANN index
+   (FAISS or similar) to retrieve the top-k most similar existing nodes in
+   sub-linear time, then LLM decides among those k.
+4. **Bounded-bucket partitioning** — existing nodes live in size-capped
+   buckets; inserting a node only ever touches one bucket (split/merge logic
+   when a bucket overflows/underflows), inspired by EraRAG's architecture
+   but adapted to concept-node insertion rather than EraRAG's own
+   text-chunk-summarization task (these are NOT the same underlying
+   operation — see the thesis Chapter 3, Section 3.2.5, for why this
+   distinction matters and must be stated explicitly in any writeup).
+
+All four strategies share one final step: once a shortlist of candidates is
+produced (by whichever method), an LLM call determines the actual
+relationship between the new node and each shortlisted candidate. This final
+step is held IDENTICAL across all four strategies on purpose — it's what
+makes the comparison fair. Only the narrowing/shortlisting mechanism differs
+between strategies.
+
+## 3. What gets measured
+
+For every (strategy, graph-size) combination, across repeated insertion
+trials:
+
+- **Wall-clock time** per insertion
+- **LLM API call count** per insertion (deliberately separate from time — it
+  disentangles "the LLM is slow" from "the algorithm makes too many calls")
+- **Placement accuracy** (precision/recall) — ONLY where gold-standard
+  ground truth exists (see Section 4 below); not measurable on synthetic data
+
+## 4. Data sources — READ `docs/context/data-formats.md` BEFORE WRITING ANY LOADER CODE
+
+This repo is `cemaytekin/EKG-Dataset`, cloned from the authors of a closely
+related paper (ACE — see catalogue entry #9). It contains the gold-standard
+graphs this thesis reuses for accuracy evaluation.
+
+**Do not assume you know these files' formats from their names alone.**
+`docs/context/data-formats.md` documents everything currently known about
+every file in this dataset, including at least one case (the `0-100.csv`
+family) where an initial filename-based guess turned out to be flatly wrong
+on inspection. That document also names exactly what is STILL unverified
+(flagged "DATA-001" — see `docs/tasks/status.md` for the live task this
+corresponds to). If you are the agent assigned to DATA-001, your job is
+specifically to verify or correct every claim in `data-formats.md` against
+the full raw files, not to re-derive formats from scratch.
+
+In brief (full detail in `data-formats.md`):
+
+- `DSA_gold_standard_MEKG.txt` — 29-node graph, semicolon-delimited triples
+- `metacademy_gold_standard_MEKG.txt` — 141-node graph, SPACE-delimited
+  triples (different delimiter than DSA — do not assume one parser handles
+  both files)
+- Ten `MEKG_with*nodes*.txt` example files (6 to 35 nodes) — formats not yet
+  individually confirmed, likely one of the two formats above
+- Four `*.csv` files (`0-100.csv` etc.) — CONFIRMED to be unrelated
+  crowdsourced A-B-test data, NOT graph data of any size. Do not use these
+  for the size sweep.
+- `concept_descriptions/` folder — not yet inspected; likely needed as
+  source text for the build phase (the gold-standard files only encode
+  target graph STRUCTURE, not the source text an LLM would extract from)
+
+## 5. Project structure and where things live
+
+```
+docs/
+├── context/           ← you are here; standalone context for agents
+│   ├── complete-context.md       (this file)
+│   ├── data-formats.md           (settled + open data-format findings)
+│   └── apc-handoff-template.md   (template for APC-to-APC session handoffs)
+├── decisions/
+│   └── decision-log.md           (append-only; WHY past decisions were made)
+├── tasks/
+│   └── status.md                 (live status; what's actually done right now)
+├── reports/                      (one file per completed agent task)
+├── rrl/
+│   └── catalogue.md              (full literature trail, every source's contribution)
+├── tasks/
+│   └── high-level-tasks.md       (the static Phase 0–4 project plan)
+└── thesis/
+    └── An Empirical Complexity Analysis...md   (the actual thesis text, Ch. 1–3)
+```
+
+**Reading order recommendation for a new agent or new APC instance:** this
+file → `data-formats.md` → `decision-log.md` → `tasks/status.md` → only then
+the full thesis text or catalogue if deeper detail is needed. The thesis and
+catalogue are long; the ToC-generation skill should be used to find the
+specific section needed rather than reading either end-to-end by default.
+
+## 6. The coordination model (why this document exists at all)
+
+This project is run by a human (Luke) relaying work between:
+
+- **The APC AI** ("Analyzer, Planner, Controller") — an AI assistant with NO
+  filesystem access to this repo. It reasons about the thesis, plans tasks,
+  and writes STANDALONE PROMPTS that Luke manually copies to local agents.
+  It has no memory between sessions beyond what is written in this repo —
+  due to API credit limits, the APC role will be handed off between
+  different AI instances over the project's lifetime. See
+  `apc-handoff-template.md` for how that handoff is done.
+- **Local coding agents** (Claude Code, Gemini, opencode, run on Luke's own
+  machine) — these DO have full filesystem access to this repo and are
+  the ones that actually write and run code against the real data files.
+
+**The critical implication:** nothing is "remembered" by any single AI
+across sessions. Everything that needs to survive must be written into this
+repo — the decision log, the task-status file, the per-task report files.
+**If you are a local agent completing a task, you MUST write a report file**
+at `docs/reports/<task-id>-<agent-name>-<short-slug>.md` describing what you
+did, what you found, and anything the APC AI or a future agent needs to know
+— per the convention in `AGENTS.md`. An undocumented change is, for the
+purposes of this project, equivalent to a change that never happened, because
+no future session will know to look for it.
+
+## 7. Open items — things that are genuinely unresolved right now
+
+- **DATA-001** (see `tasks/status.md`): independent verification of
+  `data-formats.md`'s claims, especially the ten example MEKG files' formats
+  and the `concept_descriptions/` folder's contents/sufficiency.
+- **Graph representation choice**: not yet locked. Default lean (not yet
+  confirmed as a decision) is NetworkX, given Python, small data size, and
+  built-in directed-graph support — but this has not been formally decided
+  per the decision-log convention and should be before Phase 1's interface
+  spec is finalized.
+- **Reference [8]** in the thesis reference list is an open citation slot
+  (see decision-log D-11) — unrelated to the coding work, but worth knowing
+  about if any agent is asked to touch the thesis document itself.
+- **Citation style** (IEEE, per D-09) is a working default pending adviser
+  confirmation — again, only relevant if the thesis document itself is being
+  edited, not for code/data work.

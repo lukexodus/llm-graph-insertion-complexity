@@ -32,12 +32,12 @@ As an LLM-constructed graph grows from small to large (e.g., n \= 50 to n ≥ 20
 
 ## 4\. Proposed strategies under comparison
 
-| \# | Strategy | Basis |
-| :---- | :---- | :---- |
-| 1 | Brute-force | Control condition; matches the scalability limitation Funk et al. (2023) name explicitly |
-| 2 | Embedding-threshold narrowing | Current published practice (iText2KG); still O(n) per insertion, a distinction not clearly flagged in existing literature |
-| 3 | ANN index (FAISS/HNSW) | Sub-linear candidate retrieval before LLM decision |
-| 4 | Bucket-capped / tree structure | EraRAG-style; the only strategy with a proven amortized-cost theorem to test empirically |
+| \#  | Strategy                       | Basis                                                                                                                     |
+| :-- | :----------------------------- | :------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Brute-force                    | Control condition; matches the scalability limitation Funk et al. (2023) name explicitly                                  |
+| 2   | Embedding-threshold narrowing  | Current published practice (iText2KG); still O(n) per insertion, a distinction not clearly flagged in existing literature |
+| 3   | ANN index (FAISS/HNSW)         | Sub-linear candidate retrieval before LLM decision                                                                        |
+| 4   | Bucket-capped / tree structure | EraRAG-style; the only strategy with a proven amortized-cost theorem to test empirically                                  |
 
 ## 5\. Methodology
 
@@ -71,8 +71,6 @@ This thesis is scoped as a pure computer-science/algorithms contribution. It doe
 - Preference between Option A and Option B (Section 5), or a hybrid?  
 - Is the proposed graph-size range (50–2000+) appropriate given available compute/API budget, or should it be adjusted?  
 - Any concerns about scoping this as a pure-CS contribution versus retaining an applied framing?
-
-&nbsp;
 
 ## References
 
