@@ -190,3 +190,31 @@ diff computed against a remembered copy looks authoritative but isn't, and the
 APC AI nearly produced one against this very file without having a real copy of
 it. Affects: AGENTS.md, complete-context.md Section 6, and every future agent and
 APC session. (D-18 was never assigned.)
+
+**[D-21]** Node payload locked (resolves DATA-003): a node is a concept name
+and nothing else — no per-node source text, description, or generated
+definition. Specifics: (1) the shared decision-step prompt carries one
+graph-level domain context string per graph source (e.g. DSA -> data
+structures and algorithms; Metacademy -> machine learning and supporting
+mathematics; synthetic large-n -> computer science), never a per-concept hint;
+(2) Strategies 2-4 embed the bare concept name (`.txt` stripped, underscores
+shown as spaces), never the domain context string; (3) synthetic large-n
+names are generated in the same snake_case surface form as the real graphs.
+Reasoning: Chapters 1-3 define nodes by name only, and "source text" there
+means prior work's batch extraction, which is out of scope; no CS/ML
+expository text exists in the dataset or its git history; external text
+(Wikipedia / metacademy-content) would cover the real graphs but not the
+synthetic ones, creating a prompt-length discontinuity at n=141 that
+confounds the time-per-insertion curve, and needs ~30-35% manual title
+curation; LLM-generated definitions add up-front API cost and circularity.
+89.4% of the 170 real concept names are unambiguous CS/ML terms and the rest
+are resolved by a domain context string (DATA-003 Part D). Cost accepted:
+Strategies 2-4 operate on bare names and accuracy rests on the LLM's
+parametric knowledge; this must be stated under Scope and Limitations.
+Supersedes: the open "where does build-phase source text come from" question
+left by D-17 (D-17's finding that `concept_descriptions/` is unusable
+stands). Revisit if: the adviser requires grounded text, or a pilot shows
+unacceptable zero-shot accuracy. Evidence:
+`docs/reports/DATA-003-gemini-source-text-evidence.md`. Affects: INFRA-001/002
+(no text field on nodes), Chapter 3 Section 3.2.6 and Scope and Limitations
+(wording pending, see DOC-002), STRAT-002 to STRAT-004.
