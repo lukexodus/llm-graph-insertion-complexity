@@ -12,6 +12,17 @@ from graph_insertion.graph_representation import (
     embed_text,
     oriented_edge,
 )
+from graph_insertion.loader import (
+    CORPUS_DOMAIN_CONTEXT_MAP,
+    DEFAULT_DATASET_ROOT,
+    TAG_DOMAIN_CONTEXT_MAP,
+    CorpusSpec,
+    CorpusStats,
+    LoadedCorpus,
+    derive_domain_context,
+    discover_corpora,
+    load_corpus,
+)
 from graph_insertion.strategy import (
     DecisionOutcome,
     DecisionStep,
@@ -41,4 +52,15 @@ __all__ = [
     "DecisionStep",
     "NarrowingStrategy",
     "insert_node",
+    # Loader
+    "CorpusSpec",
+    "CorpusStats",
+    "LoadedCorpus",
+    "discover_corpora",
+    "load_corpus",
+    "derive_domain_context",
+    "DEFAULT_DATASET_ROOT",
+    "CORPUS_DOMAIN_CONTEXT_MAP",
+    "TAG_DOMAIN_CONTEXT_MAP",
 ]
+

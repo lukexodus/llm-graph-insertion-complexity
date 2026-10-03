@@ -32,6 +32,12 @@ META_FILE = DATA_DIR / "metacademy_gold_standard_MEKG.txt"
 MEKG_6 = DATA_DIR / "MEKG_with_6_nodes(DS).txt"
 MEKG_35 = DATA_DIR / "MEKG_with_35_nodes(ML1).txt"
 
+dataset_present = DSA_FILE.is_file() and META_FILE.is_file()
+skip_without_dataset = pytest.mark.skipif(
+    not dataset_present,
+    reason="Dataset directory repositories/dataset/EKG-Dataset/ not present",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers to read real rows from files
@@ -83,6 +89,7 @@ def _mekg_positive_rows(filepath: pathlib.Path, n: int = 5) -> list[tuple[str, s
 class TestOrientedEdge:
     """oriented_edge maps file columns to (prereq, dependent)."""
 
+    @skip_without_dataset
     def test_gold_dsa_real_rows(self):
         """For GOLD source, col2 is the prerequisite of col1 ([D-15]).
 
@@ -98,6 +105,7 @@ class TestOrientedEdge:
             )
             assert dependent == col1
 
+    @skip_without_dataset
     def test_gold_metacademy_real_rows(self):
         """Metacademy shares the same GOLD direction convention as DSA ([D-15])."""
         rows = _meta_positive_rows(2)
@@ -107,6 +115,7 @@ class TestOrientedEdge:
             assert prereq == col2
             assert dependent == col1
 
+    @skip_without_dataset
     def test_mekg_example_small_real_rows(self):
         """For MEKG_EXAMPLE source, col1 is the prerequisite of col2 ([D-19]).
 
@@ -122,6 +131,7 @@ class TestOrientedEdge:
             )
             assert dependent == col2
 
+    @skip_without_dataset
     def test_mekg_example_large_real_rows(self):
         """MEKG direction holds for the largest file too ([D-19])."""
         rows = _mekg_positive_rows(MEKG_35, 2)
@@ -130,6 +140,7 @@ class TestOrientedEdge:
             prereq, dependent = oriented_edge(SourceKind.MEKG_EXAMPLE, col1, col2)
             assert prereq == col1
             assert dependent == col2
+
 
     def test_gold_documented_example_dsa(self):
         """Check the documented example from data-formats.md: dijkstra_algorithm;graph;1."""
@@ -161,6 +172,7 @@ class TestOrientedEdge:
 # Cross-source agreement test  ([D-23] property)
 # ===========================================================================
 
+@skip_without_dataset
 class TestCrossSourceAgreement:
     """Every positive edge in example MEKG files that overlaps with gold files must
     produce the same oriented edge as gold — the property DATA-002 verified."""
