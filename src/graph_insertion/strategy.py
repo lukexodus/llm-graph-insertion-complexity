@@ -6,6 +6,7 @@ Strategy interface contract, data structures, and shared insertion driver.
 Decisions:
   - Narrowing-only strategy contract with external shared decision step ([D-24]).
   - Timing and metrics accounting model ([D-25]).
+  - Strategy hardening and embedder accounting pass ([D-26], [D-28]).
 """
 
 from __future__ import annotations
@@ -74,10 +75,19 @@ class InsertionMetrics:
         Total wall-clock seconds for candidate narrowing (includes embed_s).
     decide_s:
         Wall-clock seconds spent in the shared decision step.
+    apply_s:
+        Wall-clock seconds spent committing nodes and edges to ConceptGraph.
     update_s:
-        Wall-clock seconds spent updating the strategy's internal index (on_inserted).
+        Wall-clock seconds spent updating the strategy's internal state in on_inserted().
     total_s:
-        Total end-to-end wall-clock seconds for the insertion operation.
+        Total operational wall-clock seconds for insertion: shortlist_s + decide_s + apply_s + update_s.
+        Validation overhead is tracked separately in validate_s and excluded from total_s ([D-28]).
+    validate_s:
+        Wall-clock seconds spent performing shortlist contract and edge validation checks.
+    embedding_calls_in_update:
+        Number of embedding calls made during on_inserted() (must be 0 under [D-26]/[D-28]).
+    embed_in_update_s:
+        Cumulative seconds spent generating embeddings during on_inserted().
     extra:
         Arbitrary diagnostic metadata emitted by the strategy (e.g. comparisons, bucket id).
     """
@@ -91,6 +101,8 @@ class InsertionMetrics:
     apply_s: float
     update_s: float
     total_s: float
+    validate_s: float
+    embedding_calls_in_update: int = 0
     embed_in_update_s: float = 0.0
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -173,20 +185,22 @@ def insert_node(
     decision_step: DecisionStep,
     new_name: str,
     *,
-    metered_embedder: Optional[MeteredEmbedder],
+    metered_embedder: MeteredEmbedder,
 ) -> InsertionResult:
     """Execute the canonical end-to-end insertion pipeline for a new concept.
 
     Sequences:
+      0. Embedder identity validation: if strategy._embedder is not None and is not
+         metered_embedder, raise ValueError before any shortlist call or mutation ([D-28]).
       1. Precondition checks: validate new_name format and ensure it does not already exist.
       2. Candidate narrowing: strategy.shortlist(new_name).
       3. Shortlist contract enforcement: candidates are valid graph nodes, no duplicates,
-         new_name excluded, scores length matches candidates.
+         new_name excluded, scores length matches candidates (timed via validate_s).
       4. Shared decision step: decision_step.decide(new_name, shortlist).
       5. Pre-mutation edge validation: canonical, involves new_name, other endpoint
-         in shortlist, no self-loops, no duplicates.
+         in shortlist, no self-loops, no duplicates (timed via validate_s).
       6. Graph mutation: add new_name and canonical edges to ConceptGraph (timed via apply_s).
-      7. Incremental index update: strategy.on_inserted(new_name, edges).
+      7. Incremental index update: strategy.on_inserted(new_name, edges) (timed via update_s).
       8. Embedding accounting across whole window & diagnostics collation.
 
     Parameters
@@ -201,29 +215,34 @@ def insert_node(
         The bare concept name string to insert.
     metered_embedder:
         Required MeteredEmbedder for tracking embedding time and calls during narrowing
-        and update. May be explicitly None for strategies that do not use embeddings.
+        and update ([D-28]).
 
     Returns
     -------
     InsertionResult
         Structured outcome containing inserted node, shortlist, edges, and full metrics.
     """
+    if not isinstance(metered_embedder, MeteredEmbedder):
+        raise TypeError(
+            f"metered_embedder must be an instance of MeteredEmbedder, got {type(metered_embedder).__name__}"
+        )
+
+    strat_embedder = getattr(strategy, "_embedder", None)
+    if strat_embedder is not None and strat_embedder is not metered_embedder:
+        raise ValueError(
+            f"MeteredEmbedder mismatch: strategy {strategy.name!r} holds embedder {strat_embedder!r}, "
+            f"which is not identical to metered_embedder passed to insert_node: {metered_embedder!r}. "
+            "The metered_embedder passed to insert_node must be identical to the strategy's internal embedder."
+        )
+
     _validate_concept_name(new_name)
     if graph.has_node(new_name):
         raise ValueError(f"Node {new_name!r} already exists in graph.")
 
     n_before = graph.num_nodes()
 
-    embed_calls_start = metered_embedder.calls if metered_embedder else 0
-    embed_time_start = metered_embedder.cumulative_seconds if metered_embedder else 0.0
-
-    # For detecting unmetered calls if metered_embedder is None
-    strat_embedder = getattr(strategy, "_embedder", None)
-    strat_embedder_calls_start = (
-        strat_embedder.calls if isinstance(strat_embedder, MeteredEmbedder) else None
-    )
-
-    t_total_start = time.perf_counter()
+    embed_calls_start = metered_embedder.calls
+    embed_time_start = metered_embedder.cumulative_seconds
 
     # Step 1: Candidate narrowing
     t0 = time.perf_counter()
@@ -231,9 +250,8 @@ def insert_node(
     t1 = time.perf_counter()
     shortlist_s = t1 - t0
 
-    embed_time_mid = metered_embedder.cumulative_seconds if metered_embedder else 0.0
-
-    # Step 1b: Shortlist contract enforcement outside timed regions ([D-24])
+    # Step 1b: Shortlist contract enforcement (timed as part of validate_s)
+    t_v0 = time.perf_counter()
     if not isinstance(shortlist_res.candidates, tuple):
         raise ValueError(
             f"Strategy {strategy.name!r} returned invalid shortlist: candidates must be a tuple"
@@ -256,6 +274,7 @@ def insert_node(
             raise ValueError(
                 f"Strategy {strategy.name!r} returned invalid shortlist: scores length ({len(shortlist_res.scores)}) does not match candidates length ({len(shortlist_res.candidates)})"
             )
+    val_shortlist_s = time.perf_counter() - t_v0
 
     # Step 2: Shared decision step (empty shortlist skips LLM calls per item 8)
     if len(shortlist_res.candidates) == 0:
@@ -269,7 +288,8 @@ def insert_node(
         t3 = time.perf_counter()
         decide_s = t3 - t2
 
-    # Step 2b: Pre-mutation edge validation before touching the graph
+    # Step 2b: Pre-mutation edge validation before touching the graph (timed as part of validate_s)
+    t_v1 = time.perf_counter()
     if not isinstance(outcome.edges, tuple):
         raise ValueError("Decision step edges must be a tuple")
     if len(outcome.edges) != len(set(outcome.edges)):
@@ -295,6 +315,8 @@ def insert_node(
             raise ValueError(
                 f"Decided edge endpoint {other!r} was not in the shortlisted candidates: {shortlist_res.candidates!r}"
             )
+    val_edge_s = time.perf_counter() - t_v1
+    validate_s = val_shortlist_s + val_edge_s
 
     # Step 3: Mutate graph (timed via apply_s)
     t_apply_start = time.perf_counter()
@@ -304,27 +326,25 @@ def insert_node(
     apply_s = time.perf_counter() - t_apply_start
 
     # Step 4: Incremental update of strategy state
+    embed_calls_before_update = metered_embedder.calls
+    embed_time_before_update = metered_embedder.cumulative_seconds
+
     t4 = time.perf_counter()
     strategy.on_inserted(new_name, outcome.edges)
     t5 = time.perf_counter()
     update_s = t5 - t4
 
-    total_s = time.perf_counter() - t_total_start
+    embed_calls_after_update = metered_embedder.calls
+    embed_time_after_update = metered_embedder.cumulative_seconds
 
-    # Embedding accounting across whole window
-    embed_time_end = metered_embedder.cumulative_seconds if metered_embedder else 0.0
-    embed_in_update_s = embed_time_end - embed_time_mid
-    embed_s = embed_time_end - embed_time_start
-    embed_calls_total = (
-        (metered_embedder.calls - embed_calls_start) if metered_embedder else 0
-    )
+    embedding_calls_in_update = embed_calls_after_update - embed_calls_before_update
+    embed_in_update_s = embed_time_after_update - embed_time_before_update
 
-    # Detect unmetered embedding calls when metered_embedder was None
-    if metered_embedder is None and strat_embedder_calls_start is not None:
-        if strat_embedder.calls > strat_embedder_calls_start:
-            raise ValueError(
-                f"Strategy {strategy.name!r} performed unmetered embedding calls (metered_embedder=None was passed to insert_node)."
-            )
+    # Total operational wall-clock time (validation excluded per [D-28])
+    total_s = shortlist_s + decide_s + apply_s + update_s
+
+    embed_calls_total = metered_embedder.calls - embed_calls_start
+    embed_s = metered_embedder.cumulative_seconds - embed_time_start
 
     # Step 5: Collate metrics
     try:
@@ -343,6 +363,8 @@ def insert_node(
         apply_s=apply_s,
         update_s=update_s,
         total_s=total_s,
+        validate_s=validate_s,
+        embedding_calls_in_update=embedding_calls_in_update,
         embed_in_update_s=embed_in_update_s,
         extra=diag,
     )

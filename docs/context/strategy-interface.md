@@ -55,20 +55,21 @@ Candidate insertion proceeds in two distinct stages:
 
 3. Incremental Insertion (TIMED via insert_node):
    result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder=metered_embedder)
+   ├─ Step 0: Driver verifies metered_embedder identity (strategy._embedder is metered_embedder)
    ├─ Step 1: strategy.shortlist(new_concept)          --> Shortlist(candidates, scores)
-   │          (Driver validates candidates: must be subset of existing nodes, no duplicates, excludes new_concept)
+   │          (Driver validates candidates: must be subset of existing nodes, no duplicates, excludes new_concept; timed in validate_s)
    ├─ Step 2: decision_step.decide(...)                --> DecisionOutcome(edges, llm_calls, llm_seconds)
    │          (Empty shortlist skips LLM calls: 0 calls, 0 edges)
-   ├─ Step 3: driver validates edges and mutates ConceptGraph (timed via apply_s):
+   ├─ Step 3: driver validates edges (timed in validate_s) and mutates ConceptGraph (timed via apply_s):
    │          (Validates: canonical 2-tuples, no self-loops, no duplicates, other endpoint in shortlist.candidates)
    │          (Adds new_concept and applies decided edges to ConceptGraph)
    └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update (timed via update_s)
-              (Reuses cached vector from Step 1; must NOT re-embed new_concept)
+              (Reuses cached vector from Step 1; must NOT re-embed new_concept; embedding_calls_in_update must be 0)
 ```
 
 ---
 
-## 3. Timing & Metrics Accounting Model ([D-25], [D-26])
+## 3. Timing & Metrics Accounting Model ([D-25], [D-26], [D-28])
 
 All timing uses `time.perf_counter()`. Measurements are reported inside `InsertionMetrics`:
 
@@ -79,18 +80,21 @@ All timing uses `time.perf_counter()`. Measurements are reported inside `Inserti
 | `llm_calls` | Number of LLM API requests made | `outcome.llm_calls` (0 if shortlist is empty) |
 | `embedding_calls` | Number of embedding calls during narrowing | Recorded via `MeteredEmbedder` delta during shortlist |
 | `embed_s` | Cumulative seconds generating embeddings | From `MeteredEmbedder` during shortlist |
+| `embedding_calls_in_update` | Number of embedding calls made during on_inserted | Discrete call count delta from `MeteredEmbedder` during `on_inserted` (must be 0 under [D-26]/[D-28]) |
 | `embed_in_update_s` | Cumulative seconds generating embeddings during update | From `MeteredEmbedder` during `on_inserted` (must be 0.0 under single-embedding invariant) |
 | `shortlist_s` | Wall-clock seconds for candidate narrowing | `t1 - t0` around `strategy.shortlist()` (subsumes `embed_s`) |
 | `decide_s` | Wall-clock seconds in shared decision step | `t3 - t2` around `decision_step.decide()` (0.0 if empty shortlist) |
-| `apply_s` | Wall-clock seconds committing to graph | `t5 - t4` around graph mutation and edge application |
-| `update_s` | Wall-clock seconds updating strategy index | `t7 - t6` around `strategy.on_inserted()` |
-| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (`total_s ≈ shortlist_s + decide_s + apply_s + update_s`) |
+| `apply_s` | Wall-clock seconds committing to graph | `time.perf_counter()` around graph node and edge addition |
+| `update_s` | Wall-clock seconds updating strategy index | `time.perf_counter()` around `strategy.on_inserted()` |
+| `validate_s` | Wall-clock seconds for contract validation | Separate timing for shortlist contract checks and pre-mutation edge validation |
+| `total_s` | Total operational wall-clock seconds for insertion | `shortlist_s + decide_s + apply_s + update_s` (validation overhead excluded per [D-28]) |
 | `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` (or `{"diagnostics_error": repr(e)}` on failure) |
 
 *Notes:*
 - `setup()` is strictly untimed preparation and excluded from `total_s`.
-- **Single-Embedding Invariant ([D-26]):** An insertion of `new_name` requires computing its embedding at most once. Strategies compute and cache `new_name`'s vector in `shortlist()`, and reuse that vector in `on_inserted()`. Embedding `new_name` a second time in `on_inserted()` is strictly prohibited (`embed_in_update_s` must remain 0.0).
-- **Unmetered Embedding Detection ([D-26]):** Passing `metered_embedder=None` indicates an unmetered run; if any strategy embedder performs unmetered embedding calls during insertion, `insert_node` raises `RuntimeError`.
+- **Single-Embedding Invariant ([D-26], [D-28]):** An insertion of `new_name` requires computing its embedding at most once. Strategies compute and cache `new_name`'s vector in `shortlist()`, and reuse that vector in `on_inserted()`. Embedding `new_name` a second time in `on_inserted()` is strictly prohibited (`embedding_calls_in_update == 0` and `embed_in_update_s == 0.0`).
+- **Embedder Metering & Identity Contract ([D-28], superseding item 1 of [D-26]):** `metered_embedder` is a required, non-Optional keyword-only argument (`MeteredEmbedder`). Passing `None` or a non-`MeteredEmbedder` raises `TypeError`. At the start of `insert_node`, the driver verifies embedder identity: if `strategy._embedder is not None and strategy._embedder is not metered_embedder`, it raises `ValueError` before candidate narrowing or graph mutation, preventing silent undercounting of embedding costs. A strategy without an embedder accepts any valid `MeteredEmbedder`.
+- **Validation Timing Exclusion ([D-28]):** Overhead from driver assertions and contract verification (which scales as $O(|\\text{shortlist}|)$) is isolated in `validate_s` and excluded from `total_s`, guaranteeing that `total_s` strictly reflects operational strategy and decision execution.
 
 ---
 

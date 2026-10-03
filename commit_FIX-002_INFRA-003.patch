@@ -1,0 +1,2293 @@
+diff --git a/docs/context/strategy-interface.md b/docs/context/strategy-interface.md
+index bc2fde4..e599233 100644
+--- a/docs/context/strategy-interface.md
++++ b/docs/context/strategy-interface.md
+@@ -54,17 +54,21 @@ Candidate insertion proceeds in two distinct stages:
+    # Note: Trial isolation requires a fresh strategy instance and a deep copy of the graph (graph.copy()).
+ 
+ 3. Incremental Insertion (TIMED via insert_node):
+-   result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder)
++   result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder=metered_embedder)
+    ├─ Step 1: strategy.shortlist(new_concept)          --> Shortlist(candidates, scores)
++   │          (Driver validates candidates: must be subset of existing nodes, no duplicates, excludes new_concept)
+    ├─ Step 2: decision_step.decide(...)                --> DecisionOutcome(edges, llm_calls, llm_seconds)
+    │          (Empty shortlist skips LLM calls: 0 calls, 0 edges)
+-   ├─ Step 3: driver adds new_concept and edges to ConceptGraph
+-   └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update
++   ├─ Step 3: driver validates edges and mutates ConceptGraph (timed via apply_s):
++   │          (Validates: canonical 2-tuples, no self-loops, no duplicates, other endpoint in shortlist.candidates)
++   │          (Adds new_concept and applies decided edges to ConceptGraph)
++   └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update (timed via update_s)
++              (Reuses cached vector from Step 1; must NOT re-embed new_concept)
+ ```
+ 
+ ---
+ 
+-## 3. Timing & Metrics Accounting Model ([D-25])
++## 3. Timing & Metrics Accounting Model ([D-25], [D-26])
+ 
+ All timing uses `time.perf_counter()`. Measurements are reported inside `InsertionMetrics`:
+ 
+@@ -75,13 +79,18 @@ All timing uses `time.perf_counter()`. Measurements are reported inside `Inserti
+ | `llm_calls` | Number of LLM API requests made | `outcome.llm_calls` (0 if shortlist is empty) |
+ | `embedding_calls` | Number of embedding calls during narrowing | Recorded via `MeteredEmbedder` delta during shortlist |
+ | `embed_s` | Cumulative seconds generating embeddings | From `MeteredEmbedder` during shortlist |
++| `embed_in_update_s` | Cumulative seconds generating embeddings during update | From `MeteredEmbedder` during `on_inserted` (must be 0.0 under single-embedding invariant) |
+ | `shortlist_s` | Wall-clock seconds for candidate narrowing | `t1 - t0` around `strategy.shortlist()` (subsumes `embed_s`) |
+ | `decide_s` | Wall-clock seconds in shared decision step | `t3 - t2` around `decision_step.decide()` (0.0 if empty shortlist) |
+-| `update_s` | Wall-clock seconds updating strategy index | `t5 - t4` around `strategy.on_inserted()` |
+-| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (subsumes all above) |
+-| `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` |
++| `apply_s` | Wall-clock seconds committing to graph | `t5 - t4` around graph mutation and edge application |
++| `update_s` | Wall-clock seconds updating strategy index | `t7 - t6` around `strategy.on_inserted()` |
++| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (`total_s ≈ shortlist_s + decide_s + apply_s + update_s`) |
++| `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` (or `{"diagnostics_error": repr(e)}` on failure) |
+ 
+-*Note on exclusions:* `setup()` is strictly untimed preparation and excluded from `total_s`.
++*Notes:*
++- `setup()` is strictly untimed preparation and excluded from `total_s`.
++- **Single-Embedding Invariant ([D-26]):** An insertion of `new_name` requires computing its embedding at most once. Strategies compute and cache `new_name`'s vector in `shortlist()`, and reuse that vector in `on_inserted()`. Embedding `new_name` a second time in `on_inserted()` is strictly prohibited (`embed_in_update_s` must remain 0.0).
++- **Unmetered Embedding Detection ([D-26]):** Passing `metered_embedder=None` indicates an unmetered run; if any strategy embedder performs unmetered embedding calls during insertion, `insert_node` raises `RuntimeError`.
+ 
+ ---
+ 
+@@ -100,6 +109,7 @@ class StrategySkeleton:
+         self.seed = seed
+         self._embedder: Embedder | None = None
+         self._graph: ConceptGraph | None = None
++        self._cached_new_vec: np.ndarray | None = None
+         # Internal state (e.g. index, matrices, buckets)
+ 
+     def setup(self, graph: ConceptGraph, embedder: Embedder) -> None:
+@@ -109,13 +119,20 @@ class StrategySkeleton:
+ 
+     def shortlist(self, new_name: str) -> Shortlist:
+         # 1. Embed new_name via self._embedder.embed(embed_text(new_name)) if applicable
++        #    and cache the resulting vector to avoid re-embedding in on_inserted.
++        if self._embedder is not None:
++            self._cached_new_vec = self._embedder.embed(embed_text(new_name))
++        
+         # 2. Query internal search structures
+-        # 3. Return candidates tuple (must be subset of graph nodes, no duplicates)
++        # 3. Return candidates tuple (must be subset of graph nodes, no duplicates, no new_name)
+         return Shortlist(candidates=(...))
+ 
+     def on_inserted(self, new_name: str, edges: tuple[tuple[str, str], ...]) -> None:
+         # Incrementally update index/matrix/bucket with new_name and its edges
+-        pass
++        # Reuses self._cached_new_vec; does NOT call self._embedder.embed(new_name) again.
++        new_vec = self._cached_new_vec
++        self._cached_new_vec = None
++        # update internal index structures with (new_name, new_vec, edges)...
+ 
+     def config(self) -> dict[str, Any]:
+         return {"seed": self.seed}
+@@ -131,6 +148,37 @@ class StrategySkeleton:
+ | Strategy | `setup(graph, embedder)` Action | `on_inserted(new_name, edges)` Action | Primary Diagnostics |
+ | :--- | :--- | :--- | :--- |
+ | **S1: Brute-Force** | None (no embeddings, no index). | None (stateless). | `{"candidate_count": n}` |
+-| **S2: Embedding Threshold** | Computes and caches embedding matrix for all $n$ concepts. | Computes embedding for `new_name` and appends row to matrix. | `{"cosine_comparisons": n, "threshold": theta}` |
+-| **S3: ANN Retrieval (FAISS)** | Builds and populates vector index (e.g. `IndexFlatIP` or `IndexHNSWFlat`). | Inserts embedding of `new_name` into the ANN index. | `{"top_k": k, "index_size": n}` |
+-| **S4: Bounded Buckets (EraRAG-style)** | Partitions initial nodes into bounded-size buckets ($\le B$). Computes bucket centroids/summaries. | Adds `new_name` to target bucket; triggers bucket split if size exceeds $B$, or recomputes centroid. | `{"bucket_id": bid, "split_occurred": bool, "bucket_size": s}` |
++| **S2: Embedding Threshold** | Computes and caches embedding matrix for all $n$ concepts. | Appends cached vector from `shortlist()` to matrix row. | `{"cosine_comparisons": n, "threshold": theta}` |
++| **S3: ANN Retrieval (FAISS)** | Builds and populates vector index (e.g. `IndexFlatIP` or `IndexHNSWFlat`). | Inserts cached vector from `shortlist()` into ANN index. | `{"top_k": k, "index_size": n}` |
++| **S4: Bounded Buckets (EraRAG-style)** | Partitions initial nodes into bounded-size buckets ($\le B$). Computes bucket centroids/summaries. | Adds `new_name` with cached vector to target bucket; triggers bucket split if size exceeds $B$, or recomputes centroid. | `{"bucket_id": bid, "split_occurred": bool, "bucket_size": s}` |
++
++---
++
++## 6. Conformance Testing Suite Guide
++
++To ensure consistent behavior across all four strategies (STRAT-001 through STRAT-004), a reusable conformance test base class is provided in `tests/test_strategy_interface.py`: `StrategyConformanceSuite`.
++
++Every strategy test module must subclass `StrategyConformanceSuite` and define a `strategy_factory` fixture returning a factory function `(graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy`:
++
++```python
++import pytest
++from tests.test_strategy_interface import StrategyConformanceSuite
++from graph_insertion.strategies.my_strategy import MyConcreteStrategy
++
++class TestMyConcreteStrategyConformance(StrategyConformanceSuite):
++    @pytest.fixture
++    def strategy_factory(self):
++        def _factory(graph, embedder):
++            strat = MyConcreteStrategy(seed=42)
++            strat.setup(graph, embedder)
++            return strat
++        return _factory
++```
++
++The conformance suite automatically verifies:
++1. **Candidate subset & exclusion:** `shortlist()` returns a subset of existing graph nodes, containing no duplicates, and never containing `new_name`.
++2. **Graph immutability:** `shortlist()` does not mutate node or edge sets in `ConceptGraph`.
++3. **Determinism:** Identical seeds produce identical shortlists and score sequences.
++4. **D-21 text payload compliance:** All texts passed to embedders match `embed_text(c)` for some concept $c$ in the trial (lowercase, no raw underscores, no domain descriptions).
++5. **Cached single-embedding reuse ([D-26]):** An insertion triggers exactly 1 embedding call (`embed_in_update_s == 0.0`), verifying that `on_inserted` reuses the vector computed in `shortlist`.
++6. **Repeated insertions:** Successive calls to `insert_node()` correctly expose newly added nodes as candidates for subsequent insertions.
+diff --git a/docs/decisions/decision-log.md b/docs/decisions/decision-log.md
+index b3d0062..ff1923c 100644
+--- a/docs/decisions/decision-log.md
++++ b/docs/decisions/decision-log.md
+@@ -226,3 +226,15 @@ unacceptable zero-shot accuracy. Evidence:
+ **[D-24]** Strategy interface contract & lifecycle locked: candidate-narrowing strategies implement candidate shortlisting and internal index upkeep (`setup`, `shortlist`, `on_inserted`), read `ConceptGraph` immutably, and never call an LLM. Reasoning: thesis Section 3.2.6 defines the shared LLM decision step as the controlled variable held constant across all strategies; placing the decision step outside strategy modules guarantees identical prompt structure and decision mechanics while isolating the narrowing mechanism under test. Affects: INFRA-002, INFRA-004, INFRA-005, INFRA-006, STRAT-001 through STRAT-004.
+ 
+ **[D-25]** Insertion timing and metrics accounting model locked: timed insertion covers candidate narrowing (including embedding the new concept), the shared decision step, driver graph edge application, and the strategy's incremental update (`on_inserted`). Initial graph indexing (`setup()`) is excluded as pre-trial preparation. Reasoning: matches thesis Section 3.4 measurement definition while isolating incremental insertion cost from batch initialization; breaking down `embed_s`, `shortlist_s`, `decide_s`, `update_s`, and `total_s` via `time.perf_counter()` disentangles retrieval overhead from LLM latency. Affects: INFRA-002, INFRA-004, STRAT-001 through STRAT-004.
++
++**[D-26]** Strategy interface hardening & embedder injection contract: (1) `insert_node` requires keyword-only `metered_embedder: Optional[MeteredEmbedder]`; passing `None` explicitly indicates an unmetered run, and any strategy embedding activity during such runs raises `RuntimeError`; (2) candidate shortlists are validated by the driver before invoking the decision step (candidates must be a subset of current graph nodes, contain no duplicates, and exclude the new concept); (3) decided edges are strictly validated before mutating `ConceptGraph` (edges must be canonical 2-tuples, non-self-loops, no duplicates, involve `new_name`, and have the other endpoint present in `shortlist.candidates`); failure raises `ValueError` and leaves `ConceptGraph` unchanged without notifying the strategy; (4) single-embedding invariant: strategies embedding `new_name` must compute its embedding at most once per insertion (cached in `shortlist()`, reused in `on_inserted()`), verified by `embed_in_update_s == 0.0`; (5) `apply_s` timing explicitly captures graph mutation overhead in `InsertionMetrics`, ensuring `total_s ≈ shortlist_s + decide_s + apply_s + update_s`. Reasoning: guarantees fail-fast trial isolation, protects `ConceptGraph` topology from hallucinated or invalid LLM decision edges, prevents double-embedding performance inflation in STRAT-002..004, and achieves complete timing attribution across all insertion phases. Affects: `insert_node`, `InsertionMetrics`, `StrategyConformanceSuite`, INFRA-002, FIX-002, STRAT-001 through STRAT-004.
++
++**[D-27]** Corpus domain context mapping table locked: graph-level domain context strings ([D-21]) are assigned across the 12 evaluation corpora as follows:
++(1) `DSA_gold_standard_MEKG` -> `"data structures and algorithms"`;
++(2) `metacademy_gold_standard_MEKG` -> `"machine learning and supporting mathematics"`;
++(3) Example files with `DS` tags (`MEKG_with_6_nodes(DS)`, `MEKG_with_8_nodes(DS3)`, `MEKG_with_8_nodes(DS4)`, `MEKG_with_10_nodes(DS1)`, `MEKG_with_10_nodes(DS2)`) -> `"data structures and algorithms"`;
++(4) Example files with `ML` tags (`MEKG_with_18_nodes(ML)`, `MEKG_with_21_nodes(ML)`, `MEKG_with_35_nodes(ML1)`) -> `"machine learning"`;
++(5) `MEKG_with_8_nodes(logic)` -> `"mathematical logic"`;
++(6) `MEKG_with7nodes` -> `None`. Reasoning: files with explicit subject tags inherit standard domain phrases; `MEKG_with7nodes` lacks any filename tag, so rather than guessing between 'machine learning' and 'probability theory', its default is set to `None` (proposing 'machine learning' for thesis evaluation pending Luke's confirmation). Affects: `loader.py`, `CORPUS_DOMAIN_CONTEXT_MAP`, `derive_domain_context()`, INFRA-003, INFRA-004.
++
++
+diff --git a/docs/reports/FIX-002-gemini-infra-002-hardening.md b/docs/reports/FIX-002-gemini-infra-002-hardening.md
+new file mode 100644
+index 0000000..85303dd
+--- /dev/null
++++ b/docs/reports/FIX-002-gemini-infra-002-hardening.md
+@@ -0,0 +1,180 @@
++# FIX-002: Hardening Pass on INFRA-002 Strategy Interface
++
++**Task ID:** FIX-002  
++**Agent:** Gemini  
++**Date:** 2026-10-03  
++**Status:** Complete  
++
++---
++
++## 1. Executive Summary
++
++Task `FIX-002` performed a hardening pass on the candidate-narrowing strategy interface and driver introduced in `INFRA-002`. All six focus areas identified by the APC AI review were verified directly against the repository, addressed with minimal and robust code changes, and validated with an expanded test suite (74 tests passing, up from 62).
++
++Key improvements delivered:
++1. **Pre-mutation edge validation:** Decided edges are validated before modifying `ConceptGraph`. Decided edges must be canonical 2-tuples involving `new_name`, non-self-loops, unique (no duplicates), and have their other endpoint present in `shortlist.candidates`. Violations raise `ValueError` and leave `ConceptGraph` and strategy state strictly untouched.
++2. **Shortlist contract enforcement in driver:** Candidate lists returned from `strategy.shortlist()` are validated to ensure they form a duplicate-free subset of current graph nodes, exclude `new_name`, and align in length with `scores` if provided.
++3. **Embedder accounting and single-embedding invariant ([D-26]):** Made `metered_embedder: Optional[MeteredEmbedder]` a required keyword-only argument in `insert_node()`. If `None`, unmetered embedding activity is detected and rejected with `RuntimeError`. Strategies compute and cache `new_name`'s embedding during `shortlist()`, reusing it during `on_inserted()`. `InsertionMetrics` tracks `embed_in_update_s` (enforcing `0.0`).
++4. **D-21 text payload verification:** Added `record_texts: bool = False` and `texts_log: Optional[list[str]]` to `MeteredEmbedder`, verifying in conformance tests that all embedded strings equal `embed_text(c)` for some concept $c$ in the trial (lowercase, no raw underscores, no domain descriptions).
++5. **Reusable conformance test suite:** Factored base test logic into `StrategyConformanceSuite` with a documented `strategy_factory` fixture pattern so STRAT-001 through STRAT-004 can inherit directly. Strengthened the repeated-insert test to verify that previous inserts become candidates for subsequent inserts.
++6. **Diagnostics error capture and timing precision:** Wrapped strategy diagnostics retrieval in try-except capturing `{"diagnostics_error": repr(e)}`. Added `apply_s` timing to `InsertionMetrics`, ensuring complete timing attribution where `total_s ≈ shortlist_s + decide_s + apply_s + update_s` (slack $< 0.02$s).
++
++---
++
++## 2. Verification of APC AI Claims
++
++| APC Claim | Direct Repo Verification | Result |
++| :--- | :--- | :--- |
++| **1. Edge validation occurs during/after mutation** | Checked `src/graph_insertion/strategy.py`: `insert_node` previously called `graph.add_node(new_name)` and iterated over `outcome.edges` calling `graph.add_prereq_edge(u, v)`. If an edge was invalid or raised an exception mid-iteration, `new_name` and prior edges remained in the graph, and edges outside the shortlist were not checked. | **Confirmed.** Fixed: all edges validated against `shortlist.candidates` before any graph mutation occurs. |
++| **2. Shortlist contract not enforced by driver** | Checked `insert_node`: accepted any `Shortlist` returned from `strategy.shortlist()`, trusting candidate membership, uniqueness, exclusion of `new_name`, and score length alignment. | **Confirmed.** Fixed: driver validates shortlist integrity prior to invoking the decision step. |
++| **3. Embedder accounting does not cover `on_inserted`** | Checked `insert_node`: `metered_embedder` was optional positional, and embedding metrics were only sampled across `strategy.shortlist()`. Any embedding call inside `strategy.on_inserted()` was unmetered. | **Confirmed.** Fixed: `metered_embedder` is keyword-only; embedding delta is tracked across both `shortlist()` and `on_inserted()`, with `embed_in_update_s` explicitly verified to be `0.0`. |
++| **4. [D-21] not enforced in tests** | Checked `MeteredEmbedder`: tracked call counts and durations, but discarded the input text strings, making it impossible to assert D-21 text compliance. | **Confirmed.** Fixed: added `record_texts` and `texts_log` to `MeteredEmbedder` and added `test_d21_text_payload_compliance`. |
++| **5. Conformance suite tightly coupled to fake strategy** | Checked `tests/test_strategy_interface.py`: test methods directly instantiated `TinyFakeStrategy` rather than using an extensible base class. | **Confirmed.** Fixed: created `StrategyConformanceSuite` base class parameterized via `strategy_factory` fixture. |
++| **6. Silent diagnostic failure and missing `apply_s`** | Checked `insert_node`: bare `except Exception: extra = {}` silently swallowed errors; graph mutation time was unmeasured, leaving unaccounted slack in `total_s`. | **Confirmed.** Fixed: records `{"diagnostics_error": repr(e)}` and measures `apply_s`. |
++
++---
++
++## 3. Implementation Details
++
++### A. `src/graph_insertion/embedding.py`
++- Added `record_texts: bool = False` parameter to `MeteredEmbedder.__init__`.
++- Maintained `texts_log: Optional[list[str]]` containing strings passed to `embed()` and `embed_many()`.
++- Resetting `MeteredEmbedder` clears `texts_log` back to `[]`.
++
++### B. `src/graph_insertion/strategy.py`
++- Added `apply_s: float` and `embed_in_update_s: float = 0.0` to `InsertionMetrics`.
++- Updated signature of `insert_node`:
++  ```python
++  def insert_node(
++      strategy: NarrowingStrategy,
++      graph: ConceptGraph,
++      decision_step: DecisionStep,
++      new_name: str,
++      *,
++      metered_embedder: Optional[MeteredEmbedder],
++  ) -> InsertionResult:
++  ```
++- **Shortlist validation:** Ensures `candidates` is a tuple of existing graph nodes, has no duplicates, excludes `new_name`, and matches `scores` length if `scores` is provided.
++- **Edge validation:** Validates `outcome.edges` before mutating `graph`. Enforces canonical 2-tuples `(u, v)`, no self-loops, no duplicate edges, at least one endpoint matching `new_name`, and the other endpoint present in `shortlist.candidates`.
++- **Pre-mutation failure semantics:** If edge or shortlist validation fails, `ConceptGraph` is not touched and `strategy.on_inserted()` is never invoked.
++- **Unmetered detection:** If `metered_embedder=None`, checks if `getattr(strategy, "_embedder", None)` is a `MeteredEmbedder` whose call count increases during insertion; if so, raises `RuntimeError`.
++- **Timing and diagnostics:** Measures `apply_s` around graph mutation and captures `diagnostics_error` on telemetry exception.
++
++### C. `tests/test_strategy_interface.py`
++- Updated `TinyFakeStrategy` to cache `_cached_new_vec` in `shortlist()` and consume it in `on_inserted()`, eliminating re-embedding.
++- Extracted `StrategyConformanceSuite` with 6 standard conformance tests:
++  1. `test_shortlist_is_subset_and_excludes_new_node`
++  2. `test_shortlist_does_not_mutate_graph`
++  3. `test_same_seed_gives_same_shortlist`
++  4. `test_d21_text_payload_compliance`
++  5. `test_cached_embedding_reuse_single_embedding_per_insert`
++  6. `test_repeated_inserts_see_previous_nodes`
++- Added `TestInsertNodeShortlistEnforcement` (4 tests).
++- Added `TestInsertNodeEdgeValidation` (5 tests).
++- Added `TestInsertNodeTimingAndMetrics` (6 tests).
++
++---
++
++## 4. Verification & Test Results
++
++The full test suite was executed:
++```bash
++PYTHONPATH=src pytest
++```
++Output:
++```
++74 passed in 2.64s
++```
++All existing tests from `INFRA-001` and `FIX-001` (40 tests) continue to pass cleanly, and all 34 interface and hardening tests pass.
++
++---
++
++## 5. Diffs of Edited Shared Docs
++
++### A. `docs/context/strategy-interface.md`
++```diff
++@@ -54,17 +54,21 @@
++    # Note: Trial isolation requires a fresh strategy instance and a deep copy of the graph (graph.copy()).
++ 
++ 3. Incremental Insertion (TIMED via insert_node):
++-   result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder)
+++   result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder=metered_embedder)
++    ├─ Step 1: strategy.shortlist(new_concept)          --> Shortlist(candidates, scores)
+++   │          (Driver validates candidates: must be subset of existing nodes, no duplicates, excludes new_concept)
++    ├─ Step 2: decision_step.decide(...)                --> DecisionOutcome(edges, llm_calls, llm_seconds)
++    │          (Empty shortlist skips LLM calls: 0 calls, 0 edges)
++-   ├─ Step 3: driver adds new_concept and edges to ConceptGraph
++-   └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update
++-```
++-
++----
++-
++-## 3. Timing & Metrics Accounting Model ([D-25])
+++   ├─ Step 3: driver validates edges and mutates ConceptGraph (timed via apply_s):
+++   │          (Validates: canonical 2-tuples, no self-loops, no duplicates, other endpoint in shortlist.candidates)
+++   │          (Adds new_concept and applies decided edges to ConceptGraph)
+++   └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update (timed via update_s)
+++              (Reuses cached vector from Step 1; must NOT re-embed new_concept)
+++```
+++
+++---
+++
+++## 3. Timing & Metrics Accounting Model ([D-25], [D-26])
++ 
++ All timing uses `time.perf_counter()`. Measurements are reported inside `InsertionMetrics`:
++ 
++@@ -74,13 +74,18 @@
++ | `llm_calls` | Number of LLM API requests made | `outcome.llm_calls` (0 if shortlist is empty) |
++ | `embedding_calls` | Number of embedding calls during narrowing | Recorded via `MeteredEmbedder` delta during shortlist |
++ | `embed_s` | Cumulative seconds generating embeddings | From `MeteredEmbedder` during shortlist |
+++| `embed_in_update_s` | Cumulative seconds generating embeddings during update | From `MeteredEmbedder` during `on_inserted` (must be 0.0 under single-embedding invariant) |
++ | `shortlist_s` | Wall-clock seconds for candidate narrowing | `t1 - t0` around `strategy.shortlist()` (subsumes `embed_s`) |
++ | `decide_s` | Wall-clock seconds in shared decision step | `t3 - t2` around `decision_step.decide()` (0.0 if empty shortlist) |
++-| `update_s` | Wall-clock seconds updating strategy index | `t5 - t4` around `strategy.on_inserted()` |
++-| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (subsumes all above) |
++-| `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` |
++-
++-*Note on exclusions:* `setup()` is strictly untimed preparation and excluded from `total_s`.
+++| `apply_s` | Wall-clock seconds committing to graph | `t5 - t4` around graph mutation and edge application |
+++| `update_s` | Wall-clock seconds updating strategy index | `t7 - t6` around `strategy.on_inserted()` |
+++| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (`total_s ≈ shortlist_s + decide_s + apply_s + update_s`) |
+++| `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` (or `{"diagnostics_error": repr(e)}` on failure) |
+++
+++*Notes:*
+++- `setup()` is strictly untimed preparation and excluded from `total_s`.
+++- **Single-Embedding Invariant ([D-26]):** An insertion of `new_name` requires computing its embedding at most once. Strategies compute and cache `new_name`'s vector in `shortlist()`, and reuse that vector in `on_inserted()`. Embedding `new_name` a second time in `on_inserted()` is strictly prohibited (`embed_in_update_s` must remain 0.0).
+++- **Unmetered Embedding Detection ([D-26]):** Passing `metered_embedder=None` indicates an unmetered run; if any strategy embedder performs unmetered embedding calls during insertion, `insert_node` raises `RuntimeError`.
++```
++
++### B. `docs/decisions/decision-log.md`
++```diff
++@@ -226,4 +226,7 @@
++ **[D-24]** Strategy interface contract & lifecycle locked: candidate-narrowing strategies implement candidate shortlisting and internal index upkeep (`setup`, `shortlist`, `on_inserted`), read `ConceptGraph` immutably, and never call an LLM. Reasoning: thesis Section 3.2.6 defines the shared LLM decision step as the controlled variable held constant across all strategies; placing the decision step outside strategy modules guarantees identical prompt structure and decision mechanics while isolating the narrowing mechanism under test. Affects: INFRA-002, INFRA-004, INFRA-005, INFRA-006, STRAT-001 through STRAT-004.
++ 
++ **[D-25]** Insertion timing and metrics accounting model locked: timed insertion covers candidate narrowing (including embedding the new concept), the shared decision step, driver graph edge application, and the strategy's incremental update (`on_inserted`). Initial graph indexing (`setup()`) is excluded as pre-trial preparation. Reasoning: matches thesis Section 3.4 measurement definition while isolating incremental insertion cost from batch initialization; breaking down `embed_s`, `shortlist_s`, `decide_s`, `update_s`, and `total_s` via `time.perf_counter()` disentangles retrieval overhead from LLM latency. Affects: INFRA-002, INFRA-004, STRAT-001 through STRAT-004.
+++
+++**[D-26]** Strategy interface hardening & embedder injection contract: (1) `insert_node` requires keyword-only `metered_embedder: Optional[MeteredEmbedder]`; passing `None` explicitly indicates an unmetered run, and any strategy embedding activity during such runs raises `RuntimeError`; (2) candidate shortlists are validated by the driver before invoking the decision step (candidates must be a subset of current graph nodes, contain no duplicates, and exclude the new concept); (3) decided edges are strictly validated before mutating `ConceptGraph` (edges must be canonical 2-tuples, non-self-loops, no duplicates, involve `new_name`, and have the other endpoint present in `shortlist.candidates`); failure raises `ValueError` and leaves `ConceptGraph` unchanged without notifying the strategy; (4) single-embedding invariant: strategies embedding `new_name` must compute its embedding at most once per insertion (cached in `shortlist()`, reused in `on_inserted()`), verified by `embed_in_update_s == 0.0`; (5) `apply_s` timing explicitly captures graph mutation overhead in `InsertionMetrics`, ensuring `total_s ≈ shortlist_s + decide_s + apply_s + update_s`. Reasoning: guarantees fail-fast trial isolation, protects `ConceptGraph` topology from hallucinated or invalid LLM decision edges, prevents double-embedding performance inflation in STRAT-002..004, and achieves complete timing attribution across all insertion phases. Affects: `insert_node`, `InsertionMetrics`, `StrategyConformanceSuite`, INFRA-002, FIX-002, STRAT-001 through STRAT-004.
++```
++
++### C. `docs/tasks/status.md`
++```diff
++@@ -69,4 +69,5 @@
++ | DOC-001 | Sync stale shared docs and thesis text with verified data-file findings from DATA-001 and DATA-002.   | **done** | Completed by Gemini. See report [`docs/reports/DOC-001-gemini-doc-sync.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/DOC-001-gemini-doc-sync.md). |
++ | DOC-002 | Apply D-21 to thesis Chapter 3 (Section 3.2.6: prompts carry names plus a graph-level domain context string; Scope and Limitations: Strategies 2-4 embed bare names, accuracy rests on parametric knowledge). Also fix two stale lines: `complete-context.md` Section 4 still calls source text "an open question", and `data-formats.md` says "7 of the 10" filenames have underscores (it is 9 of 10). Also clarify that the DSA "missing pair" is one missing ordered row (reverse row exists, labeled 0); check catalogue #9's transitive-reduction wording; reconcile thesis 3.2.6 "and, if so, its type" with prerequisite-only evaluation; and note that `MEKG_with_8_nodes(logic).txt` has no overlap with gold, so its orientation was not cross-checked. | **open** | Prompt not yet written; can wait until after INFRA-001. |
++ | FIX-001 | Follow-up fixes to INFRA-001: fix pyproject build-backend, expand cross-source test to Metacademy, add `judgment_for_edge` to `GoldJudgmentSet`, and enforce `.txt` suffix invariant on `ConceptGraph`. | **done** | Completed by Gemini. See report [`docs/reports/FIX-001-gemini-infra-001-followup.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/FIX-001-gemini-infra-001-followup.md). |
+++| FIX-002 | Hardening pass on INFRA-002: edge validation before graph mutation, shortlist contract validation, required keyword-only metered_embedder, single-embedding caching and unmetered detection, texts_log for D-21 enforcement, diagnostics error handling, apply_s timing, reusable StrategyConformanceSuite. | **done** | Completed by Gemini. See report [`docs/reports/FIX-002-gemini-infra-002-hardening.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/FIX-002-gemini-infra-002-hardening.md). |
++```
++
++---
++
++## 6. Found but Not Changed / Attention Flags
++
++1. **Unmetered detection mechanism:**
++   When `metered_embedder=None` is passed to `insert_node()`, the driver inspects `getattr(strategy, "_embedder", None)`. If that embedder is an instance of `MeteredEmbedder`, any call made on it is detected and raises `RuntimeError`. If a custom unmetered embedder (or raw `FakeEmbedder`) is used without metering, Python cannot detect calls without intrusive proxying or monkey-patching. The test suite enforces that in benchmark sweeps, all embedders wrapped in `MeteredEmbedder` obey this injection contract.
++2. **Luke's reserved items preserved:**
++   No decisions were made on:
++   - LLM call granularity (batch prompt vs pairwise prompt).
++   - Decision-step concurrency.
++   - Evaluation scoring of DSA missing rows.
++3. **Commit status:**
++   All changes remain uncommitted in the local working copy.
+diff --git a/docs/reports/INFRA-003-gemini-corpus-loader.md b/docs/reports/INFRA-003-gemini-corpus-loader.md
+new file mode 100644
+index 0000000..9ad8451
+--- /dev/null
++++ b/docs/reports/INFRA-003-gemini-corpus-loader.md
+@@ -0,0 +1,209 @@
++# INFRA-003: Corpus Loader Implementation & Verification
++
++**Task ID:** INFRA-003  
++**Agent:** Gemini  
++**Date:** 2026-10-03  
++**Status:** Complete  
++
++---
++
++## 1. Executive Summary
++
++Task `INFRA-003` implemented the corpus loading infrastructure for the LLM graph-insertion complexity experiments. The loader normalizes all 12 evaluation corpora (`DSA_gold_standard_MEKG.txt`, `metacademy_gold_standard_MEKG.txt`, and the 10 example `MEKG_with*.txt` files) into `ConceptGraph` and `GoldJudgmentSet` representations.
++
++All requirements were met:
++- **API:** Implemented `discover_corpora()` (discovering exactly 12 corpora) and `load_corpus()` in `src/graph_insertion/loader.py`, returning `LoadedCorpus` with `ConceptGraph`, `GoldJudgmentSet`, and comprehensive `CorpusStats`.
++- **Parsing:** Strict 3-field and binary label validation with filename and line numbers on failure; `.txt` suffix stripping via `removesuffix` on example files only; positive self-loop rejection; canonical edge orientation applied exclusively through `oriented_edge(source_kind, col1, col2)` ([D-15], [D-19], [D-23]).
++- **Domain Context:** Established and locked the domain context table ([D-27]). `MEKG_with7nodes.txt` is defaulted to `None` in the absence of a filename tag, with `"machine learning"` proposed for Luke's confirmation.
++- **Pinned Expectations:** All structural properties and counts verified against the raw files and pinned in `tests/test_loader.py`.
++- **Dataset-Missing Support:** Created `tests/conftest.py` with `dataset_root` and retrofitted `test_graph_representation.py` so fresh clones without the gitignored `repositories/` directory skip cleanly.
++- **Read-Only Checks:** Verified domain semantics of `MEKG_with_8_nodes(logic).txt`, confirmed acyclicity (100% DAGs) and computed transitive reductions across all 12 corpora, audited case/punctuation collisions (zero collisions), and benchmarked load times.
++
++---
++
++## 2. API Design & Component Overview
++
++### `CorpusSpec` & `LoadedCorpus`
++```python
++@dataclass(frozen=True)
++class CorpusSpec:
++    name: str
++    path: Path
++    source_kind: SourceKind
++    domain_context: Optional[str] = None
++    delimiter: str = ";"
++    has_txt_suffix: bool = False
++
++@dataclass
++class LoadedCorpus:
++    name: str
++    source_kind: SourceKind
++    graph: ConceptGraph
++    judgments: GoldJudgmentSet
++    domain_context: Optional[str]
++    stats: CorpusStats
++```
++
++`discover_corpora(root=None)` discovers the 12 files in deterministic order:
++1. `DSA_gold_standard_MEKG` (`SourceKind.GOLD`, delimiter `;`, domain `"data structures and algorithms"`)
++2. `metacademy_gold_standard_MEKG` (`SourceKind.GOLD`, delimiter `" "`, domain `"machine learning and supporting mathematics"`)
++3–12. 10 files matching `MEKG_with*.txt` sorted alphabetically (`SourceKind.MEKG_EXAMPLE`, delimiter `;`, `.txt` suffix stripped).
++
++`load_corpus(target, root=None)` accepts a `CorpusSpec`, a `Path`, or a string identifier (supporting exact stem, lowercase alias such as `"dsa"` or `"metacademy"`, or filename).
++
++---
++
++## 3. Pinned Expectations & Structural Verification
++
++All 12 corpora were audited against the raw files on disk. The test suite pins these values:
++
++| Corpus Identifier | Lines | Distinct Nodes | Distinct Pairs | Duplicate Rows | Self-Loops (lbl=0) | Positive Rows | Positive Edges |
++| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
++| **DSA_gold_standard_MEKG** | 841 | 29 | 840 | 1 | 29 | 55 | 54 |
++| **metacademy_gold_standard_MEKG** | 19,740 | 141 | 19,740 | 0 | 0 | 318 | 318 |
++| **MEKG_with7nodes** | 49 | 7 | 49 | 0 | 7 | 16 | 16 |
++| **MEKG_with_6_nodes(DS)** | 36 | 6 | 36 | 0 | 6 | 7 | 7 |
++| **MEKG_with_8_nodes(DS3)** | 64 | 8 | 64 | 0 | 8 | 18 | 18 |
++| **MEKG_with_8_nodes(DS4)** | 64 | 8 | 64 | 0 | 8 | 23 | 23 |
++| **MEKG_with_8_nodes(logic)** | 64 | 8 | 64 | 0 | 8 | 15 | 15 |
++| **MEKG_with_10_nodes(DS1)** | 100 | 10 | 100 | 0 | 10 | 29 | 29 |
++| **MEKG_with_10_nodes(DS2)** | 100 | 10 | 100 | 0 | 10 | 19 | 19 |
++| **MEKG_with_18_nodes(ML)** | 324 | 18 | 324 | 0 | 18 | 76 | 76 |
++| **MEKG_with_21_nodes(ML)** | 441 | 21 | 441 | 0 | 21 | 138 | 138 |
++| **MEKG_with_35_nodes(ML1)** | 1,225 | 35 | 1,225 | 0 | 35 | 244 | 244 |
++
++### Notes on Special Conditions
++1. **DSA Duplicate Row:** Line 251 and 252 contain identical row `binary_search_tree;recursion;1`. `duplicate_rows` increments to 1; `GoldJudgmentSet` records it idempotently; `ConceptGraph` contains 54 distinct positive edges.
++2. **DSA Missing Ordered Row:** `('binary_search_tree', 'asymptotic_complexity')` is omitted from the file. Verified:
++   - `judgment_for_edge('asymptotic_complexity', 'binary_search_tree')` is `None`.
++   - `judgment_for_edge('binary_search_tree', 'asymptotic_complexity')` is `False` (reverse row exists labeled 0).
++3. **Cartesian Product in Examples:** All 10 example files contain exactly $N \times N$ lines and $N$ self-loop rows, all labeled `0`.
++
++---
++
++## 4. Read-Only Checks (Requirement 6)
++
++### 6a. `MEKG_with_8_nodes(logic).txt` Directionality Analysis
++Because `MEKG_with_8_nodes(logic).txt` has 0% node overlap with DSA and Metacademy, its directionality was evaluated using pedagogical logic domain semantics across its 15 positive edges.
++
++Six concrete examples:
++1. `propositional_logic.txt;first_order_logic.txt;1`  
++   **Analysis:** Propositional logic (truth tables, Boolean connectives) is universally introduced prior to first-order predicate logic (quantifiers, variable bindings, signatures). Column 1 is prerequisite, Column 2 is dependent.
++2. `first_order_logic.txt;semantics_of_first_order_logic.txt;1`  
++   **Analysis:** The formal syntax of first-order languages must be defined before defining model-theoretic semantics (structures, interpretations, satisfaction). Column 1 is prerequisite, Column 2 is dependent.
++3. `propositional_logic.txt;propositional_proofs.txt;1`  
++   **Analysis:** The formulas and language of propositional logic are prerequisite to constructing deduction trees or proofs in propositional logic. Column 1 is prerequisite, Column 2 is dependent.
++4. `proofs_in_first_order_logic.txt;Godel's_completeness_theorem.txt;1`  
++   **Analysis:** The formal deduction system ($\vdash$) in FOL must be established before stating or proving Gödel's Completeness Theorem ($\vdash \phi \iff \models \phi$). Column 1 is prerequisite, Column 2 is dependent.
++5. `semantics_of_first_order_logic.txt;Godel's_completeness_theorem.txt;1`  
++   **Analysis:** Model satisfaction ($\models$) must be defined before stating that semantic validity coincides with syntactic derivability. Column 1 is prerequisite, Column 2 is dependent.
++6. `countable_sets.txt;Godel's_completeness_theorem.txt;1`  
++   **Analysis:** Enumerating formulas and adding Henkin witnesses in the completeness proof requires foundational set-theoretic countability. Column 1 is prerequisite, Column 2 is dependent.
++
++**Conclusion:** All 15 edges consistently show Column 1 as the prerequisite and Column 2 as the dependent concept. The orientation matches D-19 natively. Nothing suggests reversal.
++
++### 6b. Acyclicity and Transitive Redundancy
++All 12 corpora were tested for directed acyclicity (`is_acyclic()`) and transitive reduction redundancy (`num_edges - transitive_reduction_edges`):
++
++| Corpus | Nodes ($N$) | Positive Edges ($E$) | Is Acyclic (DAG)? | Redundant Edges | Reduction Ratio |
++| :--- | :---: | :---: | :---: | :---: | :---: |
++| DSA_gold_standard_MEKG | 29 | 54 | **True** | 14 | 25.9% |
++| metacademy_gold_standard_MEKG | 141 | 318 | **True** | 105 | 33.0% |
++| MEKG_with7nodes | 7 | 16 | **True** | 8 | 50.0% |
++| MEKG_with_6_nodes(DS) | 6 | 7 | **True** | 2 | 28.6% |
++| MEKG_with_8_nodes(DS3) | 8 | 18 | **True** | 9 | 50.0% |
++| MEKG_with_8_nodes(DS4) | 8 | 23 | **True** | 13 | 56.5% |
++| MEKG_with_8_nodes(logic) | 8 | 15 | **True** | 6 | 40.0% |
++| MEKG_with_10_nodes(DS1) | 10 | 29 | **True** | 16 | 55.2% |
++| MEKG_with_10_nodes(DS2) | 10 | 19 | **True** | 10 | 52.6% |
++| MEKG_with_18_nodes(ML) | 18 | 76 | **True** | 54 | 71.1% |
++| MEKG_with_21_nodes(ML) | 21 | 138 | **True** | 107 | 77.5% |
++| MEKG_with_35_nodes(ML1) | 35 | 244 | **True** | 195 | 79.9% |
++
++**Observations:**
++- Every single corpus produces a valid DAG without cycles.
++- DSA (14/54) and Metacademy (105/318) match the figures reported in `INFRA-001`.
++- The smaller example files contain high transitive redundancy (up to 79.9% in ML1), consistent with manual or unreduced labeling where intermediate transitive edges were preserved.
++
++### 6c. Case and Punctuation Collision Audit
++All 88 unique concept names across the 10 example files were inspected:
++- Case-folding check: **0 collisions** (no names differ only by upper/lower case).
++- Punctuation/alphanumeric normalization check: **0 collisions** (no names differ only by underscores, hyphens, or apostrophes).
++- Apostrophe names: `Godel's_completeness_theorem` (in logic file) and `stirling's_approximation` (in DSA) remain distinct and well-formed.
++
++### 6d. Load Time Benchmarks (Setup Cost for INFRA-004)
++Measured across 5 repeated runs using `load_corpus()`:
++- `metacademy_gold_standard_MEKG`: **107.0 ms** (dominant, due to 19,740 pairwise rows).
++- `MEKG_with_35_nodes(ML1)`: **6.9 ms**.
++- `MEKG_with_21_nodes(ML)`: **2.9 ms**.
++- `DSA_gold_standard_MEKG`: **2.2 ms**.
++- `MEKG_with_18_nodes(ML)`: **1.8 ms**.
++- `MEKG_with7nodes`: **1.6 ms**.
++- All remaining 6 example files: **< 1.0 ms** each.
++
++Trial initialization in `INFRA-004` can either reuse pre-loaded instances via `ConceptGraph.copy()` (which copies in $<0.1$ ms) or reload directly, as setup overhead is negligible.
++
++---
++
++## 5. Domain Context Decision ([D-27]) & Proposal for 7-Node File
++
++The domain context table was formalized in `[D-27]` in `docs/decisions/decision-log.md`:
++- Files with explicit tags inherit canonical strings (`DS` -> `"data structures and algorithms"`, `ML` -> `"machine learning"`, `logic` -> `"mathematical logic"`).
++- `MEKG_with7nodes.txt` has no tag in its filename. Its concept list is:
++  `['bayes_rule', 'bayesian_networks', 'conditional_independence', 'conditional_probability', 'independent_events', 'probability', 'random_variable']`.
++- **Proposal for Luke:** While these concepts form the probabilistic graphical models subset of Metacademy, setting default to `None` avoids guessing. If Luke confirms a domain string during thesis experiments, `"machine learning"` or `"probability and graphical models"` can be passed explicitly in `CorpusSpec`.
++
++---
++
++## 6. Verification & Test Results
++
++The test suite was run with the new loader tests and retrofitted fixtures:
++```bash
++PYTHONPATH=src pytest
++```
++Output:
++```
++100 passed in 1.88s
++```
++- 40 tests in `test_graph_representation.py` (retrofitted with dataset skip conditions).
++- 34 tests in `test_strategy_interface.py`.
++- 26 tests in `test_loader.py` covering discovery, parsing, pinned stats, missing pair edge semantics, determinism, and error cases.
++
++---
++
++## 7. Diffs of Edited Shared Docs
++
++### A. `docs/decisions/decision-log.md`
++```diff
++@@ -229,4 +229,13 @@
++ 
++ **[D-26]** Strategy interface hardening & embedder injection contract: (1) `insert_node` requires keyword-only `metered_embedder: Optional[MeteredEmbedder]`; passing `None` explicitly indicates an unmetered run, and any strategy embedding activity during such runs raises `RuntimeError`; (2) candidate shortlists are validated by the driver before invoking the decision step (candidates must be a subset of current graph nodes, contain no duplicates, and exclude the new concept); (3) decided edges are strictly validated before mutating `ConceptGraph` (edges must be canonical 2-tuples, non-self-loops, no duplicates, involve `new_name`, and have the other endpoint present in `shortlist.candidates`); failure raises `ValueError` and leaves `ConceptGraph` unchanged without notifying the strategy; (4) single-embedding invariant: strategies embedding `new_name` must compute its embedding at most once per insertion (cached in `shortlist()`, reused in `on_inserted()`), verified by `embed_in_update_s == 0.0`; (5) `apply_s` timing explicitly captures graph mutation overhead in `InsertionMetrics`, ensuring `total_s ≈ shortlist_s + decide_s + apply_s + update_s`. Reasoning: guarantees fail-fast trial isolation, protects `ConceptGraph` topology from hallucinated or invalid LLM decision edges, prevents double-embedding performance inflation in STRAT-002..004, and achieves complete timing attribution across all insertion phases. Affects: `insert_node`, `InsertionMetrics`, `StrategyConformanceSuite`, INFRA-002, FIX-002, STRAT-001 through STRAT-004.
++ 
+++**[D-27]** Corpus domain context mapping table locked: graph-level domain context strings ([D-21]) are assigned across the 12 evaluation corpora as follows:
+++(1) `DSA_gold_standard_MEKG` -> `"data structures and algorithms"`;
+++(2) `metacademy_gold_standard_MEKG` -> `"machine learning and supporting mathematics"`;
+++(3) Example files with `DS` tags (`MEKG_with_6_nodes(DS)`, `MEKG_with_8_nodes(DS3)`, `MEKG_with_8_nodes(DS4)`, `MEKG_with_10_nodes(DS1)`, `MEKG_with_10_nodes(DS2)`) -> `"data structures and algorithms"`;
+++(4) Example files with `ML` tags (`MEKG_with_18_nodes(ML)`, `MEKG_with_21_nodes(ML)`, `MEKG_with_35_nodes(ML1)`) -> `"machine learning"`;
+++(5) `MEKG_with_8_nodes(logic)` -> `"mathematical logic"`;
+++(6) `MEKG_with7nodes` -> `None`. Reasoning: files with explicit subject tags inherit standard domain phrases; `MEKG_with7nodes` lacks any filename tag, so rather than guessing between 'machine learning' and 'probability theory', its default is set to `None` (proposing 'machine learning' for thesis evaluation pending Luke's confirmation). Affects: `loader.py`, `CORPUS_DOMAIN_CONTEXT_MAP`, `derive_domain_context()`, INFRA-003, INFRA-004.
++```
++
++### B. `docs/tasks/status.md`
++```diff
++@@ -31,2 +31,2 @@
++-| INFRA-003 | Build the corpus loader — normalizes DSA, Metacademy, and the ten example MEKG files into the INFRA-001 graph representation.                                                                                                                                                                                                                                                                                                                                 | **open** | Unblocked: INFRA-001 is done. Loader must construct `ConceptGraph` using `oriented_edge(source_kind, col1, col2)` per D-15, D-16, D-19, and D-23. Also populate `GoldJudgmentSet` for accuracy evaluation.                                                                                                              |
++-| INFRA-004 | Build the measurement harness (sweep runner: given a strategy module, run it across all graph-size checkpoints, log time/call-count/accuracy, emit one results row per strategy-size pair).                                                                                                                                                                                                                                                                   | **open** | Depends on INFRA-002. Trial isolation requires a fresh strategy instance plus a deep copy of the graph (`ConceptGraph.copy()`). Can be scaffolded in parallel with INFRA-003 once INFRA-002 is locked, since the harness's shape depends on the interface, not the corpus's internals. |
+++| INFRA-003 | Build the corpus loader — normalizes DSA, Metacademy, and the ten example MEKG files into the INFRA-001 graph representation.                                                                                                                                                                                                                                                                                                                                 | **done** | Completed by Gemini. Discovers 12 corpora, loads into `ConceptGraph` and `GoldJudgmentSet` with strict parsing, canonical orientations via `oriented_edge` ([D-15], [D-19], [D-23]), and graph-level domain context table ([D-27]). All 12 graphs confirmed DAGs. See report [`docs/reports/INFRA-003-gemini-corpus-loader.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/INFRA-003-gemini-corpus-loader.md). |
+++| INFRA-004 | Build the measurement harness (sweep runner: given a strategy module, run it across all graph-size checkpoints, log time/call-count/accuracy, emit one results row per strategy-size pair).                                                                                                                                                                                                                                                                   | **open** | Unblocked: INFRA-002 and INFRA-003 are done. Trial isolation requires a fresh strategy instance plus a deep copy of the graph (`ConceptGraph.copy()`). Corpus setup costs known (<7ms for 11 corpora, ~107ms for Metacademy). |
++```
++
++---
++
++## 8. Found but Not Changed / Attention Flags
++
++1. **`MEKG_with7nodes.txt` domain context proposal:**
++   Currently assigned `None` per [D-27]. Luke should confirm whether to set it to `"machine learning"` or `"probability and graphical models"` before running the sweep in `INFRA-004`.
++2. **Missing DSA pair in accuracy scoring:**
++   The loader correctly marks `('asymptotic_complexity', 'binary_search_tree')` as `None` (missing/unjudged). How this missing row is evaluated during test-suite placement metrics remains reserved for Luke.
++3. **Commit status:**
++   All new files and modifications remain uncommitted in the local working copy.
+diff --git a/docs/tasks/status.md b/docs/tasks/status.md
+index 2f0cae5..1c93501 100644
+--- a/docs/tasks/status.md
++++ b/docs/tasks/status.md
+@@ -28,8 +28,8 @@ plan asked this phase to contain exists somewhere in the repo).
+ | DATA-003  | Decide where build-phase source text comes from now that `concept_descriptions/` is ruled out for DSA/Metacademy (D-17).                                                                                                                                                                                                                                                                                                                                     | **done** | Decided by Luke 2026-10-03: names only, no node text ([D-21]). Evidence in [`docs/reports/DATA-003-gemini-source-text-evidence.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/DATA-003-gemini-source-text-evidence.md). |
+ | INFRA-001 | Lock the graph representation choice (library, in-memory shape) — currently only an unconfirmed lean toward NetworkX.                                                                                                                                                                                                                                                                                                                                         | **done** | Completed. Library locked as NetworkX via `ConceptGraph` wrapper ([D-22]); canonical edge direction locked as prereq -> dependent ([D-23]); dual-mapping implemented and verified without conflict against all 10 MEKG files. See report [`docs/reports/INFRA-001-claude-code-graph-representation.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/INFRA-001-claude-code-graph-representation.md). |
+ | INFRA-002 | Define and document the strategy interface contract (function signature, input/output shapes every one of the four strategy modules must implement).                                                                                                                                                                                                                                                                                                          | **done** | Completed. Strategy contract, lifecycle, Embedder protocol, MeteredEmbedder, FakeEmbedder, and insert_node driver defined ([D-24], [D-25]). Conformance suite passes (62 tests). See spec [`docs/context/strategy-interface.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/context/strategy-interface.md) and report [`docs/reports/INFRA-002-gemini-strategy-interface.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/INFRA-002-gemini-strategy-interface.md). |
+-| INFRA-003 | Build the corpus loader — normalizes DSA, Metacademy, and the ten example MEKG files into the INFRA-001 graph representation.                                                                                                                                                                                                                                                                                                                                 | **open** | Unblocked: INFRA-001 is done. Loader must construct `ConceptGraph` using `oriented_edge(source_kind, col1, col2)` per D-15, D-16, D-19, and D-23. Also populate `GoldJudgmentSet` for accuracy evaluation.                                                                                                              |
+-| INFRA-004 | Build the measurement harness (sweep runner: given a strategy module, run it across all graph-size checkpoints, log time/call-count/accuracy, emit one results row per strategy-size pair).                                                                                                                                                                                                                                                                   | **open** | Depends on INFRA-002. Trial isolation requires a fresh strategy instance plus a deep copy of the graph (`ConceptGraph.copy()`). Can be scaffolded in parallel with INFRA-003 once INFRA-002 is locked, since the harness's shape depends on the interface, not the corpus's internals. |
++| INFRA-003 | Build the corpus loader — normalizes DSA, Metacademy, and the ten example MEKG files into the INFRA-001 graph representation.                                                                                                                                                                                                                                                                                                                                 | **done** | Completed by Gemini. Discovers 12 corpora, loads into `ConceptGraph` and `GoldJudgmentSet` with strict parsing, canonical orientations via `oriented_edge` ([D-15], [D-19], [D-23]), and graph-level domain context table ([D-27]). All 12 graphs confirmed DAGs. See report [`docs/reports/INFRA-003-gemini-corpus-loader.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/INFRA-003-gemini-corpus-loader.md). |
++| INFRA-004 | Build the measurement harness (sweep runner: given a strategy module, run it across all graph-size checkpoints, log time/call-count/accuracy, emit one results row per strategy-size pair).                                                                                                                                                                                                                                                                   | **open** | Unblocked: INFRA-002 and INFRA-003 are done. Trial isolation requires a fresh strategy instance plus a deep copy of the graph (`ConceptGraph.copy()`). Corpus setup costs known (<7ms for 11 corpora, ~107ms for Metacademy). |
+ | INFRA-005 | Build and run the trivial "null strategy" (e.g., attach new node to a random existing node) through the full harness, end-to-end, at all graph sizes.                                                                                                                                                                                                                                                                                                         | **open** | This is Phase 1's EXIT CRITERION — Phase 2 (the four real strategies) should not start until this passes cleanly. Depends on INFRA-001 through INFRA-004, and INFRA-006 (or a stub). |
+ | INFRA-006 | Build the shared decision step (the identical final step all four strategies use) and its metered LLM client: prompt semantics (is A a prerequisite of B, indirect allowed, since the gold graphs are not transitively reduced per INFRA-001), call granularity (reserved for Luke), parsing, call and time metering.                                                                                                                                         | **open** | Depends on INFRA-002. Must precede STRAT-001 to STRAT-004; INFRA-005 can use a stub.                                                                                                                                                                                                                                         |
+ 
+@@ -69,3 +69,4 @@ Status: **not started** (blocked on Phase 3)
+ | DOC-001 | Sync stale shared docs and thesis text with verified data-file findings from DATA-001 and DATA-002.   | **done** | Completed by Gemini. See report [`docs/reports/DOC-001-gemini-doc-sync.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/DOC-001-gemini-doc-sync.md). |
+ | DOC-002 | Apply D-21 to thesis Chapter 3 (Section 3.2.6: prompts carry names plus a graph-level domain context string; Scope and Limitations: Strategies 2-4 embed bare names, accuracy rests on parametric knowledge). Also fix two stale lines: `complete-context.md` Section 4 still calls source text "an open question", and `data-formats.md` says "7 of the 10" filenames have underscores (it is 9 of 10). Also clarify that the DSA "missing pair" is one missing ordered row (reverse row exists, labeled 0); check catalogue #9's transitive-reduction wording; reconcile thesis 3.2.6 "and, if so, its type" with prerequisite-only evaluation; and note that `MEKG_with_8_nodes(logic).txt` has no overlap with gold, so its orientation was not cross-checked. | **open** | Prompt not yet written; can wait until after INFRA-001. |
+ | FIX-001 | Follow-up fixes to INFRA-001: fix pyproject build-backend, expand cross-source test to Metacademy, add `judgment_for_edge` to `GoldJudgmentSet`, and enforce `.txt` suffix invariant on `ConceptGraph`. | **done** | Completed by Gemini. See report [`docs/reports/FIX-001-gemini-infra-001-followup.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/FIX-001-gemini-infra-001-followup.md). |
++| FIX-002 | Hardening pass on INFRA-002: edge validation before graph mutation, shortlist contract validation, required keyword-only metered_embedder, single-embedding caching and unmetered detection, texts_log for D-21 enforcement, diagnostics error handling, apply_s timing, reusable StrategyConformanceSuite. | **done** | Completed by Gemini. See report [`docs/reports/FIX-002-gemini-infra-002-hardening.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/FIX-002-gemini-infra-002-hardening.md). |
+diff --git a/src/graph_insertion/__init__.py b/src/graph_insertion/__init__.py
+index 8a2579d..3fc1f6d 100644
+--- a/src/graph_insertion/__init__.py
++++ b/src/graph_insertion/__init__.py
+@@ -12,6 +12,17 @@ from graph_insertion.graph_representation import (
+     embed_text,
+     oriented_edge,
+ )
++from graph_insertion.loader import (
++    CORPUS_DOMAIN_CONTEXT_MAP,
++    DEFAULT_DATASET_ROOT,
++    TAG_DOMAIN_CONTEXT_MAP,
++    CorpusSpec,
++    CorpusStats,
++    LoadedCorpus,
++    derive_domain_context,
++    discover_corpora,
++    load_corpus,
++)
+ from graph_insertion.strategy import (
+     DecisionOutcome,
+     DecisionStep,
+@@ -41,4 +52,15 @@ __all__ = [
+     "DecisionStep",
+     "NarrowingStrategy",
+     "insert_node",
++    # Loader
++    "CorpusSpec",
++    "CorpusStats",
++    "LoadedCorpus",
++    "discover_corpora",
++    "load_corpus",
++    "derive_domain_context",
++    "DEFAULT_DATASET_ROOT",
++    "CORPUS_DOMAIN_CONTEXT_MAP",
++    "TAG_DOMAIN_CONTEXT_MAP",
+ ]
++
+diff --git a/src/graph_insertion/embedding.py b/src/graph_insertion/embedding.py
+index 44b6768..7a93b33 100644
+--- a/src/graph_insertion/embedding.py
++++ b/src/graph_insertion/embedding.py
+@@ -51,11 +51,13 @@ class MeteredEmbedder:
+         Total wall-clock seconds spent inside the underlying embedder calls.
+     """
+ 
+-    def __init__(self, underlying: Embedder) -> None:
++    def __init__(self, underlying: Embedder, record_texts: bool = False) -> None:
+         self.underlying = underlying
++        self.record_texts = record_texts
+         self.calls: int = 0
+         self.texts_embedded: int = 0
+         self.cumulative_seconds: float = 0.0
++        self.texts_log: Optional[list[str]] = [] if record_texts else None
+ 
+     def embed(self, text: str) -> np.ndarray:
+         t0 = time.perf_counter()
+@@ -64,6 +66,8 @@ class MeteredEmbedder:
+         self.calls += 1
+         self.texts_embedded += 1
+         self.cumulative_seconds += elapsed
++        if self.texts_log is not None:
++            self.texts_log.append(text)
+         return res
+ 
+     def embed_many(self, texts: Sequence[str]) -> np.ndarray:
+@@ -73,6 +77,8 @@ class MeteredEmbedder:
+         self.calls += 1
+         self.texts_embedded += len(texts)
+         self.cumulative_seconds += elapsed
++        if self.texts_log is not None:
++            self.texts_log.extend(texts)
+         return res
+ 
+     def reset(self) -> None:
+@@ -80,6 +86,8 @@ class MeteredEmbedder:
+         self.calls = 0
+         self.texts_embedded = 0
+         self.cumulative_seconds = 0.0
++        if self.texts_log is not None:
++            self.texts_log.clear()
+ 
+ 
+ class FakeEmbedder:
+diff --git a/src/graph_insertion/loader.py b/src/graph_insertion/loader.py
+new file mode 100644
+index 0000000..dc5eaaa
+--- /dev/null
++++ b/src/graph_insertion/loader.py
+@@ -0,0 +1,414 @@
++"""
++loader.py — INFRA-003
++======================
++Corpus loader for the LLM graph-insertion complexity experiments.
++
++Normalizes DSA, Metacademy, and the ten example MEKG files into
++ConceptGraph plus GoldJudgmentSet, applying D-15, D-16, D-19, D-21, D-23,
++and D-27.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++import re
++from typing import Optional, Union
++
++from graph_insertion.graph_representation import (
++    ConceptGraph,
++    GoldJudgmentSet,
++    SourceKind,
++    oriented_edge,
++)
++
++# Default location for the EKG-Dataset within the repository
++DEFAULT_DATASET_ROOT = (
++    Path(__file__).resolve().parents[2] / "repositories" / "dataset" / "EKG-Dataset"
++)
++
++# Domain context mapping table per [D-21] and [D-27]
++CORPUS_DOMAIN_CONTEXT_MAP: dict[str, Optional[str]] = {
++    "DSA_gold_standard_MEKG": "data structures and algorithms",
++    "metacademy_gold_standard_MEKG": "machine learning and supporting mathematics",
++    "MEKG_with_6_nodes(DS)": "data structures and algorithms",
++    "MEKG_with_8_nodes(DS3)": "data structures and algorithms",
++    "MEKG_with_8_nodes(DS4)": "data structures and algorithms",
++    "MEKG_with_10_nodes(DS1)": "data structures and algorithms",
++    "MEKG_with_10_nodes(DS2)": "data structures and algorithms",
++    "MEKG_with_18_nodes(ML)": "machine learning",
++    "MEKG_with_21_nodes(ML)": "machine learning",
++    "MEKG_with_35_nodes(ML1)": "machine learning",
++    "MEKG_with_8_nodes(logic)": "mathematical logic",
++    "MEKG_with7nodes": None,
++}
++
++TAG_DOMAIN_CONTEXT_MAP: dict[str, str] = {
++    "DS": "data structures and algorithms",
++    "ML": "machine learning",
++    "logic": "mathematical logic",
++}
++
++
++def derive_domain_context(filename_or_stem: str) -> Optional[str]:
++    """Derive the domain context from filename tag or lookup table.
++
++    Tags:
++      - DS, DS1..DS4 -> "data structures and algorithms"
++      - ML, ML1 -> "machine learning"
++      - logic -> "mathematical logic"
++    Files without a tag (e.g. MEKG_with7nodes) return None per [D-27].
++    """
++    stem = Path(filename_or_stem).stem
++    if stem in CORPUS_DOMAIN_CONTEXT_MAP:
++        return CORPUS_DOMAIN_CONTEXT_MAP[stem]
++
++    m = re.search(r"\(([^)]+)\)", stem)
++    if m:
++        tag = m.group(1)
++        if tag.startswith("DS"):
++            return TAG_DOMAIN_CONTEXT_MAP["DS"]
++        if tag.startswith("ML"):
++            return TAG_DOMAIN_CONTEXT_MAP["ML"]
++        if tag == "logic":
++            return TAG_DOMAIN_CONTEXT_MAP["logic"]
++    return None
++
++
++@dataclass(frozen=True)
++class CorpusSpec:
++    """Specification of a corpus to load.
++
++    Attributes
++    ----------
++    name:
++        Unique name of the corpus (filename stem, e.g. "DSA_gold_standard_MEKG").
++    path:
++        Path to the text file on disk.
++    source_kind:
++        SourceKind.GOLD or SourceKind.MEKG_EXAMPLE (controls orientation).
++    domain_context:
++        Graph-level domain context string ([D-21]), or None.
++    delimiter:
++        Delimiter string (";" for DSA and MEKG examples, " " for Metacademy).
++    has_txt_suffix:
++        Whether concept names carry a ".txt" suffix that must be stripped.
++    """
++
++    name: str
++    path: Path
++    source_kind: SourceKind
++    domain_context: Optional[str] = None
++    delimiter: str = ";"
++    has_txt_suffix: bool = False
++
++
++@dataclass(frozen=True)
++class CorpusStats:
++    """Statistics collected during corpus loading."""
++
++    line_count: int
++    distinct_nodes: int
++    distinct_pairs: int
++    duplicate_rows: int
++    self_loop_rows: int
++    positive_row_count: int
++    positive_edge_count: int
++
++
++@dataclass
++class LoadedCorpus:
++    """Result of loading a corpus.
++
++    Attributes
++    ----------
++    name:
++        Corpus identifier.
++    source_kind:
++        SourceKind.GOLD or SourceKind.MEKG_EXAMPLE.
++    graph:
++        ConceptGraph containing all nodes and positive edges.
++    judgments:
++        GoldJudgmentSet containing all parsed pairs (0, 1, and self-loops).
++    domain_context:
++        Graph-level domain context string ([D-21]), or None.
++    stats:
++        Detailed counts and structural statistics.
++    """
++
++    name: str
++    source_kind: SourceKind
++    graph: ConceptGraph
++    judgments: GoldJudgmentSet
++    domain_context: Optional[str]
++    stats: CorpusStats
++
++
++def discover_corpora(root: Optional[Union[Path, str]] = None) -> list[CorpusSpec]:
++    """Discover all 12 corpora in the dataset directory.
++
++    Returns exactly 12 CorpusSpec entries in order:
++    1. DSA (SourceKind.GOLD)
++    2. Metacademy (SourceKind.GOLD)
++    3-12. The ten MEKG_with*.txt files sorted by filename (SourceKind.MEKG_EXAMPLE).
++
++    Raises
++    ------
++    FileNotFoundError:
++        If dataset directory does not exist, or required files are missing,
++        or glob('MEKG_with*.txt') does not find exactly 10 files.
++    """
++    dataset_dir = Path(root) if root is not None else DEFAULT_DATASET_ROOT
++    if not dataset_dir.is_dir():
++        raise FileNotFoundError(f"Dataset root directory does not exist: {dataset_dir}")
++
++    dsa_path = dataset_dir / "DSA_gold_standard_MEKG.txt"
++    if not dsa_path.is_file():
++        raise FileNotFoundError(f"Required DSA file missing: {dsa_path}")
++
++    meta_path = dataset_dir / "metacademy_gold_standard_MEKG.txt"
++    if not meta_path.is_file():
++        raise FileNotFoundError(f"Required Metacademy file missing: {meta_path}")
++
++    example_files = sorted(dataset_dir.glob("MEKG_with*.txt"))
++    if len(example_files) != 10:
++        raise FileNotFoundError(
++            f"Expected exactly 10 MEKG example files matching 'MEKG_with*.txt' in {dataset_dir}, "
++            f"found {len(example_files)}"
++        )
++
++    specs: list[CorpusSpec] = []
++
++    # 1. DSA
++    specs.append(
++        CorpusSpec(
++            name=dsa_path.stem,
++            path=dsa_path,
++            source_kind=SourceKind.GOLD,
++            domain_context=CORPUS_DOMAIN_CONTEXT_MAP.get(
++                dsa_path.stem, "data structures and algorithms"
++            ),
++            delimiter=";",
++            has_txt_suffix=False,
++        )
++    )
++
++    # 2. Metacademy
++    specs.append(
++        CorpusSpec(
++            name=meta_path.stem,
++            path=meta_path,
++            source_kind=SourceKind.GOLD,
++            domain_context=CORPUS_DOMAIN_CONTEXT_MAP.get(
++                meta_path.stem, "machine learning and supporting mathematics"
++            ),
++            delimiter=" ",
++            has_txt_suffix=False,
++        )
++    )
++
++    # 3-12. Example MEKG files
++    for p in example_files:
++        domain = derive_domain_context(p.stem)
++        specs.append(
++            CorpusSpec(
++                name=p.stem,
++                path=p,
++                source_kind=SourceKind.MEKG_EXAMPLE,
++                domain_context=domain,
++                delimiter=";",
++                has_txt_suffix=True,
++            )
++        )
++
++    return specs
++
++
++def _spec_from_path(path: Path) -> CorpusSpec:
++    stem = path.stem
++    if "gold_standard" in stem:
++        source_kind = SourceKind.GOLD
++        delimiter = " " if "metacademy" in stem.lower() else ";"
++        has_txt = False
++    elif stem.startswith("MEKG_with"):
++        source_kind = SourceKind.MEKG_EXAMPLE
++        delimiter = ";"
++        has_txt = True
++    else:
++        source_kind = SourceKind.GOLD
++        delimiter = ";"
++        has_txt = False
++
++    domain = derive_domain_context(stem)
++    return CorpusSpec(
++        name=stem,
++        path=path,
++        source_kind=source_kind,
++        domain_context=domain,
++        delimiter=delimiter,
++        has_txt_suffix=has_txt,
++    )
++
++
++def load_corpus(
++    target: Union[CorpusSpec, Path, str],
++    root: Optional[Union[Path, str]] = None,
++) -> LoadedCorpus:
++    """Load a corpus into ConceptGraph and GoldJudgmentSet.
++
++    Parameters
++    ----------
++    target:
++        A CorpusSpec, or a Path to a file, or a corpus name string
++        (e.g., "DSA", "metacademy", "MEKG_with_6_nodes(DS)").
++    root:
++        Optional dataset root directory override if target is a string name.
++
++    Returns
++    -------
++    LoadedCorpus
++        The parsed and validated corpus.
++    """
++    if isinstance(target, str):
++        target_path = Path(target)
++        if target_path.is_file():
++            spec = _spec_from_path(target_path)
++        else:
++            specs = discover_corpora(root)
++            matching = [
++                s
++                for s in specs
++                if s.name == target or s.name.lower() == target.lower()
++            ]
++            if not matching:
++                matching = [s for s in specs if target.lower() in s.name.lower()]
++            if not matching:
++                raise ValueError(
++                    f"Corpus {target!r} not found among discovered corpora"
++                )
++            if len(matching) > 1:
++                exact = [s for s in matching if s.name.lower() == target.lower()]
++                if len(exact) == 1:
++                    spec = exact[0]
++                else:
++                    raise ValueError(
++                        f"Ambiguous corpus name {target!r}, matches: {[s.name for s in matching]}"
++                    )
++            else:
++                spec = matching[0]
++    elif isinstance(target, Path):
++        spec = _spec_from_path(target)
++    elif isinstance(target, CorpusSpec):
++        spec = target
++    else:
++        raise TypeError(
++            f"Expected CorpusSpec, Path, or str, got {type(target).__name__}"
++        )
++
++    return _parse_corpus_file(spec)
++
++
++def _parse_corpus_file(spec: CorpusSpec) -> LoadedCorpus:
++    """Internal parsing function for a CorpusSpec."""
++    if not spec.path.is_file():
++        raise FileNotFoundError(f"Corpus file not found: {spec.path}")
++
++    graph = ConceptGraph(domain_context=spec.domain_context)
++    judgments = GoldJudgmentSet(source_kind=spec.source_kind)
++
++    line_count = 0
++    distinct_pairs: set[tuple[str, str]] = set()
++    duplicate_rows = 0
++    self_loop_rows = 0
++    positive_row_count = 0
++    seen_nodes: set[str] = set()
++
++    with spec.path.open("r", encoding="utf-8") as f:
++        for line_no, line in enumerate(f, 1):
++            stripped = line.strip()
++            if not stripped:
++                continue
++
++            line_count += 1
++            parts = stripped.split(spec.delimiter)
++            if len(parts) != 3:
++                raise ValueError(
++                    f"Parse error in {spec.path.name} at line {line_no}: "
++                    f"expected 3 fields delimited by {spec.delimiter!r}, "
++                    f"got {len(parts)} fields: {line.strip()!r}"
++                )
++
++            col1_raw, col2_raw, label_str = parts
++            if label_str not in ("0", "1"):
++                raise ValueError(
++                    f"Parse error in {spec.path.name} at line {line_no}: "
++                    f"label must be '0' or '1', got {label_str!r}"
++                )
++            label = int(label_str)
++
++            if spec.has_txt_suffix:
++                if not col1_raw.endswith(".txt") or not col2_raw.endswith(".txt"):
++                    raise ValueError(
++                        f"Parse error in {spec.path.name} at line {line_no}: "
++                        f"concept name missing '.txt' suffix: {col1_raw!r}, {col2_raw!r}"
++                    )
++                c1 = col1_raw.removesuffix(".txt")
++                c2 = col2_raw.removesuffix(".txt")
++            else:
++                c1 = col1_raw
++                c2 = col2_raw
++
++            # Add nodes in order of first appearance
++            for c in (c1, c2):
++                if c not in seen_nodes:
++                    seen_nodes.add(c)
++                    graph.add_node(c)
++
++            # Self-loop check
++            if c1 == c2:
++                self_loop_rows += 1
++                if label == 1:
++                    raise ValueError(
++                        f"Data error in {spec.path.name} at line {line_no}: "
++                        f"positive self-loop ({c1} -> {c2} with label 1) is not allowed"
++                    )
++
++            # Record in judgment set & track duplicate rows
++            pair = (c1, c2)
++            if pair in distinct_pairs:
++                duplicate_rows += 1
++            else:
++                distinct_pairs.add(pair)
++
++            try:
++                judgments.record(c1, c2, label)
++            except ValueError as e:
++                raise ValueError(
++                    f"Data error in {spec.path.name} at line {line_no}: "
++                    f"conflicting label for pair ({c1}, {c2}): {e}"
++                ) from e
++
++            # Positive edge application
++            if label == 1:
++                positive_row_count += 1
++                prereq, dependent = oriented_edge(spec.source_kind, c1, c2)
++                graph.add_prereq_edge(prereq, dependent)
++
++    stats = CorpusStats(
++        line_count=line_count,
++        distinct_nodes=len(seen_nodes),
++        distinct_pairs=len(distinct_pairs),
++        duplicate_rows=duplicate_rows,
++        self_loop_rows=self_loop_rows,
++        positive_row_count=positive_row_count,
++        positive_edge_count=graph.num_edges(),
++    )
++
++    return LoadedCorpus(
++        name=spec.name,
++        source_kind=spec.source_kind,
++        graph=graph,
++        judgments=judgments,
++        domain_context=spec.domain_context,
++        stats=stats,
++    )
+diff --git a/src/graph_insertion/strategy.py b/src/graph_insertion/strategy.py
+index f2a40eb..c845390 100644
+--- a/src/graph_insertion/strategy.py
++++ b/src/graph_insertion/strategy.py
+@@ -88,8 +88,10 @@ class InsertionMetrics:
+     embed_s: float
+     shortlist_s: float
+     decide_s: float
++    apply_s: float
+     update_s: float
+     total_s: float
++    embed_in_update_s: float = 0.0
+     extra: dict[str, Any] = field(default_factory=dict)
+ 
+ 
+@@ -170,17 +172,22 @@ def insert_node(
+     graph: ConceptGraph,
+     decision_step: DecisionStep,
+     new_name: str,
+-    metered_embedder: Optional[MeteredEmbedder] = None,
++    *,
++    metered_embedder: Optional[MeteredEmbedder],
+ ) -> InsertionResult:
+     """Execute the canonical end-to-end insertion pipeline for a new concept.
+ 
+     Sequences:
+       1. Precondition checks: validate new_name format and ensure it does not already exist.
+       2. Candidate narrowing: strategy.shortlist(new_name).
+-      3. Shared decision step: decision_step.decide(new_name, shortlist).
+-      4. Graph mutation: add new_name and canonical edges to ConceptGraph.
+-      5. Incremental index update: strategy.on_inserted(new_name, edges).
+-      6. Metrics gathering and return.
++      3. Shortlist contract enforcement: candidates are valid graph nodes, no duplicates,
++         new_name excluded, scores length matches candidates.
++      4. Shared decision step: decision_step.decide(new_name, shortlist).
++      5. Pre-mutation edge validation: canonical, involves new_name, other endpoint
++         in shortlist, no self-loops, no duplicates.
++      6. Graph mutation: add new_name and canonical edges to ConceptGraph (timed via apply_s).
++      7. Incremental index update: strategy.on_inserted(new_name, edges).
++      8. Embedding accounting across whole window & diagnostics collation.
+ 
+     Parameters
+     ----------
+@@ -193,7 +200,8 @@ def insert_node(
+     new_name:
+         The bare concept name string to insert.
+     metered_embedder:
+-        Optional MeteredEmbedder for tracking embedding time and calls during narrowing.
++        Required MeteredEmbedder for tracking embedding time and calls during narrowing
++        and update. May be explicitly None for strategies that do not use embeddings.
+ 
+     Returns
+     -------
+@@ -206,8 +214,14 @@ def insert_node(
+ 
+     n_before = graph.num_nodes()
+ 
+-    embed_calls_before = metered_embedder.calls if metered_embedder else 0
+-    embed_time_before = metered_embedder.cumulative_seconds if metered_embedder else 0.0
++    embed_calls_start = metered_embedder.calls if metered_embedder else 0
++    embed_time_start = metered_embedder.cumulative_seconds if metered_embedder else 0.0
++
++    # For detecting unmetered calls if metered_embedder is None
++    strat_embedder = getattr(strategy, "_embedder", None)
++    strat_embedder_calls_start = (
++        strat_embedder.calls if isinstance(strat_embedder, MeteredEmbedder) else None
++    )
+ 
+     t_total_start = time.perf_counter()
+ 
+@@ -217,14 +231,31 @@ def insert_node(
+     t1 = time.perf_counter()
+     shortlist_s = t1 - t0
+ 
+-    embed_calls_delta = (
+-        (metered_embedder.calls - embed_calls_before) if metered_embedder else 0
+-    )
+-    embed_s = (
+-        (metered_embedder.cumulative_seconds - embed_time_before)
+-        if metered_embedder
+-        else 0.0
+-    )
++    embed_time_mid = metered_embedder.cumulative_seconds if metered_embedder else 0.0
++
++    # Step 1b: Shortlist contract enforcement outside timed regions ([D-24])
++    if not isinstance(shortlist_res.candidates, tuple):
++        raise ValueError(
++            f"Strategy {strategy.name!r} returned invalid shortlist: candidates must be a tuple"
++        )
++    if new_name in shortlist_res.candidates:
++        raise ValueError(
++            f"Strategy {strategy.name!r} returned invalid shortlist: candidate list contains inserted node {new_name!r}"
++        )
++    if len(shortlist_res.candidates) != len(set(shortlist_res.candidates)):
++        raise ValueError(
++            f"Strategy {strategy.name!r} returned invalid shortlist: contains duplicate candidates"
++        )
++    for c in shortlist_res.candidates:
++        if not graph.has_node(c):
++            raise ValueError(
++                f"Strategy {strategy.name!r} returned invalid shortlist: candidate {c!r} is not an existing graph node"
++            )
++    if shortlist_res.scores is not None:
++        if len(shortlist_res.scores) != len(shortlist_res.candidates):
++            raise ValueError(
++                f"Strategy {strategy.name!r} returned invalid shortlist: scores length ({len(shortlist_res.scores)}) does not match candidates length ({len(shortlist_res.candidates)})"
++            )
+ 
+     # Step 2: Shared decision step (empty shortlist skips LLM calls per item 8)
+     if len(shortlist_res.candidates) == 0:
+@@ -238,14 +269,39 @@ def insert_node(
+         t3 = time.perf_counter()
+         decide_s = t3 - t2
+ 
+-    # Step 3: Mutate graph (driver owns graph mutations)
+-    graph.add_node(new_name)
+-    for prereq, dependent in outcome.edges:
++    # Step 2b: Pre-mutation edge validation before touching the graph
++    if not isinstance(outcome.edges, tuple):
++        raise ValueError("Decision step edges must be a tuple")
++    if len(outcome.edges) != len(set(outcome.edges)):
++        raise ValueError(
++            f"Decision step returned duplicate edges: {outcome.edges!r}"
++        )
++    for edge in outcome.edges:
++        if not isinstance(edge, tuple) or len(edge) != 2:
++            raise ValueError(f"Decided edge {edge!r} is not a 2-tuple")
++        prereq, dependent = edge
++        if not isinstance(prereq, str) or not isinstance(dependent, str):
++            raise ValueError(f"Decided edge endpoints must be strings, got {edge!r}")
++        if prereq == dependent:
++            raise ValueError(
++                f"Decided edge is a self-loop: {prereq!r} -> {dependent!r}"
++            )
+         if prereq != new_name and dependent != new_name:
+             raise ValueError(
+                 f"Decided edge ({prereq!r}, {dependent!r}) does not involve inserted node {new_name!r}"
+             )
++        other = dependent if prereq == new_name else prereq
++        if other not in shortlist_res.candidates:
++            raise ValueError(
++                f"Decided edge endpoint {other!r} was not in the shortlisted candidates: {shortlist_res.candidates!r}"
++            )
++
++    # Step 3: Mutate graph (timed via apply_s)
++    t_apply_start = time.perf_counter()
++    graph.add_node(new_name)
++    for prereq, dependent in outcome.edges:
+         graph.add_prereq_edge(prereq, dependent)
++    apply_s = time.perf_counter() - t_apply_start
+ 
+     # Step 4: Incremental update of strategy state
+     t4 = time.perf_counter()
+@@ -255,22 +311,39 @@ def insert_node(
+ 
+     total_s = time.perf_counter() - t_total_start
+ 
++    # Embedding accounting across whole window
++    embed_time_end = metered_embedder.cumulative_seconds if metered_embedder else 0.0
++    embed_in_update_s = embed_time_end - embed_time_mid
++    embed_s = embed_time_end - embed_time_start
++    embed_calls_total = (
++        (metered_embedder.calls - embed_calls_start) if metered_embedder else 0
++    )
++
++    # Detect unmetered embedding calls when metered_embedder was None
++    if metered_embedder is None and strat_embedder_calls_start is not None:
++        if strat_embedder.calls > strat_embedder_calls_start:
++            raise ValueError(
++                f"Strategy {strategy.name!r} performed unmetered embedding calls (metered_embedder=None was passed to insert_node)."
++            )
++
+     # Step 5: Collate metrics
+     try:
+         diag = strategy.diagnostics()
+-    except Exception:
+-        diag = {}
++    except Exception as e:
++        diag = {"diagnostics_error": repr(e)}
+ 
+     metrics = InsertionMetrics(
+         n_before=n_before,
+         shortlist_size=len(shortlist_res.candidates),
+         llm_calls=outcome.llm_calls,
+-        embedding_calls=embed_calls_delta,
++        embedding_calls=embed_calls_total,
+         embed_s=embed_s,
+         shortlist_s=shortlist_s,
+         decide_s=decide_s,
++        apply_s=apply_s,
+         update_s=update_s,
+         total_s=total_s,
++        embed_in_update_s=embed_in_update_s,
+         extra=diag,
+     )
+ 
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..9d92abc
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,34 @@
++"""
++conftest.py — Shared pytest fixtures for LLM graph-insertion complexity tests.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++import pytest
++
++from graph_insertion.loader import DEFAULT_DATASET_ROOT
++
++
++@pytest.fixture
++def dataset_root() -> Path:
++    """Fixture providing the path to EKG-Dataset root directory.
++
++    Skips tests requiring dataset files if the repository was cloned without
++    repositories/ or if dataset files are missing.
++    """
++    if (
++        not DEFAULT_DATASET_ROOT.is_dir()
++        or not (DEFAULT_DATASET_ROOT / "DSA_gold_standard_MEKG.txt").is_file()
++    ):
++        pytest.skip(
++            f"Dataset not found at {DEFAULT_DATASET_ROOT}. "
++            "Clone repository with dataset or ensure repositories/dataset/EKG-Dataset is populated."
++        )
++    return DEFAULT_DATASET_ROOT
++
++
++@pytest.fixture
++def require_dataset(dataset_root: Path) -> Path:
++    """Explicit alias for dataset_root fixture."""
++    return dataset_root
+diff --git a/tests/test_graph_representation.py b/tests/test_graph_representation.py
+index 8603516..a742f57 100644
+--- a/tests/test_graph_representation.py
++++ b/tests/test_graph_representation.py
+@@ -32,6 +32,12 @@ META_FILE = DATA_DIR / "metacademy_gold_standard_MEKG.txt"
+ MEKG_6 = DATA_DIR / "MEKG_with_6_nodes(DS).txt"
+ MEKG_35 = DATA_DIR / "MEKG_with_35_nodes(ML1).txt"
+ 
++dataset_present = DSA_FILE.is_file() and META_FILE.is_file()
++skip_without_dataset = pytest.mark.skipif(
++    not dataset_present,
++    reason="Dataset directory repositories/dataset/EKG-Dataset/ not present",
++)
++
+ 
+ # ---------------------------------------------------------------------------
+ # Helpers to read real rows from files
+@@ -83,6 +89,7 @@ def _mekg_positive_rows(filepath: pathlib.Path, n: int = 5) -> list[tuple[str, s
+ class TestOrientedEdge:
+     """oriented_edge maps file columns to (prereq, dependent)."""
+ 
++    @skip_without_dataset
+     def test_gold_dsa_real_rows(self):
+         """For GOLD source, col2 is the prerequisite of col1 ([D-15]).
+ 
+@@ -98,6 +105,7 @@ class TestOrientedEdge:
+             )
+             assert dependent == col1
+ 
++    @skip_without_dataset
+     def test_gold_metacademy_real_rows(self):
+         """Metacademy shares the same GOLD direction convention as DSA ([D-15])."""
+         rows = _meta_positive_rows(2)
+@@ -107,6 +115,7 @@ class TestOrientedEdge:
+             assert prereq == col2
+             assert dependent == col1
+ 
++    @skip_without_dataset
+     def test_mekg_example_small_real_rows(self):
+         """For MEKG_EXAMPLE source, col1 is the prerequisite of col2 ([D-19]).
+ 
+@@ -122,6 +131,7 @@ class TestOrientedEdge:
+             )
+             assert dependent == col2
+ 
++    @skip_without_dataset
+     def test_mekg_example_large_real_rows(self):
+         """MEKG direction holds for the largest file too ([D-19])."""
+         rows = _mekg_positive_rows(MEKG_35, 2)
+@@ -131,6 +141,7 @@ class TestOrientedEdge:
+             assert prereq == col1
+             assert dependent == col2
+ 
++
+     def test_gold_documented_example_dsa(self):
+         """Check the documented example from data-formats.md: dijkstra_algorithm;graph;1."""
+         # col1=dijkstra_algorithm, col2=graph → col2=graph is prereq of col1
+@@ -161,6 +172,7 @@ class TestOrientedEdge:
+ # Cross-source agreement test  ([D-23] property)
+ # ===========================================================================
+ 
++@skip_without_dataset
+ class TestCrossSourceAgreement:
+     """Every positive edge in example MEKG files that overlaps with gold files must
+     produce the same oriented edge as gold — the property DATA-002 verified."""
+diff --git a/tests/test_loader.py b/tests/test_loader.py
+new file mode 100644
+index 0000000..ff01132
+--- /dev/null
++++ b/tests/test_loader.py
+@@ -0,0 +1,297 @@
++"""
++test_loader.py — INFRA-003 test suite
++======================================
++Tests for corpus loader: API, parsing, pinned stats, domain context,
++error handling, and determinism.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++import pytest
++
++from graph_insertion import (
++    ConceptGraph,
++    CorpusSpec,
++    CorpusStats,
++    GoldJudgmentSet,
++    LoadedCorpus,
++    SourceKind,
++    discover_corpora,
++    load_corpus,
++)
++
++
++# ===========================================================================
++# 1. Corpus Discovery Tests
++# ===========================================================================
++
++class TestCorpusDiscovery:
++    def test_discover_corpora_returns_exactly_12_specs(self, dataset_root):
++        specs = discover_corpora(dataset_root)
++        assert len(specs) == 12
++
++        # Order: DSA, Metacademy, then 10 MEKG files sorted
++        assert specs[0].name == "DSA_gold_standard_MEKG"
++        assert specs[0].source_kind is SourceKind.GOLD
++        assert specs[0].delimiter == ";"
++        assert specs[0].has_txt_suffix is False
++        assert specs[0].domain_context == "data structures and algorithms"
++
++        assert specs[1].name == "metacademy_gold_standard_MEKG"
++        assert specs[1].source_kind is SourceKind.GOLD
++        assert specs[1].delimiter == " "
++        assert specs[1].has_txt_suffix is False
++        assert specs[1].domain_context == "machine learning and supporting mathematics"
++
++        example_specs = specs[2:]
++        assert len(example_specs) == 10
++        # All 10 must be MEKG_EXAMPLE and have .txt suffix
++        for s in example_specs:
++            assert s.source_kind is SourceKind.MEKG_EXAMPLE
++            assert s.delimiter == ";"
++            assert s.has_txt_suffix is True
++            assert s.name.startswith("MEKG_with")
++
++        # Sorted by filename
++        example_names = [s.name for s in example_specs]
++        assert example_names == sorted(example_names)
++
++    def test_discover_nonexistent_root_raises(self, tmp_path):
++        bad_dir = tmp_path / "nonexistent_dir"
++        with pytest.raises(FileNotFoundError, match="does not exist"):
++            discover_corpora(bad_dir)
++
++    def test_discover_missing_dsa_raises(self, tmp_path):
++        d = tmp_path / "missing_dsa"
++        d.mkdir()
++        (d / "metacademy_gold_standard_MEKG.txt").write_text("a b 0\n")
++        with pytest.raises(FileNotFoundError, match="DSA file missing"):
++            discover_corpora(d)
++
++    def test_discover_wrong_mekg_count_raises(self, tmp_path):
++        d = tmp_path / "wrong_count"
++        d.mkdir()
++        (d / "DSA_gold_standard_MEKG.txt").write_text("a;b;0\n")
++        (d / "metacademy_gold_standard_MEKG.txt").write_text("a b 0\n")
++        # create only 2 example files instead of 10
++        (d / "MEKG_with_6_nodes(DS).txt").write_text("a.txt;b.txt;0\n")
++        (d / "MEKG_with_8_nodes(DS3).txt").write_text("a.txt;b.txt;0\n")
++
++        with pytest.raises(FileNotFoundError, match="Expected exactly 10 MEKG example files"):
++            discover_corpora(d)
++
++
++# ===========================================================================
++# 2. Pinned Expectations Tests (Gold Corpora)
++# ===========================================================================
++
++class TestPinnedGoldExpectations:
++    def test_dsa_pinned_stats_and_semantics(self, dataset_root):
++        """DSA: 29 nodes, 841 lines, 840 distinct pairs, 1 duplicate row, 54 positive edges."""
++        loaded = load_corpus("DSA_gold_standard_MEKG", root=dataset_root)
++
++        assert isinstance(loaded, LoadedCorpus)
++        assert loaded.name == "DSA_gold_standard_MEKG"
++        assert loaded.source_kind is SourceKind.GOLD
++        assert loaded.domain_context == "data structures and algorithms"
++
++        s = loaded.stats
++        assert s.line_count == 841
++        assert s.distinct_nodes == 29
++        assert s.distinct_pairs == 840
++        assert s.duplicate_rows == 1
++        assert s.self_loop_rows == 29
++        assert s.positive_row_count == 55
++        assert s.positive_edge_count == 54
++
++        # Graph verification
++        assert loaded.graph.num_nodes() == 29
++        assert loaded.graph.num_edges() == 54
++        assert loaded.graph.is_acyclic() is True
++
++        # Gold judgment set counts
++        assert loaded.judgments.num_labeled_one() == 54
++        assert loaded.judgments.num_labeled_zero() == 840 - 54
++
++        # The missing ordered row is binary_search_tree;asymptotic_complexity
++        # col2=asymptotic_complexity is asserted prereq of col1=binary_search_tree
++        assert (
++            loaded.judgments.judgment_for_edge("asymptotic_complexity", "binary_search_tree")
++            is None
++        )
++        # Reverse row exists in file (labeled 0)
++        assert (
++            loaded.judgments.judgment_for_edge("binary_search_tree", "asymptotic_complexity")
++            is False
++        )
++
++    def test_metacademy_pinned_stats_and_semantics(self, dataset_root):
++        """Metacademy: 141 nodes, 19,740 lines, 318 positive edges, 0 self loops."""
++        loaded = load_corpus("metacademy_gold_standard_MEKG", root=dataset_root)
++
++        assert loaded.name == "metacademy_gold_standard_MEKG"
++        assert loaded.source_kind is SourceKind.GOLD
++        assert loaded.domain_context == "machine learning and supporting mathematics"
++
++        s = loaded.stats
++        assert s.line_count == 19740
++        assert s.distinct_nodes == 141
++        assert s.distinct_pairs == 19740
++        assert s.duplicate_rows == 0
++        assert s.self_loop_rows == 0
++        assert s.positive_row_count == 318
++        assert s.positive_edge_count == 318
++
++        # Graph verification
++        assert loaded.graph.num_nodes() == 141
++        assert loaded.graph.num_edges() == 318
++        assert loaded.graph.is_acyclic() is True
++
++        # Gold judgment set counts
++        assert loaded.judgments.num_labeled_one() == 318
++        assert loaded.judgments.num_labeled_zero() == 19740 - 318
++
++
++# ===========================================================================
++# 3. Pinned Expectations Tests (Example MEKG Corpora)
++# ===========================================================================
++
++class TestPinnedExampleExpectations:
++    # (stem, expected_nodes, expected_pos_edges, expected_domain)
++    EXPECTED_EXAMPLES = [
++        ("MEKG_with7nodes", 7, 16, None),
++        ("MEKG_with_6_nodes(DS)", 6, 7, "data structures and algorithms"),
++        ("MEKG_with_8_nodes(DS3)", 8, 18, "data structures and algorithms"),
++        ("MEKG_with_8_nodes(DS4)", 8, 23, "data structures and algorithms"),
++        ("MEKG_with_8_nodes(logic)", 8, 15, "mathematical logic"),
++        ("MEKG_with_10_nodes(DS1)", 10, 29, "data structures and algorithms"),
++        ("MEKG_with_10_nodes(DS2)", 10, 19, "data structures and algorithms"),
++        ("MEKG_with_18_nodes(ML)", 18, 76, "machine learning"),
++        ("MEKG_with_21_nodes(ML)", 21, 138, "machine learning"),
++        ("MEKG_with_35_nodes(ML1)", 35, 244, "machine learning"),
++    ]
++
++    @pytest.mark.parametrize(
++        "stem, n_nodes, n_pos_edges, domain",
++        EXPECTED_EXAMPLES,
++    )
++    def test_mekg_example_corpus(self, dataset_root, stem, n_nodes, n_pos_edges, domain):
++        loaded = load_corpus(stem, root=dataset_root)
++
++        assert loaded.name == stem
++        assert loaded.source_kind is SourceKind.MEKG_EXAMPLE
++        assert loaded.domain_context == domain
++
++        s = loaded.stats
++        assert s.line_count == n_nodes * n_nodes
++        assert s.distinct_nodes == n_nodes
++        assert s.distinct_pairs == n_nodes * n_nodes
++        assert s.duplicate_rows == 0
++        assert s.self_loop_rows == n_nodes
++        assert s.positive_row_count == n_pos_edges
++        assert s.positive_edge_count == n_pos_edges
++
++        # Graph verification
++        assert loaded.graph.num_nodes() == n_nodes
++        assert loaded.graph.num_edges() == n_pos_edges
++        assert loaded.graph.is_acyclic() is True
++
++        # Node names must not have .txt suffix
++        for node in loaded.graph.nodes():
++            assert not node.endswith(".txt")
++
++
++# ===========================================================================
++# 4. Determinism & API Flexibility Tests
++# ===========================================================================
++
++class TestLoaderDeterminismAndAPI:
++    def test_loading_is_deterministic(self, dataset_root):
++        corpus1 = load_corpus("DSA_gold_standard_MEKG", root=dataset_root)
++        corpus2 = load_corpus("DSA_gold_standard_MEKG", root=dataset_root)
++
++        assert list(corpus1.graph.nodes()) == list(corpus2.graph.nodes())
++        assert set(corpus1.graph.edges()) == set(corpus2.graph.edges())
++        assert corpus1.stats == corpus2.stats
++
++    def test_load_by_convenience_alias(self, dataset_root):
++        dsa = load_corpus("dsa", root=dataset_root)
++        assert dsa.name == "DSA_gold_standard_MEKG"
++
++        meta = load_corpus("metacademy", root=dataset_root)
++        assert meta.name == "metacademy_gold_standard_MEKG"
++
++    def test_load_by_path(self, dataset_root):
++        dsa_path = dataset_root / "DSA_gold_standard_MEKG.txt"
++        loaded = load_corpus(dsa_path)
++        assert loaded.stats.distinct_nodes == 29
++
++    def test_load_by_spec(self, dataset_root):
++        specs = discover_corpora(dataset_root)
++        loaded = load_corpus(specs[0])
++        assert loaded.name == specs[0].name
++
++
++# ===========================================================================
++# 5. Strict Parsing & Error Handling Tests
++# ===========================================================================
++
++class TestLoaderErrorHandling:
++    def test_malformed_line_too_few_fields_raises(self, tmp_path):
++        f = tmp_path / "bad_fields.txt"
++        f.write_text("node1;node2\n")
++        spec = CorpusSpec(
++            name="bad", path=f, source_kind=SourceKind.GOLD, delimiter=";"
++        )
++        with pytest.raises(ValueError, match="line 1.*expected 3 fields"):
++            load_corpus(spec)
++
++    def test_malformed_line_too_many_fields_raises(self, tmp_path):
++        f = tmp_path / "extra_fields.txt"
++        f.write_text("a;b;1\nc;d;1;extra\n")
++        spec = CorpusSpec(
++            name="bad", path=f, source_kind=SourceKind.GOLD, delimiter=";"
++        )
++        with pytest.raises(ValueError, match="line 2.*expected 3 fields"):
++            load_corpus(spec)
++
++    def test_invalid_label_raises(self, tmp_path):
++        f = tmp_path / "bad_label.txt"
++        f.write_text("a;b;2\n")
++        spec = CorpusSpec(
++            name="bad", path=f, source_kind=SourceKind.GOLD, delimiter=";"
++        )
++        with pytest.raises(ValueError, match="line 1.*label must be '0' or '1'"):
++            load_corpus(spec)
++
++    def test_example_missing_txt_suffix_raises(self, tmp_path):
++        f = tmp_path / "MEKG_with_6_nodes(DS).txt"
++        f.write_text("a.txt;b;0\n")
++        spec = CorpusSpec(
++            name="bad_example",
++            path=f,
++            source_kind=SourceKind.MEKG_EXAMPLE,
++            has_txt_suffix=True,
++            delimiter=";",
++        )
++        with pytest.raises(ValueError, match="line 1.*missing '.txt' suffix"):
++            load_corpus(spec)
++
++    def test_positive_self_loop_raises(self, tmp_path):
++        f = tmp_path / "self_loop.txt"
++        f.write_text("a;b;0\nc;c;1\n")
++        spec = CorpusSpec(
++            name="self_loop", path=f, source_kind=SourceKind.GOLD, delimiter=";"
++        )
++        with pytest.raises(ValueError, match="line 2.*positive self-loop"):
++            load_corpus(spec)
++
++    def test_conflicting_duplicate_raises(self, tmp_path):
++        f = tmp_path / "conflicting.txt"
++        f.write_text("a;b;0\na;b;1\n")
++        spec = CorpusSpec(
++            name="conflict", path=f, source_kind=SourceKind.GOLD, delimiter=";"
++        )
++        with pytest.raises(ValueError, match="line 2.*conflicting label"):
++            load_corpus(spec)
+diff --git a/tests/test_strategy_interface.py b/tests/test_strategy_interface.py
+index 95905d9..7299cad 100644
+--- a/tests/test_strategy_interface.py
++++ b/tests/test_strategy_interface.py
+@@ -1,19 +1,20 @@
+ """
+-tests/test_strategy_interface.py — INFRA-002 conformance test suite
+-====================================================================
+-Tests for Embedder implementations, strategy interface contract, and insert_node.
++tests/test_strategy_interface.py — INFRA-002 / FIX-002 test suite
++==================================================================
++Reusable conformance test suite for candidate-narrowing strategies and
++validation tests for the insert_node driver.
+ """
+ 
+ from __future__ import annotations
+ 
+ import time
+-from typing import Any, Optional
++from typing import Any, Callable, Optional
+ 
+ import numpy as np
+ import pytest
+ 
+ from graph_insertion.embedding import Embedder, FakeEmbedder, MeteredEmbedder
+-from graph_insertion.graph_representation import ConceptGraph
++from graph_insertion.graph_representation import ConceptGraph, embed_text
+ from graph_insertion.strategy import (
+     DecisionOutcome,
+     DecisionStep,
+@@ -26,14 +27,18 @@ from graph_insertion.strategy import (
+ 
+ 
+ # ===========================================================================
+-# Test In-Test Mocks / Fakes
++# Reference Mocks / Fakes
+ # ===========================================================================
+ 
+ class TinyFakeStrategy:
+-    """A minimal deterministic narrowing strategy for conformance testing.
++    """A minimal deterministic narrowing strategy for testing.
+ 
+     Shortlists up to `top_k` existing nodes closest to the new node by
+     cosine similarity of fake embeddings.
++
++    Per FIX-002 Item 3(c): caches the embedding of new_name computed during
++    shortlist() and reuses it in on_inserted(), ensuring exactly one embedding
++    of new_name per insertion trial.
+     """
+ 
+     def __init__(self, top_k: int = 2, seed: int = 42) -> None:
+@@ -43,14 +48,18 @@ class TinyFakeStrategy:
+         self._graph: Optional[ConceptGraph] = None
+         self._embedder: Optional[Embedder] = None
+         self._node_embeddings: dict[str, np.ndarray] = {}
++        self._cached_new_name: Optional[str] = None
++        self._cached_new_vec: Optional[np.ndarray] = None
+         self._last_comparisons: int = 0
++        self.on_inserted_called: bool = False
+ 
+     def setup(self, graph: ConceptGraph, embedder: Embedder) -> None:
+         self._graph = graph
+         self._embedder = embedder
+         self._node_embeddings = {}
+         for node in graph.nodes():
+-            self._node_embeddings[node] = embedder.embed(node)
++            # Per [D-21] and FIX-002 Item 4: always pass embed_text(node)
++            self._node_embeddings[node] = embedder.embed(embed_text(node))
+ 
+     def shortlist(self, new_name: str) -> Shortlist:
+         if not self._node_embeddings or self.top_k == 0:
+@@ -58,14 +67,18 @@ class TinyFakeStrategy:
+             return Shortlist(candidates=(), scores=())
+ 
+         assert self._embedder is not None
+-        new_vec = self._embedder.embed(new_name)
++        # Embed and cache per FIX-002 Item 3(c)
++        new_vec = self._embedder.embed(embed_text(new_name))
++        self._cached_new_name = new_name
++        self._cached_new_vec = new_vec
++
+         sims = []
+         for name, vec in self._node_embeddings.items():
+             sim = float(np.dot(new_vec, vec))
+             sims.append((name, sim))
+ 
+         self._last_comparisons = len(sims)
+-        # Sort descending by similarity, then ascending by name for determinism
++        # Sort descending by similarity, then ascending by name
+         sims.sort(key=lambda x: (-x[1], x[0]))
+         selected = sims[: self.top_k]
+         candidates = tuple(name for name, _ in selected)
+@@ -73,8 +86,15 @@ class TinyFakeStrategy:
+         return Shortlist(candidates=candidates, scores=scores)
+ 
+     def on_inserted(self, new_name: str, edges: tuple[tuple[str, str], ...]) -> None:
++        self.on_inserted_called = True
+         assert self._embedder is not None
+-        self._node_embeddings[new_name] = self._embedder.embed(new_name)
++        # Reuse cached vector if available, avoiding duplicate embedding computation
++        if self._cached_new_name == new_name and self._cached_new_vec is not None:
++            self._node_embeddings[new_name] = self._cached_new_vec
++            self._cached_new_name = None
++            self._cached_new_vec = None
++        else:
++            self._node_embeddings[new_name] = self._embedder.embed(embed_text(new_name))
+ 
+     def config(self) -> dict[str, Any]:
+         return {"top_k": self.top_k, "seed": self.seed}
+@@ -86,8 +106,8 @@ class TinyFakeStrategy:
+ class FakeDecisionStep:
+     """Deterministic fake decision step for testing.
+ 
+-    Establishes an edge (candidate -> new_name) for any candidate with
+-    name alphabetically before new_name; otherwise (new_name -> candidate).
++    Establishes an edge (candidate -> new_name) for any candidate alphabetically
++    before new_name; otherwise (new_name -> candidate).
+     """
+ 
+     def __init__(self, make_edge: bool = True) -> None:
+@@ -106,7 +126,6 @@ class FakeDecisionStep:
+         if self.make_edge:
+             for cand in candidates:
+                 if cand < new_name:
+-                    # cand is prereq of new_name (canonical prereq -> dependent)
+                     edges.append((cand, new_name))
+                 else:
+                     edges.append((new_name, cand))
+@@ -145,34 +164,42 @@ class TestEmbedder:
+         for i, text in enumerate(texts):
+             assert np.array_equal(mat[i], emb.embed(text))
+ 
+-    def test_metered_embedder_accounting(self):
++    def test_metered_embedder_accounting_and_texts_log(self):
+         raw = FakeEmbedder(dim=16)
+-        meter = MeteredEmbedder(raw)
++        meter = MeteredEmbedder(raw, record_texts=True)
+         assert meter.calls == 0
+         assert meter.texts_embedded == 0
+         assert meter.cumulative_seconds == 0.0
++        assert meter.texts_log == []
+ 
+-        meter.embed("a")
++        meter.embed("hash table")
+         assert meter.calls == 1
+         assert meter.texts_embedded == 1
+         assert meter.cumulative_seconds > 0.0
++        assert meter.texts_log == ["hash table"]
+ 
+-        meter.embed_many(["b", "c", "d"])
++        meter.embed_many(["binary tree", "queue"])
+         assert meter.calls == 2
+-        assert meter.texts_embedded == 4
++        assert meter.texts_embedded == 3
++        assert meter.texts_log == ["hash table", "binary tree", "queue"]
+ 
+         meter.reset()
+         assert meter.calls == 0
+         assert meter.texts_embedded == 0
+         assert meter.cumulative_seconds == 0.0
++        assert meter.texts_log == []
+ 
+ 
+ # ===========================================================================
+-# 2. Conformance Tests for Strategy & insert_node
++# 2. Reusable Strategy Conformance Suite (STRAT-001..004 can inherit)
+ # ===========================================================================
+ 
+-class TestStrategyConformance:
+-    """Reusable conformance test suite for candidate-narrowing strategies."""
++class StrategyConformanceSuite:
++    """Base conformance suite to be inherited by concrete strategy test classes.
++
++    Subclasses must implement the `strategy_factory` fixture returning a
++    callable: (graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy.
++    """
+ 
+     @pytest.fixture
+     def initial_graph(self) -> ConceptGraph:
+@@ -184,25 +211,25 @@ class TestStrategyConformance:
+         g.add_prereq_edge("pointer", "linked_list")
+         return g
+ 
+-    def test_shortlist_is_subset_and_excludes_new_node(self, initial_graph):
++    def test_shortlist_is_subset_and_excludes_new_node(
++        self, initial_graph, strategy_factory
++    ):
+         embedder = FakeEmbedder(dim=16, seed=42)
+-        strat = TinyFakeStrategy(top_k=2, seed=42)
+-        strat.setup(initial_graph, embedder)
++        strat = strategy_factory(initial_graph, embedder)
+ 
+         res = strat.shortlist("dijkstra_algorithm")
+         existing_nodes = set(initial_graph.nodes())
+ 
+-        assert len(res.candidates) <= 2
+         for cand in res.candidates:
+             assert cand in existing_nodes
+             assert cand != "dijkstra_algorithm"
+-        # No duplicates
+         assert len(res.candidates) == len(set(res.candidates))
+ 
+-    def test_shortlist_does_not_mutate_graph(self, initial_graph):
++    def test_shortlist_does_not_mutate_graph(
++        self, initial_graph, strategy_factory
++    ):
+         embedder = FakeEmbedder(dim=16, seed=42)
+-        strat = TinyFakeStrategy(top_k=2, seed=42)
+-        strat.setup(initial_graph, embedder)
++        strat = strategy_factory(initial_graph, embedder)
+ 
+         n_before = initial_graph.num_nodes()
+         e_before = initial_graph.num_edges()
+@@ -213,23 +240,14 @@ class TestStrategyConformance:
+         assert initial_graph.num_edges() == e_before
+         assert not initial_graph.has_node("dijkstra_algorithm")
+ 
+-    def test_new_name_already_in_graph_raises(self, initial_graph):
+-        embedder = FakeEmbedder(dim=16, seed=42)
+-        strat = TinyFakeStrategy(top_k=2, seed=42)
+-        strat.setup(initial_graph, embedder)
+-        decision_step = FakeDecisionStep()
+-
+-        with pytest.raises(ValueError, match="already exists"):
+-            insert_node(strat, initial_graph, decision_step, "pointer")
+-
+-    def test_same_seed_gives_same_shortlist(self, initial_graph):
++    def test_same_seed_gives_same_shortlist(
++        self, initial_graph, strategy_factory
++    ):
+         embedder1 = FakeEmbedder(dim=16, seed=99)
+-        strat1 = TinyFakeStrategy(top_k=3, seed=99)
+-        strat1.setup(initial_graph, embedder1)
++        strat1 = strategy_factory(initial_graph, embedder1)
+ 
+         embedder2 = FakeEmbedder(dim=16, seed=99)
+-        strat2 = TinyFakeStrategy(top_k=3, seed=99)
+-        strat2.setup(initial_graph, embedder2)
++        strat2 = strategy_factory(initial_graph, embedder2)
+ 
+         sl1 = strat1.shortlist("hash_table")
+         sl2 = strat2.shortlist("hash_table")
+@@ -237,83 +255,318 @@ class TestStrategyConformance:
+         assert sl1.candidates == sl2.candidates
+         assert sl1.scores == sl2.scores
+ 
+-    def test_repeated_inserts_see_previous_nodes(self, initial_graph):
++    def test_d21_text_payload_compliance(
++        self, initial_graph, strategy_factory
++    ):
++        """Enforce D-21: all texts passed to the embedder must equal embed_text(n)."""
++        raw_embedder = FakeEmbedder(dim=16, seed=42)
++        meter = MeteredEmbedder(raw_embedder, record_texts=True)
++        strat = strategy_factory(initial_graph, meter)
++
++        # Clear setup texts to focus on insertion trial
++        meter.reset()
++        decision_step = FakeDecisionStep(make_edge=True)
++        insert_node(
++            strat, initial_graph, decision_step, "binary_search_tree", metered_embedder=meter
++        )
++
++        assert meter.texts_log is not None
++        assert len(meter.texts_log) > 0
++        all_concepts = set(initial_graph.nodes())
++        for text in meter.texts_log:
++            assert "_" not in text
++            # Must equal embed_text(c) for some concept in the trial
++            assert any(embed_text(c) == text for c in all_concepts)
++
++    def test_cached_embedding_reuse_single_embedding_per_insert(
++        self, initial_graph, strategy_factory
++    ):
++        """Verify that narrowing + update embeds new_name exactly once."""
++        raw_embedder = FakeEmbedder(dim=16, seed=42)
++        meter = MeteredEmbedder(raw_embedder, record_texts=True)
++        strat = strategy_factory(initial_graph, meter)
++        meter.reset()
++
++        decision_step = FakeDecisionStep(make_edge=True)
++        res = insert_node(
++            strat, initial_graph, decision_step, "hash_table", metered_embedder=meter
++        )
++
++        # In strategies that embed, new_name must be embedded only 1 time
++        assert res.metrics.embedding_calls <= 1
++        assert res.metrics.embed_in_update_s == 0.0
++
++    def test_repeated_inserts_see_previous_nodes(
++        self, initial_graph, strategy_factory
++    ):
++        """Strengthened test: second shortlist can contain the first inserted node."""
+         embedder = FakeEmbedder(dim=16, seed=42)
+         meter = MeteredEmbedder(embedder)
+-        strat = TinyFakeStrategy(top_k=3, seed=42)
+-        strat.setup(initial_graph, meter)
++        strat = strategy_factory(initial_graph, meter)
+         decision_step = FakeDecisionStep(make_edge=True)
+ 
+-        res1 = insert_node(strat, initial_graph, decision_step, "hash_table", meter)
++        res1 = insert_node(
++            strat, initial_graph, decision_step, "hash_table", metered_embedder=meter
++        )
+         assert initial_graph.has_node("hash_table")
+-        assert initial_graph.num_nodes() == 5
+ 
+-        # Second insert should be able to shortlist the newly added node
+-        res2 = insert_node(strat, initial_graph, decision_step, "heap", meter)
++        # Second insert: top_k includes hash_table if top_k is large enough
++        res2 = insert_node(
++            strat, initial_graph, decision_step, "heap", metered_embedder=meter
++        )
+         assert initial_graph.has_node("heap")
+-        assert initial_graph.num_nodes() == 6
+         assert res2.metrics.n_before == 5
++        # The candidates evaluated for heap must come from the updated graph containing hash_table
++        for c in res2.shortlist.candidates:
++            assert initial_graph.has_node(c)
+ 
+-    def test_edges_involve_new_node_and_are_canonical(self, initial_graph):
+-        embedder = FakeEmbedder(dim=16, seed=42)
+-        strat = TinyFakeStrategy(top_k=2, seed=42)
+-        strat.setup(initial_graph, embedder)
+-        decision_step = FakeDecisionStep(make_edge=True)
+ 
+-        new_concept = "dijkstra_algorithm"
+-        res = insert_node(strat, initial_graph, decision_step, new_concept)
++class TestTinyFakeStrategyConformance(StrategyConformanceSuite):
++    """Instantiate the reusable conformance suite on the reference TinyFakeStrategy."""
+ 
+-        for prereq, dependent in res.edges:
+-            assert new_concept in (prereq, dependent)
+-            assert initial_graph.has_prereq_edge(prereq, dependent)
++    @pytest.fixture
++    def strategy_factory(self) -> Callable[[ConceptGraph, Embedder], NarrowingStrategy]:
++        def _factory(graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy:
++            strat = TinyFakeStrategy(top_k=4, seed=42)
++            strat.setup(graph, embedder)
++            return strat
+ 
+-    def test_edge_not_involving_new_node_raises(self, initial_graph):
+-        embedder = FakeEmbedder(dim=16, seed=42)
+-        strat = TinyFakeStrategy(top_k=2, seed=42)
+-        strat.setup(initial_graph, embedder)
++        return _factory
+ 
+-        class IllegalEdgeDecisionStep:
++
++# ===========================================================================
++# 3. Shortlist Contract Enforcement Tests (FIX-002 Item 2)
++# ===========================================================================
++
++class TestInsertNodeShortlistEnforcement:
++    @pytest.fixture
++    def initial_graph(self) -> ConceptGraph:
++        g = ConceptGraph(domain_context="testing")
++        g.add_node("alpha")
++        g.add_node("beta")
++        return g
++
++    def test_candidate_not_in_graph_raises(self, initial_graph):
++        class BadCandidateStrategy:
++            name = "bad_cand_strat"
++            def setup(self, g, e): pass
++            def shortlist(self, new_name): return Shortlist(candidates=("alpha", "nonexistent_node"))
++            def on_inserted(self, n, e): pass
++            def config(self): return {}
++            def diagnostics(self): return {}
++
++        strat = BadCandidateStrategy()
++        with pytest.raises(ValueError, match="not an existing graph node"):
++            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
++
++    def test_duplicate_candidates_raises(self, initial_graph):
++        class DuplicateCandidateStrategy:
++            name = "dup_strat"
++            def setup(self, g, e): pass
++            def shortlist(self, new_name): return Shortlist(candidates=("alpha", "alpha"))
++            def on_inserted(self, n, e): pass
++            def config(self): return {}
++            def diagnostics(self): return {}
++
++        strat = DuplicateCandidateStrategy()
++        with pytest.raises(ValueError, match="duplicate candidates"):
++            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
++
++    def test_shortlist_contains_new_name_raises(self, initial_graph):
++        class SelfCandidateStrategy:
++            name = "self_strat"
++            def setup(self, g, e): pass
++            def shortlist(self, new_name): return Shortlist(candidates=("alpha", new_name))
++            def on_inserted(self, n, e): pass
++            def config(self): return {}
++            def diagnostics(self): return {}
++
++        strat = SelfCandidateStrategy()
++        with pytest.raises(ValueError, match="contains inserted node"):
++            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
++
++    def test_scores_length_mismatch_raises(self, initial_graph):
++        class ScoreMismatchStrategy:
++            name = "mismatch_strat"
++            def setup(self, g, e): pass
++            def shortlist(self, new_name): return Shortlist(candidates=("alpha", "beta"), scores=(0.9,))
++            def on_inserted(self, n, e): pass
++            def config(self): return {}
++            def diagnostics(self): return {}
++
++        strat = ScoreMismatchStrategy()
++        with pytest.raises(ValueError, match="scores length"):
++            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
++
++
++# ===========================================================================
++# 4. Pre-Mutation Edge Validation Tests (FIX-002 Item 1)
++# ===========================================================================
++
++class TestInsertNodeEdgeValidation:
++    @pytest.fixture
++    def initial_graph(self) -> ConceptGraph:
++        g = ConceptGraph(domain_context="testing")
++        g.add_node("alpha")
++        g.add_node("beta")
++        g.add_node("gamma")
++        return g
++
++    def test_endpoint_not_in_shortlist_raises(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=1, seed=42)
++        strat.setup(initial_graph, FakeEmbedder())
++
++        class SneakyDecisionStep:
+             def decide(self, new_name, candidates, domain_context=None):
+-                # Returns an edge between two existing nodes, not involving new_name
+-                return DecisionOutcome(edges=(("pointer", "graph"),), llm_calls=1, llm_seconds=0.01)
++                # Returns an edge to gamma, which exists in graph but was NOT in candidates
++                assert "gamma" not in candidates
++                return DecisionOutcome(edges=(("gamma", new_name),), llm_calls=1, llm_seconds=0.01)
+ 
+-        with pytest.raises(ValueError, match="does not involve inserted node"):
+-            insert_node(strat, initial_graph, IllegalEdgeDecisionStep(), "dijkstra_algorithm")
++        with pytest.raises(ValueError, match="not in the shortlisted candidates"):
++            insert_node(strat, initial_graph, SneakyDecisionStep(), "delta", metered_embedder=None)
+ 
+-    def test_empty_shortlist_legal_and_skips_decision_calls(self, initial_graph):
+-        embedder = FakeEmbedder(dim=16, seed=42)
+-        strat = TinyFakeStrategy(top_k=0, seed=42)  # top_k=0 produces empty shortlist
+-        strat.setup(initial_graph, embedder)
+-        decision_step = FakeDecisionStep()
++    def test_endpoint_not_in_graph_raises_and_no_nodes_added(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=2, seed=42)
++        strat.setup(initial_graph, FakeEmbedder())
+ 
+-        res = insert_node(strat, initial_graph, decision_step, "hash_table")
++        class NonExistentNodeDecisionStep:
++            def decide(self, new_name, candidates, domain_context=None):
++                return DecisionOutcome(edges=(("unknown_concept", new_name),), llm_calls=1, llm_seconds=0.01)
+ 
++        with pytest.raises(ValueError, match="not in the shortlisted candidates"):
++            insert_node(strat, initial_graph, NonExistentNodeDecisionStep(), "delta", metered_embedder=None)
++
++        assert not initial_graph.has_node("unknown_concept")
++        assert not initial_graph.has_node("delta")
++        assert initial_graph.num_nodes() == 3
++
++    def test_duplicate_decided_edges_raise(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=2, seed=42)
++        strat.setup(initial_graph, FakeEmbedder())
++
++        class DuplicateEdgeDecisionStep:
++            def decide(self, new_name, candidates, domain_context=None):
++                c = candidates[0]
++                return DecisionOutcome(edges=((c, new_name), (c, new_name)), llm_calls=1, llm_seconds=0.01)
++
++        with pytest.raises(ValueError, match="duplicate edges"):
++            insert_node(strat, initial_graph, DuplicateEdgeDecisionStep(), "delta", metered_embedder=None)
++
++    def test_self_loop_edge_raises(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=2, seed=42)
++        strat.setup(initial_graph, FakeEmbedder())
++
++        class SelfLoopDecisionStep:
++            def decide(self, new_name, candidates, domain_context=None):
++                return DecisionOutcome(edges=((new_name, new_name),), llm_calls=1, llm_seconds=0.01)
++
++        with pytest.raises(ValueError, match="self-loop"):
++            insert_node(strat, initial_graph, SelfLoopDecisionStep(), "delta", metered_embedder=None)
++
++    def test_graph_unchanged_and_strategy_not_notified_after_failure(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=2, seed=42)
++        strat.setup(initial_graph, FakeEmbedder())
++
++        n_before = initial_graph.num_nodes()
++        e_before = initial_graph.num_edges()
++
++        class FaultyDecisionStep:
++            def decide(self, new_name, candidates, domain_context=None):
++                return DecisionOutcome(edges=(("non_candidate", new_name),), llm_calls=1, llm_seconds=0.01)
++
++        with pytest.raises(ValueError):
++            insert_node(strat, initial_graph, FaultyDecisionStep(), "delta", metered_embedder=None)
++
++        # Graph is completely untouched
++        assert initial_graph.num_nodes() == n_before
++        assert initial_graph.num_edges() == e_before
++        assert not initial_graph.has_node("delta")
++        # Strategy on_inserted was NOT called
++        assert not strat.on_inserted_called
++
++
++# ===========================================================================
++# 5. Timing, Accounting & Driver Feature Tests
++# ===========================================================================
++
++class TestInsertNodeTimingAndMetrics:
++    @pytest.fixture
++    def initial_graph(self) -> ConceptGraph:
++        g = ConceptGraph(domain_context="testing")
++        g.add_node("alpha")
++        g.add_node("beta")
++        return g
++
++    def test_metered_embedder_required_keyword_argument(self, initial_graph):
++        strat = TinyFakeStrategy()
++        strat.setup(initial_graph, FakeEmbedder())
++        ds = FakeDecisionStep()
++        # Missing keyword-only metered_embedder must raise TypeError
++        with pytest.raises(TypeError):
++            insert_node(strat, initial_graph, ds, "gamma")  # type: ignore[call-arg]
++
++    def test_explicit_none_metered_embedder_allowed(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=0)
++        strat.setup(initial_graph, FakeEmbedder())
++        ds = FakeDecisionStep()
++        res = insert_node(strat, initial_graph, ds, "gamma", metered_embedder=None)
++        assert res.metrics.embedding_calls == 0
++        assert res.metrics.embed_s == 0.0
++
++    def test_unmetered_embedding_detected_and_raises(self, initial_graph):
++        raw_embedder = FakeEmbedder()
++        meter = MeteredEmbedder(raw_embedder)
++        strat = TinyFakeStrategy(top_k=1)
++        strat.setup(initial_graph, meter)
++        ds = FakeDecisionStep()
++
++        # Strategy has a MeteredEmbedder in _embedder, but caller passed metered_embedder=None
++        with pytest.raises(ValueError, match="unmetered embedding calls"):
++            insert_node(strat, initial_graph, ds, "gamma", metered_embedder=None)
++
++    def test_timing_components_consistency_with_apply_s(self, initial_graph):
++        raw = FakeEmbedder()
++        meter = MeteredEmbedder(raw)
++        strat = TinyFakeStrategy(top_k=2)
++        strat.setup(initial_graph, meter)
++        meter.reset()
++
++        ds = FakeDecisionStep(make_edge=True)
++        res = insert_node(strat, initial_graph, ds, "gamma", metered_embedder=meter)
++
++        m = res.metrics
++        assert m.shortlist_s >= m.embed_s
++        assert m.apply_s >= 0.0
++        assert m.update_s >= 0.0
++        assert m.decide_s >= 0.0
++        sum_components = m.shortlist_s + m.decide_s + m.apply_s + m.update_s
++        # Total wall clock must account for all components
++        assert m.total_s >= sum_components * 0.95
++        # Total wall clock should be very close to sum of components (within 10ms driver overhead)
++        assert m.total_s - sum_components < 0.02
++
++    def test_diagnostics_error_recorded(self, initial_graph):
++        class ExplodingDiagnosticsStrategy:
++            name = "exploding"
++            def setup(self, g, e): pass
++            def shortlist(self, n): return Shortlist(candidates=())
++            def on_inserted(self, n, e): pass
++            def config(self): return {}
++            def diagnostics(self): raise RuntimeError("telemetry crashed")
++
++        strat = ExplodingDiagnosticsStrategy()
++        res = insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
++        assert "diagnostics_error" in res.metrics.extra
++        assert "telemetry crashed" in res.metrics.extra["diagnostics_error"]
++
++    def test_empty_shortlist_skips_decide_and_llm(self, initial_graph):
++        strat = TinyFakeStrategy(top_k=0)
++        strat.setup(initial_graph, FakeEmbedder())
++        ds = FakeDecisionStep()
++
++        res = insert_node(strat, initial_graph, ds, "gamma", metered_embedder=None)
+         assert len(res.shortlist.candidates) == 0
+         assert len(res.edges) == 0
+         assert res.metrics.llm_calls == 0
+         assert res.metrics.decide_s == 0.0
+-        assert decision_step.calls == 0
+-        assert initial_graph.has_node("hash_table")
+-
+-    def test_timing_and_metrics_consistency(self, initial_graph):
+-        embedder = FakeEmbedder(dim=16, seed=42)
+-        meter = MeteredEmbedder(embedder)
+-        strat = TinyFakeStrategy(top_k=2, seed=42)
+-        strat.setup(initial_graph, meter)
+-        meter.reset()  # setup is untimed per [D-25]
+-
+-        decision_step = FakeDecisionStep(make_edge=True)
+-        res = insert_node(strat, initial_graph, decision_step, "bloom_filter", meter)
+-
+-        m = res.metrics
+-        assert m.n_before == 4
+-        assert m.shortlist_size == 2
+-        assert m.embedding_calls > 0
+-        assert m.embed_s >= 0.0
+-        assert m.shortlist_s >= m.embed_s
+-        assert m.decide_s >= 0.0
+-        assert m.update_s >= 0.0
+-        # Total wall clock must be at least the sum of components
+-        assert m.total_s >= (m.shortlist_s + m.decide_s + m.update_s) * 0.95
+-        assert "comparisons" in m.extra
+-        assert m.extra["comparisons"] == 4
++        assert ds.calls == 0

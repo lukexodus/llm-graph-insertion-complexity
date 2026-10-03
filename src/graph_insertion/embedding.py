@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
