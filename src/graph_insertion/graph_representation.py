@@ -226,6 +226,17 @@ class ConceptGraph:
         """
         return self._g
 
+    def copy(self) -> ConceptGraph:
+        """Return an independent deep copy of this ConceptGraph.
+
+        The copy has its own underlying DiGraph; mutations to the copy
+        do not affect this instance, and vice-versa.
+        """
+        return ConceptGraph(
+            _g=self._g.copy(),
+            domain_context=self.domain_context,
+        )
+
 
 # ---------------------------------------------------------------------------
 # GoldJudgmentSet — full pairwise judgment set for accuracy evaluation

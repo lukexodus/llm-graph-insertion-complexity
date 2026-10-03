@@ -119,6 +119,7 @@ In brief (full detail in `data-formats.md`):
     ├── context/                      ← you are here; standalone context for agents
     │   ├── complete-context.md       (this file)
     │   ├── data-formats.md           (settled data-format findings)
+    │   ├── strategy-interface.md     (formal strategy contract & lifecycle spec)
     │   └── apc-handoff-template.md   (template for APC-to-APC session handoffs)
     ├── decisions/
     │   └── decision-log.md           (append-only; WHY past decisions were made)

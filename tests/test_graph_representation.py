@@ -368,6 +368,28 @@ class TestConceptGraph:
         assert isinstance(g.nx_graph, nx.DiGraph)
         assert "x" in g.nx_graph.nodes()
 
+    def test_copy_independent(self):
+        g = ConceptGraph(domain_context="data structures")
+        g.add_prereq_edge("pointer", "linked_list")
+        g_copy = g.copy()
+
+        assert g_copy.domain_context == "data structures"
+        assert g_copy.has_prereq_edge("pointer", "linked_list")
+        assert g_copy.num_nodes() == 2
+        assert g_copy.num_edges() == 1
+
+        # Modifying copy does not mutate original
+        g_copy.add_prereq_edge("linked_list", "hash_table")
+        assert g_copy.has_prereq_edge("linked_list", "hash_table")
+        assert not g.has_prereq_edge("linked_list", "hash_table")
+        assert g.num_nodes() == 2
+        assert g_copy.num_nodes() == 3
+
+        # Modifying original does not mutate copy
+        g.add_node("stack")
+        assert g.has_node("stack")
+        assert not g_copy.has_node("stack")
+
     def test_edge_direction_semantics(self):
         """Explicitly test that (u, v) means u is a prereq of v."""
         g = ConceptGraph()

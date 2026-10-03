@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "graph-insertion"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["networkx>=3.0"]
+dependencies = [
+    "networkx>=3.0",
+    "numpy>=1.26",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0", "pytest-cov"]
