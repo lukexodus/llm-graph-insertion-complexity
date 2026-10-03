@@ -402,6 +402,34 @@ class TestConceptGraph:
         assert g.has_node("stack")
         assert not g_copy.has_node("stack")
 
+    def test_without_node_removes_node_and_incident_edges(self):
+        g = ConceptGraph(domain_context="testing")
+        g.add_prereq_edge("a", "b")
+        g.add_prereq_edge("b", "c")
+        g.add_prereq_edge("a", "c")
+        assert g.num_nodes() == 3
+        assert g.num_edges() == 3
+
+        g_without_b = g.without_node("b")
+        # b and its incident edges (a->b, b->c) are removed
+        assert not g_without_b.has_node("b")
+        assert g_without_b.has_node("a")
+        assert g_without_b.has_node("c")
+        assert g_without_b.num_nodes() == 2
+        assert g_without_b.num_edges() == 1
+        assert g_without_b.has_prereq_edge("a", "c")
+
+        # Original graph is untouched
+        assert g.num_nodes() == 3
+        assert g.num_edges() == 3
+        assert g.has_node("b")
+
+    def test_without_node_nonexistent_node_raises_key_error(self):
+        g = ConceptGraph()
+        g.add_node("alpha")
+        with pytest.raises(KeyError, match="Node 'beta' not found"):
+            g.without_node("beta")
+
     def test_edge_direction_semantics(self):
         """Explicitly test that (u, v) means u is a prereq of v."""
         g = ConceptGraph()

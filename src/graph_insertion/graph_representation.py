@@ -237,6 +237,32 @@ class ConceptGraph:
             domain_context=self.domain_context,
         )
 
+    def without_node(self, name: str) -> ConceptGraph:
+        """Return a copy of this ConceptGraph with *name* and its incident edges removed.
+
+        Parameters
+        ----------
+        name:
+            The concept name to remove.
+
+        Returns
+        -------
+        ConceptGraph
+            A new independent ConceptGraph instance with *name* and all incident
+            edges removed. Does not mutate this instance.
+
+        Raises
+        ------
+        KeyError:
+            If *name* is not present in the graph.
+        """
+        _validate_concept_name(name)
+        if not self.has_node(name):
+            raise KeyError(f"Node {name!r} not found in graph.")
+        new_cg = self.copy()
+        new_cg._g.remove_node(name)
+        return new_cg
+
 
 # ---------------------------------------------------------------------------
 # GoldJudgmentSet — full pairwise judgment set for accuracy evaluation

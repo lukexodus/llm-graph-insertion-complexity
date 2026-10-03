@@ -40,7 +40,7 @@ CORPUS_DOMAIN_CONTEXT_MAP: dict[str, Optional[str]] = {
     "MEKG_with_21_nodes(ML)": "machine learning",
     "MEKG_with_35_nodes(ML1)": "machine learning",
     "MEKG_with_8_nodes(logic)": "mathematical logic",
-    "MEKG_with7nodes": None,
+    "MEKG_with7nodes": "probability and graphical models",
 }
 
 TAG_DOMAIN_CONTEXT_MAP: dict[str, str] = {
@@ -57,7 +57,8 @@ def derive_domain_context(filename_or_stem: str) -> Optional[str]:
       - DS, DS1..DS4 -> "data structures and algorithms"
       - ML, ML1 -> "machine learning"
       - logic -> "mathematical logic"
-    Files without a tag (e.g. MEKG_with7nodes) return None per [D-27].
+    Explicit filenames without tags (e.g. MEKG_with7nodes) look up
+    CORPUS_DOMAIN_CONTEXT_MAP ([D-27], [D-30]).
     """
     stem = Path(filename_or_stem).stem
     if stem in CORPUS_DOMAIN_CONTEXT_MAP:

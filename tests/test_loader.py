@@ -160,7 +160,7 @@ class TestPinnedGoldExpectations:
 class TestPinnedExampleExpectations:
     # (stem, expected_nodes, expected_pos_edges, expected_domain)
     EXPECTED_EXAMPLES = [
-        ("MEKG_with7nodes", 7, 16, None),
+        ("MEKG_with7nodes", 7, 16, "probability and graphical models"),
         ("MEKG_with_6_nodes(DS)", 6, 7, "data structures and algorithms"),
         ("MEKG_with_8_nodes(DS3)", 8, 18, "data structures and algorithms"),
         ("MEKG_with_8_nodes(DS4)", 8, 23, "data structures and algorithms"),

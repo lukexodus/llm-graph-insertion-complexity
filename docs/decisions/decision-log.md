@@ -249,3 +249,16 @@ Reasoning: ensures fail-fast trial safety before any strategy execution, guarant
 (2) Granularity = one LLM call per (new, candidate) pair; no batching;
 (3) Concurrency = 1: the decision step is strictly sequential (no threads/async).
 Reasoning: cost is negligible at this model's price; pairwise makes llm_calls equal shortlist size for every strategy (thesis 3.2.2 "one at a time"); sequential calls keep per-call latency uncontaminated by our own load. Affects: `PairwiseDecisionStep`, `DeepSeekClient`, `MeteredLLMClient`, INFRA-006, `pilot_dsa_zero_shot.py`, and all strategy insertion experiments.
+
+**[D-30]** Evaluation domain context & DSA unjudged row scoring policy:
+(1) `MEKG_with7nodes` domain context locked to `"probability and graphical models"` (supersedes item 6 of [D-27]);
+(2) DSA unjudged row scoring: in DSA evaluation, any unordered pair where either directed relation is unjudged (specifically `{'2_3_tree', 'biconnected_components'}`) is EXCLUDED from standard precision/recall/F1 scoring to prevent penalizing models on unannotated ground truth; every accuracy summary report also computes and presents a sensitivity analysis variant treating such unjudged pairs as `NONE` (non-edge, penalizing any predicted edges on the pair as false positives).
+Reasoning: `MEKG_with7nodes` nodes like `graphical_models` and `factor_graphs` belong to probability and graphical models; excluding the unannotated DSA pair prevents arbitrary bias while the sensitivity report guarantees transparency regarding candidate edge predictions. Affects: `loader.py`, `CORPUS_DOMAIN_CONTEXT_MAP`, `scoring.py`, `harness.py`, `tests/test_loader.py`, `tests/test_scoring.py`, INFRA-003, INFRA-004.
+
+**[D-31]** Measurement harness trial isolation, overhead accounting, and safety controls:
+(1) Trial isolation: each insertion trial is run against an independent deep copy of the graph (`ConceptGraph.copy()` or `without_node()`), with a fresh strategy instance instantiated via `strategy_factory()`, and a single `MeteredEmbedder` instance shared between `strategy.setup()` and `insert_node()` ([D-28]);
+(2) Garbage collection: explicit `gc.collect()` is invoked immediately prior to the timed insertion window (GC remains enabled);
+(3) Timing attribution: `harness_wall_s` measures end-to-end wall time of `insert_node()`, recording `unaccounted_s = harness_wall_s - (total_s + validate_s)` to quantify framework scaffolding overhead;
+(4) Output immutability & streaming: each insertion trial is immediately flushed to `results/<run_id>/raw.jsonl`; interrupted runs can be resumed (`--resume`), failed trials logged as failure records and optionally retried (`--retry-failed`); manifest records environmental metadata and scrubbed configuration ensuring zero secret exposure;
+(5) Guardrails: `--dry-run` produces an execution plan and upper-bound LLM call estimate without mutating state or calling APIs; live execution requires `--confirm` and halts cleanly when exceeding `--max-llm-calls`.
+Reasoning: strict isolation prevents state leakage between trials; real-time jsonl flushing protects experiment progress against mid-run network drops or process interruptions; overhead accounting isolates driver framework time from strategy algorithmic complexity. Affects: `harness.py`, `scripts/run_experiment.py`, `tests/test_harness.py`, INFRA-004.
