@@ -73,54 +73,63 @@ trials:
 
 ## 4. Data sources — READ `docs/context/data-formats.md` BEFORE WRITING ANY LOADER CODE
 
-This repo is `cemaytekin/EKG-Dataset`, cloned from the authors of a closely
-related paper (ACE — see catalogue entry #9). It contains the gold-standard
-graphs this thesis reuses for accuracy evaluation.
+The evaluation dataset `cemaytekin/EKG-Dataset` lives at
+`repositories/dataset/EKG-Dataset/` inside this repo (nested git clone from
+the authors of the ACE paper; see catalogue entry #9). It contains the
+gold-standard graphs this thesis reuses for accuracy evaluation.
 
 **Do not assume you know these files' formats from their names alone.**
-`docs/context/data-formats.md` documents everything currently known about
-every file in this dataset, including at least one case (the `0-100.csv`
-family) where an initial filename-based guess turned out to be flatly wrong
-on inspection. That document also names exactly what is STILL unverified
-(flagged "DATA-001" — see `docs/tasks/status.md` for the live task this
-corresponds to). If you are the agent assigned to DATA-001, your job is
-specifically to verify or correct every claim in `data-formats.md` against
-the full raw files, not to re-derive formats from scratch.
+`docs/context/data-formats.md` documents everything known about every file
+in this dataset. All file formats, delimiters, node counts, and edge
+semantics have been independently and exhaustively verified in tasks
+**DATA-001** and **DATA-002** (see `docs/reports/DATA-001-gemini-verify-file-formats.md`
+and `docs/reports/DATA-002-gemini-mekg-directionality.md` for full details).
 
 In brief (full detail in `data-formats.md`):
 
 - `DSA_gold_standard_MEKG.txt` — 29-node graph, semicolon-delimited triples
+  `concept1;concept2;label`. Directionality: `label = 1` means `concept2` is a
+  prerequisite of `concept1` (`concept1 requires concept2`; [D-15]).
 - `metacademy_gold_standard_MEKG.txt` — 141-node graph, SPACE-delimited
-  triples (different delimiter than DSA — do not assume one parser handles
-  both files)
-- Ten `MEKG_with*nodes*.txt` example files (6 to 35 nodes) — formats not yet
-  individually confirmed, likely one of the two formats above
-- Four `*.csv` files (`0-100.csv` etc.) — CONFIRMED to be unrelated
-  crowdsourced A-B-test data, NOT graph data of any size. Do not use these
-  for the size sweep.
-- `concept_descriptions/` folder — not yet inspected; likely needed as
-  source text for the build phase (the gold-standard files only encode
-  target graph STRUCTURE, not the source text an LLM would extract from)
+  triples `concept1 concept2 label`. Directionality: same as DSA (`concept2`
+  is prerequisite of `concept1`; [D-15]). Different delimiter than DSA — do not
+  assume one parser handles both files.
+- Ten `MEKG_with*nodes*.txt` example files (6 to 35 nodes) — confirmed
+  semicolon-delimited; all node names carry a `.txt` filename suffix ([D-16]);
+  directionality is REVERSED from gold standards: `concept1.txt;concept2.txt;1`
+  means `concept1` is a prerequisite of `concept2` ([D-19]).
+- Ten `*.csv` files (`0-100.csv` to `900-1000.csv`) — CONFIRMED to be unrelated
+  crowdsourced A-B-test data (10 files, not four), NOT graph data of any size.
+  Do not use these for the size sweep.
+- `concept_descriptions/` folder — inspected and confirmed unusable for
+  DSA/Metacademy: contains 152 elementary math texts matching the CSV files,
+  with 0% overlap with DSA or Metacademy ([D-17]). Where build-phase source text
+  will come from remains an open question (see `docs/tasks/status.md` and
+  `docs/decisions/decision-log.md` for current state).
 
 ## 5. Project structure and where things live
 
 ```
-docs/
-├── context/           ← you are here; standalone context for agents
-│   ├── complete-context.md       (this file)
-│   ├── data-formats.md           (settled + open data-format findings)
-│   └── apc-handoff-template.md   (template for APC-to-APC session handoffs)
-├── decisions/
-│   └── decision-log.md           (append-only; WHY past decisions were made)
-├── tasks/
-│   └── status.md                 (live status; what's actually done right now)
-├── reports/                      (one file per completed agent task)
-├── rrl/
-│   └── catalogue.md              (full literature trail, every source's contribution)
-├── tasks/
-│   └── high-level-tasks.md       (the static Phase 0–4 project plan)
-└── thesis/
-    └── An Empirical Complexity Analysis...md   (the actual thesis text, Ch. 1–3)
+.
+├── AGENTS.md                         (operational rules for all local agents)
+├── repositories/
+│   └── dataset/
+│       └── EKG-Dataset/              (nested clone of cemaytekin/EKG-Dataset)
+└── docs/
+    ├── context/                      ← you are here; standalone context for agents
+    │   ├── complete-context.md       (this file)
+    │   ├── data-formats.md           (settled data-format findings)
+    │   └── apc-handoff-template.md   (template for APC-to-APC session handoffs)
+    ├── decisions/
+    │   └── decision-log.md           (append-only; WHY past decisions were made)
+    ├── reports/                      (one file per completed agent task)
+    ├── rrl/
+    │   └── catalogue.md              (full literature trail, every source's contribution)
+    ├── tasks/
+    │   ├── high-level-tasks.md       (the static Phase 0–4 project plan)
+    │   └── status.md                 (live status; what's actually done right now)
+    └── thesis/
+        └── An Empirical Complexity Analysis...md   (the actual thesis text, Ch. 1–3)
 ```
 
 **Reading order recommendation for a new agent or new APC instance:** this
@@ -167,9 +176,8 @@ text by eye.
 
 ## 7. Open items — things that are genuinely unresolved right now
 
-- **DATA-001** (see `tasks/status.md`): independent verification of
-  `data-formats.md`'s claims, especially the ten example MEKG files' formats
-  and the `concept_descriptions/` folder's contents/sufficiency.
+- **Active/Open task status**: See `docs/tasks/status.md` for live task states
+  (DATA-001 and DATA-002 are complete).
 - **Graph representation choice**: not yet locked. Default lean (not yet
   confirmed as a decision) is NetworkX, given Python, small data size, and
   built-in directed-graph support — but this has not been formally decided

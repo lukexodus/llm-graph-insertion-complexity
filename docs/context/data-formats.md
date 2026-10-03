@@ -2,8 +2,10 @@
 
 **Status: FULLY VERIFIED.** All claims in this document have been independently
 verified against the complete raw files in `repositories/dataset/EKG-Dataset/` by
-Gemini under task **DATA-001** (see `docs/reports/DATA-001-gemini-verify-file-formats.md`
-for full details and code-level verification logs).
+Gemini under tasks **DATA-001** and **DATA-002** (see
+`docs/reports/DATA-001-gemini-verify-file-formats.md` and
+`docs/reports/DATA-002-gemini-mekg-directionality.md` for full details and
+code-level verification logs).
 
 ---
 

@@ -180,4 +180,13 @@ Reasoning: systematically verified across all ten files in DATA-002; 100% of pos
 edges overlapping with DSA/Metacademy match the reversed column order relative to D-15.
 Corpus loader (INFRA-003) must apply this reversed mapping for example MEKG files.
 
-
+**[D-20]** Coordination protocol for edits to shared docs: (1) a change to an
+existing shared doc is relayed as a delta (diff or before/after excerpt), not a
+full-file paste, except for new files, near-total rewrites, or when full content
+is requested; (2) before editing a shared doc, confirm you hold its live
+current content (local agents read the file; the APC AI, which has no filesystem
+access, asks Luke for it) and never edit from a remembered copy. Reasoning: a
+diff computed against a remembered copy looks authoritative but isn't, and the
+APC AI nearly produced one against this very file without having a real copy of
+it. Affects: AGENTS.md, complete-context.md Section 6, and every future agent and
+APC session. (D-18 was never assigned.)
