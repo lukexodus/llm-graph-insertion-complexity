@@ -156,3 +156,20 @@ evidence that APC-only analysis of these files carries real error risk; a
 cheap verification pass now is far less costly than four parallel strategy
 implementations later being built against a wrong assumption baked into
 shared infrastructure.
+
+**[D-15]** Gold standard edge directionality confirmed: `concept1;concept2;1`
+means `concept2` is a prerequisite of `concept1` (`concept1 requires concept2`).
+Reasoning: empirically confirmed on DSA (`dijkstra_algorithm;graph;1`) and
+Metacademy (`backpropagation chain_rule 1`); loader in INFRA-003 and graph model
+in INFRA-001 must standardize on this directionality to avoid inverted evaluation graphs.
+
+**[D-16]** Format standardization for example MEKG files: all 10 files use
+semicolon delimiters (matching DSA), but node identifiers include `.txt` suffixes.
+Reasoning: verified in DATA-001; loaders must strip `.txt` from node names when
+ingesting these files.
+
+**[D-17]** `concept_descriptions/` folder is unusable as build-phase source text
+for DSA/Metacademy. Reasoning: contains exclusively elementary school mathematics
+articles (matching Section 6.2 crowdsourced CSVs), with 0% overlap with DSA or
+Metacademy; build-phase text must be sourced externally or via parametric LLM prompts.
+
