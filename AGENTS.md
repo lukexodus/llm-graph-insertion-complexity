@@ -27,6 +27,26 @@ have filesystem access; the APC AI does not), check it, and say so in your
 report if it was wrong — don't silently defer to a prompt's assumption over
 what you can see yourself.
 
+## Before editing a shared doc — confirm you have its live content
+
+A delta is only trustworthy if it's computed against the file's actual
+current state. **If you (or the APC AI) are about to edit a shared doc
+(`decision-log.md`, `data-formats.md`, `status.md`, `AGENTS.md`,
+`complete-context.md`, or anything else multiple agents touch) and don't
+have freshly-verified current content for it — not "probably still looks
+like this," actually current — get that content first.** For a local agent,
+this is usually trivial: just read the file, since you have live
+filesystem access. For the APC AI specifically, which has NO filesystem
+access, this means asking Luke to paste or upload the file's current
+content before proposing an edit, rather than editing from whatever content
+it last saw, which may be stale if another agent touched the file since.
+
+Skipping this check produces a diff that looks authoritative but isn't —
+it's a diff against a remembered guess, not the real file, and applying it
+risks silently reverting or conflicting with a change another agent already
+made. When in doubt about whether your copy is current, it probably isn't;
+ask.
+
 ## Reporting changes efficiently — send deltas, not full files
 
 **When you edit or add to a file that already exists in the repo (shared
