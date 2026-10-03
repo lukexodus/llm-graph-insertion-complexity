@@ -51,11 +51,13 @@ class MeteredEmbedder:
         Total wall-clock seconds spent inside the underlying embedder calls.
     """
 
-    def __init__(self, underlying: Embedder) -> None:
+    def __init__(self, underlying: Embedder, record_texts: bool = False) -> None:
         self.underlying = underlying
+        self.record_texts = record_texts
         self.calls: int = 0
         self.texts_embedded: int = 0
         self.cumulative_seconds: float = 0.0
+        self.texts_log: Optional[list[str]] = [] if record_texts else None
 
     def embed(self, text: str) -> np.ndarray:
         t0 = time.perf_counter()
@@ -64,6 +66,8 @@ class MeteredEmbedder:
         self.calls += 1
         self.texts_embedded += 1
         self.cumulative_seconds += elapsed
+        if self.texts_log is not None:
+            self.texts_log.append(text)
         return res
 
     def embed_many(self, texts: Sequence[str]) -> np.ndarray:
@@ -73,6 +77,8 @@ class MeteredEmbedder:
         self.calls += 1
         self.texts_embedded += len(texts)
         self.cumulative_seconds += elapsed
+        if self.texts_log is not None:
+            self.texts_log.extend(texts)
         return res
 
     def reset(self) -> None:
@@ -80,6 +86,8 @@ class MeteredEmbedder:
         self.calls = 0
         self.texts_embedded = 0
         self.cumulative_seconds = 0.0
+        if self.texts_log is not None:
+            self.texts_log.clear()
 
 
 class FakeEmbedder:

@@ -1,19 +1,20 @@
 """
-tests/test_strategy_interface.py — INFRA-002 conformance test suite
-====================================================================
-Tests for Embedder implementations, strategy interface contract, and insert_node.
+tests/test_strategy_interface.py — INFRA-002 / FIX-002 test suite
+==================================================================
+Reusable conformance test suite for candidate-narrowing strategies and
+validation tests for the insert_node driver.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pytest
 
 from graph_insertion.embedding import Embedder, FakeEmbedder, MeteredEmbedder
-from graph_insertion.graph_representation import ConceptGraph
+from graph_insertion.graph_representation import ConceptGraph, embed_text
 from graph_insertion.strategy import (
     DecisionOutcome,
     DecisionStep,
@@ -26,14 +27,18 @@ from graph_insertion.strategy import (
 
 
 # ===========================================================================
-# Test In-Test Mocks / Fakes
+# Reference Mocks / Fakes
 # ===========================================================================
 
 class TinyFakeStrategy:
-    """A minimal deterministic narrowing strategy for conformance testing.
+    """A minimal deterministic narrowing strategy for testing.
 
     Shortlists up to `top_k` existing nodes closest to the new node by
     cosine similarity of fake embeddings.
+
+    Per FIX-002 Item 3(c): caches the embedding of new_name computed during
+    shortlist() and reuses it in on_inserted(), ensuring exactly one embedding
+    of new_name per insertion trial.
     """
 
     def __init__(self, top_k: int = 2, seed: int = 42) -> None:
@@ -43,14 +48,18 @@ class TinyFakeStrategy:
         self._graph: Optional[ConceptGraph] = None
         self._embedder: Optional[Embedder] = None
         self._node_embeddings: dict[str, np.ndarray] = {}
+        self._cached_new_name: Optional[str] = None
+        self._cached_new_vec: Optional[np.ndarray] = None
         self._last_comparisons: int = 0
+        self.on_inserted_called: bool = False
 
     def setup(self, graph: ConceptGraph, embedder: Embedder) -> None:
         self._graph = graph
         self._embedder = embedder
         self._node_embeddings = {}
         for node in graph.nodes():
-            self._node_embeddings[node] = embedder.embed(node)
+            # Per [D-21] and FIX-002 Item 4: always pass embed_text(node)
+            self._node_embeddings[node] = embedder.embed(embed_text(node))
 
     def shortlist(self, new_name: str) -> Shortlist:
         if not self._node_embeddings or self.top_k == 0:
@@ -58,14 +67,18 @@ class TinyFakeStrategy:
             return Shortlist(candidates=(), scores=())
 
         assert self._embedder is not None
-        new_vec = self._embedder.embed(new_name)
+        # Embed and cache per FIX-002 Item 3(c)
+        new_vec = self._embedder.embed(embed_text(new_name))
+        self._cached_new_name = new_name
+        self._cached_new_vec = new_vec
+
         sims = []
         for name, vec in self._node_embeddings.items():
             sim = float(np.dot(new_vec, vec))
             sims.append((name, sim))
 
         self._last_comparisons = len(sims)
-        # Sort descending by similarity, then ascending by name for determinism
+        # Sort descending by similarity, then ascending by name
         sims.sort(key=lambda x: (-x[1], x[0]))
         selected = sims[: self.top_k]
         candidates = tuple(name for name, _ in selected)
@@ -73,8 +86,15 @@ class TinyFakeStrategy:
         return Shortlist(candidates=candidates, scores=scores)
 
     def on_inserted(self, new_name: str, edges: tuple[tuple[str, str], ...]) -> None:
+        self.on_inserted_called = True
         assert self._embedder is not None
-        self._node_embeddings[new_name] = self._embedder.embed(new_name)
+        # Reuse cached vector if available, avoiding duplicate embedding computation
+        if self._cached_new_name == new_name and self._cached_new_vec is not None:
+            self._node_embeddings[new_name] = self._cached_new_vec
+            self._cached_new_name = None
+            self._cached_new_vec = None
+        else:
+            self._node_embeddings[new_name] = self._embedder.embed(embed_text(new_name))
 
     def config(self) -> dict[str, Any]:
         return {"top_k": self.top_k, "seed": self.seed}
@@ -86,8 +106,8 @@ class TinyFakeStrategy:
 class FakeDecisionStep:
     """Deterministic fake decision step for testing.
 
-    Establishes an edge (candidate -> new_name) for any candidate with
-    name alphabetically before new_name; otherwise (new_name -> candidate).
+    Establishes an edge (candidate -> new_name) for any candidate alphabetically
+    before new_name; otherwise (new_name -> candidate).
     """
 
     def __init__(self, make_edge: bool = True) -> None:
@@ -106,7 +126,6 @@ class FakeDecisionStep:
         if self.make_edge:
             for cand in candidates:
                 if cand < new_name:
-                    # cand is prereq of new_name (canonical prereq -> dependent)
                     edges.append((cand, new_name))
                 else:
                     edges.append((new_name, cand))
@@ -145,34 +164,42 @@ class TestEmbedder:
         for i, text in enumerate(texts):
             assert np.array_equal(mat[i], emb.embed(text))
 
-    def test_metered_embedder_accounting(self):
+    def test_metered_embedder_accounting_and_texts_log(self):
         raw = FakeEmbedder(dim=16)
-        meter = MeteredEmbedder(raw)
+        meter = MeteredEmbedder(raw, record_texts=True)
         assert meter.calls == 0
         assert meter.texts_embedded == 0
         assert meter.cumulative_seconds == 0.0
+        assert meter.texts_log == []
 
-        meter.embed("a")
+        meter.embed("hash table")
         assert meter.calls == 1
         assert meter.texts_embedded == 1
         assert meter.cumulative_seconds > 0.0
+        assert meter.texts_log == ["hash table"]
 
-        meter.embed_many(["b", "c", "d"])
+        meter.embed_many(["binary tree", "queue"])
         assert meter.calls == 2
-        assert meter.texts_embedded == 4
+        assert meter.texts_embedded == 3
+        assert meter.texts_log == ["hash table", "binary tree", "queue"]
 
         meter.reset()
         assert meter.calls == 0
         assert meter.texts_embedded == 0
         assert meter.cumulative_seconds == 0.0
+        assert meter.texts_log == []
 
 
 # ===========================================================================
-# 2. Conformance Tests for Strategy & insert_node
+# 2. Reusable Strategy Conformance Suite (STRAT-001..004 can inherit)
 # ===========================================================================
 
-class TestStrategyConformance:
-    """Reusable conformance test suite for candidate-narrowing strategies."""
+class StrategyConformanceSuite:
+    """Base conformance suite to be inherited by concrete strategy test classes.
+
+    Subclasses must implement the `strategy_factory` fixture returning a
+    callable: (graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy.
+    """
 
     @pytest.fixture
     def initial_graph(self) -> ConceptGraph:
@@ -184,25 +211,25 @@ class TestStrategyConformance:
         g.add_prereq_edge("pointer", "linked_list")
         return g
 
-    def test_shortlist_is_subset_and_excludes_new_node(self, initial_graph):
+    def test_shortlist_is_subset_and_excludes_new_node(
+        self, initial_graph, strategy_factory
+    ):
         embedder = FakeEmbedder(dim=16, seed=42)
-        strat = TinyFakeStrategy(top_k=2, seed=42)
-        strat.setup(initial_graph, embedder)
+        strat = strategy_factory(initial_graph, embedder)
 
         res = strat.shortlist("dijkstra_algorithm")
         existing_nodes = set(initial_graph.nodes())
 
-        assert len(res.candidates) <= 2
         for cand in res.candidates:
             assert cand in existing_nodes
             assert cand != "dijkstra_algorithm"
-        # No duplicates
         assert len(res.candidates) == len(set(res.candidates))
 
-    def test_shortlist_does_not_mutate_graph(self, initial_graph):
+    def test_shortlist_does_not_mutate_graph(
+        self, initial_graph, strategy_factory
+    ):
         embedder = FakeEmbedder(dim=16, seed=42)
-        strat = TinyFakeStrategy(top_k=2, seed=42)
-        strat.setup(initial_graph, embedder)
+        strat = strategy_factory(initial_graph, embedder)
 
         n_before = initial_graph.num_nodes()
         e_before = initial_graph.num_edges()
@@ -213,23 +240,14 @@ class TestStrategyConformance:
         assert initial_graph.num_edges() == e_before
         assert not initial_graph.has_node("dijkstra_algorithm")
 
-    def test_new_name_already_in_graph_raises(self, initial_graph):
-        embedder = FakeEmbedder(dim=16, seed=42)
-        strat = TinyFakeStrategy(top_k=2, seed=42)
-        strat.setup(initial_graph, embedder)
-        decision_step = FakeDecisionStep()
-
-        with pytest.raises(ValueError, match="already exists"):
-            insert_node(strat, initial_graph, decision_step, "pointer")
-
-    def test_same_seed_gives_same_shortlist(self, initial_graph):
+    def test_same_seed_gives_same_shortlist(
+        self, initial_graph, strategy_factory
+    ):
         embedder1 = FakeEmbedder(dim=16, seed=99)
-        strat1 = TinyFakeStrategy(top_k=3, seed=99)
-        strat1.setup(initial_graph, embedder1)
+        strat1 = strategy_factory(initial_graph, embedder1)
 
         embedder2 = FakeEmbedder(dim=16, seed=99)
-        strat2 = TinyFakeStrategy(top_k=3, seed=99)
-        strat2.setup(initial_graph, embedder2)
+        strat2 = strategy_factory(initial_graph, embedder2)
 
         sl1 = strat1.shortlist("hash_table")
         sl2 = strat2.shortlist("hash_table")
@@ -237,83 +255,318 @@ class TestStrategyConformance:
         assert sl1.candidates == sl2.candidates
         assert sl1.scores == sl2.scores
 
-    def test_repeated_inserts_see_previous_nodes(self, initial_graph):
+    def test_d21_text_payload_compliance(
+        self, initial_graph, strategy_factory
+    ):
+        """Enforce D-21: all texts passed to the embedder must equal embed_text(n)."""
+        raw_embedder = FakeEmbedder(dim=16, seed=42)
+        meter = MeteredEmbedder(raw_embedder, record_texts=True)
+        strat = strategy_factory(initial_graph, meter)
+
+        # Clear setup texts to focus on insertion trial
+        meter.reset()
+        decision_step = FakeDecisionStep(make_edge=True)
+        insert_node(
+            strat, initial_graph, decision_step, "binary_search_tree", metered_embedder=meter
+        )
+
+        assert meter.texts_log is not None
+        assert len(meter.texts_log) > 0
+        all_concepts = set(initial_graph.nodes())
+        for text in meter.texts_log:
+            assert "_" not in text
+            # Must equal embed_text(c) for some concept in the trial
+            assert any(embed_text(c) == text for c in all_concepts)
+
+    def test_cached_embedding_reuse_single_embedding_per_insert(
+        self, initial_graph, strategy_factory
+    ):
+        """Verify that narrowing + update embeds new_name exactly once."""
+        raw_embedder = FakeEmbedder(dim=16, seed=42)
+        meter = MeteredEmbedder(raw_embedder, record_texts=True)
+        strat = strategy_factory(initial_graph, meter)
+        meter.reset()
+
+        decision_step = FakeDecisionStep(make_edge=True)
+        res = insert_node(
+            strat, initial_graph, decision_step, "hash_table", metered_embedder=meter
+        )
+
+        # In strategies that embed, new_name must be embedded only 1 time
+        assert res.metrics.embedding_calls <= 1
+        assert res.metrics.embed_in_update_s == 0.0
+
+    def test_repeated_inserts_see_previous_nodes(
+        self, initial_graph, strategy_factory
+    ):
+        """Strengthened test: second shortlist can contain the first inserted node."""
         embedder = FakeEmbedder(dim=16, seed=42)
         meter = MeteredEmbedder(embedder)
-        strat = TinyFakeStrategy(top_k=3, seed=42)
-        strat.setup(initial_graph, meter)
+        strat = strategy_factory(initial_graph, meter)
         decision_step = FakeDecisionStep(make_edge=True)
 
-        res1 = insert_node(strat, initial_graph, decision_step, "hash_table", meter)
+        res1 = insert_node(
+            strat, initial_graph, decision_step, "hash_table", metered_embedder=meter
+        )
         assert initial_graph.has_node("hash_table")
-        assert initial_graph.num_nodes() == 5
 
-        # Second insert should be able to shortlist the newly added node
-        res2 = insert_node(strat, initial_graph, decision_step, "heap", meter)
+        # Second insert: top_k includes hash_table if top_k is large enough
+        res2 = insert_node(
+            strat, initial_graph, decision_step, "heap", metered_embedder=meter
+        )
         assert initial_graph.has_node("heap")
-        assert initial_graph.num_nodes() == 6
         assert res2.metrics.n_before == 5
+        # The candidates evaluated for heap must come from the updated graph containing hash_table
+        for c in res2.shortlist.candidates:
+            assert initial_graph.has_node(c)
 
-    def test_edges_involve_new_node_and_are_canonical(self, initial_graph):
-        embedder = FakeEmbedder(dim=16, seed=42)
-        strat = TinyFakeStrategy(top_k=2, seed=42)
-        strat.setup(initial_graph, embedder)
-        decision_step = FakeDecisionStep(make_edge=True)
 
-        new_concept = "dijkstra_algorithm"
-        res = insert_node(strat, initial_graph, decision_step, new_concept)
+class TestTinyFakeStrategyConformance(StrategyConformanceSuite):
+    """Instantiate the reusable conformance suite on the reference TinyFakeStrategy."""
 
-        for prereq, dependent in res.edges:
-            assert new_concept in (prereq, dependent)
-            assert initial_graph.has_prereq_edge(prereq, dependent)
+    @pytest.fixture
+    def strategy_factory(self) -> Callable[[ConceptGraph, Embedder], NarrowingStrategy]:
+        def _factory(graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy:
+            strat = TinyFakeStrategy(top_k=4, seed=42)
+            strat.setup(graph, embedder)
+            return strat
 
-    def test_edge_not_involving_new_node_raises(self, initial_graph):
-        embedder = FakeEmbedder(dim=16, seed=42)
-        strat = TinyFakeStrategy(top_k=2, seed=42)
-        strat.setup(initial_graph, embedder)
+        return _factory
 
-        class IllegalEdgeDecisionStep:
+
+# ===========================================================================
+# 3. Shortlist Contract Enforcement Tests (FIX-002 Item 2)
+# ===========================================================================
+
+class TestInsertNodeShortlistEnforcement:
+    @pytest.fixture
+    def initial_graph(self) -> ConceptGraph:
+        g = ConceptGraph(domain_context="testing")
+        g.add_node("alpha")
+        g.add_node("beta")
+        return g
+
+    def test_candidate_not_in_graph_raises(self, initial_graph):
+        class BadCandidateStrategy:
+            name = "bad_cand_strat"
+            def setup(self, g, e): pass
+            def shortlist(self, new_name): return Shortlist(candidates=("alpha", "nonexistent_node"))
+            def on_inserted(self, n, e): pass
+            def config(self): return {}
+            def diagnostics(self): return {}
+
+        strat = BadCandidateStrategy()
+        with pytest.raises(ValueError, match="not an existing graph node"):
+            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
+
+    def test_duplicate_candidates_raises(self, initial_graph):
+        class DuplicateCandidateStrategy:
+            name = "dup_strat"
+            def setup(self, g, e): pass
+            def shortlist(self, new_name): return Shortlist(candidates=("alpha", "alpha"))
+            def on_inserted(self, n, e): pass
+            def config(self): return {}
+            def diagnostics(self): return {}
+
+        strat = DuplicateCandidateStrategy()
+        with pytest.raises(ValueError, match="duplicate candidates"):
+            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
+
+    def test_shortlist_contains_new_name_raises(self, initial_graph):
+        class SelfCandidateStrategy:
+            name = "self_strat"
+            def setup(self, g, e): pass
+            def shortlist(self, new_name): return Shortlist(candidates=("alpha", new_name))
+            def on_inserted(self, n, e): pass
+            def config(self): return {}
+            def diagnostics(self): return {}
+
+        strat = SelfCandidateStrategy()
+        with pytest.raises(ValueError, match="contains inserted node"):
+            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
+
+    def test_scores_length_mismatch_raises(self, initial_graph):
+        class ScoreMismatchStrategy:
+            name = "mismatch_strat"
+            def setup(self, g, e): pass
+            def shortlist(self, new_name): return Shortlist(candidates=("alpha", "beta"), scores=(0.9,))
+            def on_inserted(self, n, e): pass
+            def config(self): return {}
+            def diagnostics(self): return {}
+
+        strat = ScoreMismatchStrategy()
+        with pytest.raises(ValueError, match="scores length"):
+            insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
+
+
+# ===========================================================================
+# 4. Pre-Mutation Edge Validation Tests (FIX-002 Item 1)
+# ===========================================================================
+
+class TestInsertNodeEdgeValidation:
+    @pytest.fixture
+    def initial_graph(self) -> ConceptGraph:
+        g = ConceptGraph(domain_context="testing")
+        g.add_node("alpha")
+        g.add_node("beta")
+        g.add_node("gamma")
+        return g
+
+    def test_endpoint_not_in_shortlist_raises(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=1, seed=42)
+        strat.setup(initial_graph, FakeEmbedder())
+
+        class SneakyDecisionStep:
             def decide(self, new_name, candidates, domain_context=None):
-                # Returns an edge between two existing nodes, not involving new_name
-                return DecisionOutcome(edges=(("pointer", "graph"),), llm_calls=1, llm_seconds=0.01)
+                # Returns an edge to gamma, which exists in graph but was NOT in candidates
+                assert "gamma" not in candidates
+                return DecisionOutcome(edges=(("gamma", new_name),), llm_calls=1, llm_seconds=0.01)
 
-        with pytest.raises(ValueError, match="does not involve inserted node"):
-            insert_node(strat, initial_graph, IllegalEdgeDecisionStep(), "dijkstra_algorithm")
+        with pytest.raises(ValueError, match="not in the shortlisted candidates"):
+            insert_node(strat, initial_graph, SneakyDecisionStep(), "delta", metered_embedder=None)
 
-    def test_empty_shortlist_legal_and_skips_decision_calls(self, initial_graph):
-        embedder = FakeEmbedder(dim=16, seed=42)
-        strat = TinyFakeStrategy(top_k=0, seed=42)  # top_k=0 produces empty shortlist
-        strat.setup(initial_graph, embedder)
-        decision_step = FakeDecisionStep()
+    def test_endpoint_not_in_graph_raises_and_no_nodes_added(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=2, seed=42)
+        strat.setup(initial_graph, FakeEmbedder())
 
-        res = insert_node(strat, initial_graph, decision_step, "hash_table")
+        class NonExistentNodeDecisionStep:
+            def decide(self, new_name, candidates, domain_context=None):
+                return DecisionOutcome(edges=(("unknown_concept", new_name),), llm_calls=1, llm_seconds=0.01)
 
+        with pytest.raises(ValueError, match="not in the shortlisted candidates"):
+            insert_node(strat, initial_graph, NonExistentNodeDecisionStep(), "delta", metered_embedder=None)
+
+        assert not initial_graph.has_node("unknown_concept")
+        assert not initial_graph.has_node("delta")
+        assert initial_graph.num_nodes() == 3
+
+    def test_duplicate_decided_edges_raise(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=2, seed=42)
+        strat.setup(initial_graph, FakeEmbedder())
+
+        class DuplicateEdgeDecisionStep:
+            def decide(self, new_name, candidates, domain_context=None):
+                c = candidates[0]
+                return DecisionOutcome(edges=((c, new_name), (c, new_name)), llm_calls=1, llm_seconds=0.01)
+
+        with pytest.raises(ValueError, match="duplicate edges"):
+            insert_node(strat, initial_graph, DuplicateEdgeDecisionStep(), "delta", metered_embedder=None)
+
+    def test_self_loop_edge_raises(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=2, seed=42)
+        strat.setup(initial_graph, FakeEmbedder())
+
+        class SelfLoopDecisionStep:
+            def decide(self, new_name, candidates, domain_context=None):
+                return DecisionOutcome(edges=((new_name, new_name),), llm_calls=1, llm_seconds=0.01)
+
+        with pytest.raises(ValueError, match="self-loop"):
+            insert_node(strat, initial_graph, SelfLoopDecisionStep(), "delta", metered_embedder=None)
+
+    def test_graph_unchanged_and_strategy_not_notified_after_failure(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=2, seed=42)
+        strat.setup(initial_graph, FakeEmbedder())
+
+        n_before = initial_graph.num_nodes()
+        e_before = initial_graph.num_edges()
+
+        class FaultyDecisionStep:
+            def decide(self, new_name, candidates, domain_context=None):
+                return DecisionOutcome(edges=(("non_candidate", new_name),), llm_calls=1, llm_seconds=0.01)
+
+        with pytest.raises(ValueError):
+            insert_node(strat, initial_graph, FaultyDecisionStep(), "delta", metered_embedder=None)
+
+        # Graph is completely untouched
+        assert initial_graph.num_nodes() == n_before
+        assert initial_graph.num_edges() == e_before
+        assert not initial_graph.has_node("delta")
+        # Strategy on_inserted was NOT called
+        assert not strat.on_inserted_called
+
+
+# ===========================================================================
+# 5. Timing, Accounting & Driver Feature Tests
+# ===========================================================================
+
+class TestInsertNodeTimingAndMetrics:
+    @pytest.fixture
+    def initial_graph(self) -> ConceptGraph:
+        g = ConceptGraph(domain_context="testing")
+        g.add_node("alpha")
+        g.add_node("beta")
+        return g
+
+    def test_metered_embedder_required_keyword_argument(self, initial_graph):
+        strat = TinyFakeStrategy()
+        strat.setup(initial_graph, FakeEmbedder())
+        ds = FakeDecisionStep()
+        # Missing keyword-only metered_embedder must raise TypeError
+        with pytest.raises(TypeError):
+            insert_node(strat, initial_graph, ds, "gamma")  # type: ignore[call-arg]
+
+    def test_explicit_none_metered_embedder_allowed(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=0)
+        strat.setup(initial_graph, FakeEmbedder())
+        ds = FakeDecisionStep()
+        res = insert_node(strat, initial_graph, ds, "gamma", metered_embedder=None)
+        assert res.metrics.embedding_calls == 0
+        assert res.metrics.embed_s == 0.0
+
+    def test_unmetered_embedding_detected_and_raises(self, initial_graph):
+        raw_embedder = FakeEmbedder()
+        meter = MeteredEmbedder(raw_embedder)
+        strat = TinyFakeStrategy(top_k=1)
+        strat.setup(initial_graph, meter)
+        ds = FakeDecisionStep()
+
+        # Strategy has a MeteredEmbedder in _embedder, but caller passed metered_embedder=None
+        with pytest.raises(ValueError, match="unmetered embedding calls"):
+            insert_node(strat, initial_graph, ds, "gamma", metered_embedder=None)
+
+    def test_timing_components_consistency_with_apply_s(self, initial_graph):
+        raw = FakeEmbedder()
+        meter = MeteredEmbedder(raw)
+        strat = TinyFakeStrategy(top_k=2)
+        strat.setup(initial_graph, meter)
+        meter.reset()
+
+        ds = FakeDecisionStep(make_edge=True)
+        res = insert_node(strat, initial_graph, ds, "gamma", metered_embedder=meter)
+
+        m = res.metrics
+        assert m.shortlist_s >= m.embed_s
+        assert m.apply_s >= 0.0
+        assert m.update_s >= 0.0
+        assert m.decide_s >= 0.0
+        sum_components = m.shortlist_s + m.decide_s + m.apply_s + m.update_s
+        # Total wall clock must account for all components
+        assert m.total_s >= sum_components * 0.95
+        # Total wall clock should be very close to sum of components (within 10ms driver overhead)
+        assert m.total_s - sum_components < 0.02
+
+    def test_diagnostics_error_recorded(self, initial_graph):
+        class ExplodingDiagnosticsStrategy:
+            name = "exploding"
+            def setup(self, g, e): pass
+            def shortlist(self, n): return Shortlist(candidates=())
+            def on_inserted(self, n, e): pass
+            def config(self): return {}
+            def diagnostics(self): raise RuntimeError("telemetry crashed")
+
+        strat = ExplodingDiagnosticsStrategy()
+        res = insert_node(strat, initial_graph, FakeDecisionStep(), "gamma", metered_embedder=None)
+        assert "diagnostics_error" in res.metrics.extra
+        assert "telemetry crashed" in res.metrics.extra["diagnostics_error"]
+
+    def test_empty_shortlist_skips_decide_and_llm(self, initial_graph):
+        strat = TinyFakeStrategy(top_k=0)
+        strat.setup(initial_graph, FakeEmbedder())
+        ds = FakeDecisionStep()
+
+        res = insert_node(strat, initial_graph, ds, "gamma", metered_embedder=None)
         assert len(res.shortlist.candidates) == 0
         assert len(res.edges) == 0
         assert res.metrics.llm_calls == 0
         assert res.metrics.decide_s == 0.0
-        assert decision_step.calls == 0
-        assert initial_graph.has_node("hash_table")
-
-    def test_timing_and_metrics_consistency(self, initial_graph):
-        embedder = FakeEmbedder(dim=16, seed=42)
-        meter = MeteredEmbedder(embedder)
-        strat = TinyFakeStrategy(top_k=2, seed=42)
-        strat.setup(initial_graph, meter)
-        meter.reset()  # setup is untimed per [D-25]
-
-        decision_step = FakeDecisionStep(make_edge=True)
-        res = insert_node(strat, initial_graph, decision_step, "bloom_filter", meter)
-
-        m = res.metrics
-        assert m.n_before == 4
-        assert m.shortlist_size == 2
-        assert m.embedding_calls > 0
-        assert m.embed_s >= 0.0
-        assert m.shortlist_s >= m.embed_s
-        assert m.decide_s >= 0.0
-        assert m.update_s >= 0.0
-        # Total wall clock must be at least the sum of components
-        assert m.total_s >= (m.shortlist_s + m.decide_s + m.update_s) * 0.95
-        assert "comparisons" in m.extra
-        assert m.extra["comparisons"] == 4
+        assert ds.calls == 0

@@ -54,17 +54,21 @@ Candidate insertion proceeds in two distinct stages:
    # Note: Trial isolation requires a fresh strategy instance and a deep copy of the graph (graph.copy()).
 
 3. Incremental Insertion (TIMED via insert_node):
-   result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder)
+   result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder=metered_embedder)
    ├─ Step 1: strategy.shortlist(new_concept)          --> Shortlist(candidates, scores)
+   │          (Driver validates candidates: must be subset of existing nodes, no duplicates, excludes new_concept)
    ├─ Step 2: decision_step.decide(...)                --> DecisionOutcome(edges, llm_calls, llm_seconds)
    │          (Empty shortlist skips LLM calls: 0 calls, 0 edges)
-   ├─ Step 3: driver adds new_concept and edges to ConceptGraph
-   └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update
+   ├─ Step 3: driver validates edges and mutates ConceptGraph (timed via apply_s):
+   │          (Validates: canonical 2-tuples, no self-loops, no duplicates, other endpoint in shortlist.candidates)
+   │          (Adds new_concept and applies decided edges to ConceptGraph)
+   └─ Step 4: strategy.on_inserted(new_concept, edges) --> Incremental index update (timed via update_s)
+              (Reuses cached vector from Step 1; must NOT re-embed new_concept)
 ```
 
 ---
 
-## 3. Timing & Metrics Accounting Model ([D-25])
+## 3. Timing & Metrics Accounting Model ([D-25], [D-26])
 
 All timing uses `time.perf_counter()`. Measurements are reported inside `InsertionMetrics`:
 
@@ -75,13 +79,18 @@ All timing uses `time.perf_counter()`. Measurements are reported inside `Inserti
 | `llm_calls` | Number of LLM API requests made | `outcome.llm_calls` (0 if shortlist is empty) |
 | `embedding_calls` | Number of embedding calls during narrowing | Recorded via `MeteredEmbedder` delta during shortlist |
 | `embed_s` | Cumulative seconds generating embeddings | From `MeteredEmbedder` during shortlist |
+| `embed_in_update_s` | Cumulative seconds generating embeddings during update | From `MeteredEmbedder` during `on_inserted` (must be 0.0 under single-embedding invariant) |
 | `shortlist_s` | Wall-clock seconds for candidate narrowing | `t1 - t0` around `strategy.shortlist()` (subsumes `embed_s`) |
 | `decide_s` | Wall-clock seconds in shared decision step | `t3 - t2` around `decision_step.decide()` (0.0 if empty shortlist) |
-| `update_s` | Wall-clock seconds updating strategy index | `t5 - t4` around `strategy.on_inserted()` |
-| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (subsumes all above) |
-| `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` |
+| `apply_s` | Wall-clock seconds committing to graph | `t5 - t4` around graph mutation and edge application |
+| `update_s` | Wall-clock seconds updating strategy index | `t7 - t6` around `strategy.on_inserted()` |
+| `total_s` | Total wall-clock seconds for insertion | Measured end-to-end across Steps 1–4 (`total_s ≈ shortlist_s + decide_s + apply_s + update_s`) |
+| `extra` | Diagnostic metadata dictionary | Emitted by `strategy.diagnostics()` (or `{"diagnostics_error": repr(e)}` on failure) |
 
-*Note on exclusions:* `setup()` is strictly untimed preparation and excluded from `total_s`.
+*Notes:*
+- `setup()` is strictly untimed preparation and excluded from `total_s`.
+- **Single-Embedding Invariant ([D-26]):** An insertion of `new_name` requires computing its embedding at most once. Strategies compute and cache `new_name`'s vector in `shortlist()`, and reuse that vector in `on_inserted()`. Embedding `new_name` a second time in `on_inserted()` is strictly prohibited (`embed_in_update_s` must remain 0.0).
+- **Unmetered Embedding Detection ([D-26]):** Passing `metered_embedder=None` indicates an unmetered run; if any strategy embedder performs unmetered embedding calls during insertion, `insert_node` raises `RuntimeError`.
 
 ---
 
@@ -100,6 +109,7 @@ class StrategySkeleton:
         self.seed = seed
         self._embedder: Embedder | None = None
         self._graph: ConceptGraph | None = None
+        self._cached_new_vec: np.ndarray | None = None
         # Internal state (e.g. index, matrices, buckets)
 
     def setup(self, graph: ConceptGraph, embedder: Embedder) -> None:
@@ -109,13 +119,20 @@ class StrategySkeleton:
 
     def shortlist(self, new_name: str) -> Shortlist:
         # 1. Embed new_name via self._embedder.embed(embed_text(new_name)) if applicable
+        #    and cache the resulting vector to avoid re-embedding in on_inserted.
+        if self._embedder is not None:
+            self._cached_new_vec = self._embedder.embed(embed_text(new_name))
+        
         # 2. Query internal search structures
-        # 3. Return candidates tuple (must be subset of graph nodes, no duplicates)
+        # 3. Return candidates tuple (must be subset of graph nodes, no duplicates, no new_name)
         return Shortlist(candidates=(...))
 
     def on_inserted(self, new_name: str, edges: tuple[tuple[str, str], ...]) -> None:
         # Incrementally update index/matrix/bucket with new_name and its edges
-        pass
+        # Reuses self._cached_new_vec; does NOT call self._embedder.embed(new_name) again.
+        new_vec = self._cached_new_vec
+        self._cached_new_vec = None
+        # update internal index structures with (new_name, new_vec, edges)...
 
     def config(self) -> dict[str, Any]:
         return {"seed": self.seed}
@@ -131,6 +148,37 @@ class StrategySkeleton:
 | Strategy | `setup(graph, embedder)` Action | `on_inserted(new_name, edges)` Action | Primary Diagnostics |
 | :--- | :--- | :--- | :--- |
 | **S1: Brute-Force** | None (no embeddings, no index). | None (stateless). | `{"candidate_count": n}` |
-| **S2: Embedding Threshold** | Computes and caches embedding matrix for all $n$ concepts. | Computes embedding for `new_name` and appends row to matrix. | `{"cosine_comparisons": n, "threshold": theta}` |
-| **S3: ANN Retrieval (FAISS)** | Builds and populates vector index (e.g. `IndexFlatIP` or `IndexHNSWFlat`). | Inserts embedding of `new_name` into the ANN index. | `{"top_k": k, "index_size": n}` |
-| **S4: Bounded Buckets (EraRAG-style)** | Partitions initial nodes into bounded-size buckets ($\le B$). Computes bucket centroids/summaries. | Adds `new_name` to target bucket; triggers bucket split if size exceeds $B$, or recomputes centroid. | `{"bucket_id": bid, "split_occurred": bool, "bucket_size": s}` |
+| **S2: Embedding Threshold** | Computes and caches embedding matrix for all $n$ concepts. | Appends cached vector from `shortlist()` to matrix row. | `{"cosine_comparisons": n, "threshold": theta}` |
+| **S3: ANN Retrieval (FAISS)** | Builds and populates vector index (e.g. `IndexFlatIP` or `IndexHNSWFlat`). | Inserts cached vector from `shortlist()` into ANN index. | `{"top_k": k, "index_size": n}` |
+| **S4: Bounded Buckets (EraRAG-style)** | Partitions initial nodes into bounded-size buckets ($\le B$). Computes bucket centroids/summaries. | Adds `new_name` with cached vector to target bucket; triggers bucket split if size exceeds $B$, or recomputes centroid. | `{"bucket_id": bid, "split_occurred": bool, "bucket_size": s}` |
+
+---
+
+## 6. Conformance Testing Suite Guide
+
+To ensure consistent behavior across all four strategies (STRAT-001 through STRAT-004), a reusable conformance test base class is provided in `tests/test_strategy_interface.py`: `StrategyConformanceSuite`.
+
+Every strategy test module must subclass `StrategyConformanceSuite` and define a `strategy_factory` fixture returning a factory function `(graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy`:
+
+```python
+import pytest
+from tests.test_strategy_interface import StrategyConformanceSuite
+from graph_insertion.strategies.my_strategy import MyConcreteStrategy
+
+class TestMyConcreteStrategyConformance(StrategyConformanceSuite):
+    @pytest.fixture
+    def strategy_factory(self):
+        def _factory(graph, embedder):
+            strat = MyConcreteStrategy(seed=42)
+            strat.setup(graph, embedder)
+            return strat
+        return _factory
+```
+
+The conformance suite automatically verifies:
+1. **Candidate subset & exclusion:** `shortlist()` returns a subset of existing graph nodes, containing no duplicates, and never containing `new_name`.
+2. **Graph immutability:** `shortlist()` does not mutate node or edge sets in `ConceptGraph`.
+3. **Determinism:** Identical seeds produce identical shortlists and score sequences.
+4. **D-21 text payload compliance:** All texts passed to embedders match `embed_text(c)` for some concept $c$ in the trial (lowercase, no raw underscores, no domain descriptions).
+5. **Cached single-embedding reuse ([D-26]):** An insertion triggers exactly 1 embedding call (`embed_in_update_s == 0.0`), verifying that `on_inserted` reuses the vector computed in `shortlist`.
+6. **Repeated insertions:** Successive calls to `insert_node()` correctly expose newly added nodes as candidates for subsequent insertions.
