@@ -8,4 +8,7 @@ syllabus.md
 repositories/
 
 diff.txt
-__pycache__/
+__pycache__/ 
+
+*.patch
+*.egg-info/

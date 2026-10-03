@@ -67,8 +67,8 @@ def _mekg_positive_rows(filepath: pathlib.Path, n: int = 5) -> list[tuple[str, s
     for line in filepath.read_text().splitlines():
         parts = line.strip().split(";")
         if len(parts) == 3 and parts[2] == "1":
-            c1 = parts[0].replace(".txt", "")
-            c2 = parts[1].replace(".txt", "")
+            c1 = parts[0].removesuffix(".txt")
+            c2 = parts[1].removesuffix(".txt")
             if c1 != c2:
                 rows.append((c1, c2))
                 if len(rows) >= n:
@@ -162,11 +162,11 @@ class TestOrientedEdge:
 # ===========================================================================
 
 class TestCrossSourceAgreement:
-    """Every positive edge in example MEKG files that overlaps with DSA must
-    produce the same oriented edge as DSA — the property DATA-002 verified."""
+    """Every positive edge in example MEKG files that overlaps with gold files must
+    produce the same oriented edge as gold — the property DATA-002 verified."""
 
-    def test_no_cross_source_conflicts(self):
-        """Zero conflicts between MEKG_EXAMPLE and GOLD directions for overlapping pairs."""
+    def test_dsa_cross_source_agreement(self):
+        """Zero conflicts between MEKG_EXAMPLE and DSA GOLD directions for overlapping pairs."""
         # Build DSA positive oriented edges
         dsa_edges: dict[frozenset, tuple] = {}
         for line in DSA_FILE.read_text().splitlines():
@@ -176,29 +176,69 @@ class TestCrossSourceAgreement:
                 e = oriented_edge(SourceKind.GOLD, col1, col2)
                 dsa_edges[frozenset(e)] = e
 
-        # Check all MEKG example files
-        import glob
         conflicts = []
         checks = 0
+        contributing_files = set()
         for f in sorted(DATA_DIR.glob("MEKG_with*.txt")):
             for line in f.read_text().splitlines():
                 parts = line.strip().split(";")
                 if len(parts) != 3 or parts[2] != "1":
                     continue
-                c1 = parts[0].replace(".txt", "")
-                c2 = parts[1].replace(".txt", "")
+                c1 = parts[0].removesuffix(".txt")
+                c2 = parts[1].removesuffix(".txt")
                 if c1 == c2:
                     continue
                 mekg_e = oriented_edge(SourceKind.MEKG_EXAMPLE, c1, c2)
                 key = frozenset(mekg_e)
                 if key in dsa_edges:
                     checks += 1
+                    contributing_files.add(f.name)
                     if mekg_e != dsa_edges[key]:
                         conflicts.append((f.name, c1, c2, mekg_e, dsa_edges[key]))
 
-        assert checks > 0, "No overlapping pairs found — data file paths may be wrong"
+        # Exactly 42 positive row checks across 5 files overlap with DSA
+        assert checks >= 42, f"Expected at least 42 DSA checks, got {checks}"
+        assert len(contributing_files) == 5, f"Expected 5 contributing files for DSA, got {len(contributing_files)}"
         assert len(conflicts) == 0, (
-            f"{len(conflicts)} cross-source conflicts found: {conflicts[:3]}"
+            f"{len(conflicts)} cross-source conflicts with DSA found: {conflicts[:3]}"
+        )
+
+    def test_metacademy_cross_source_agreement(self):
+        """Zero conflicts between MEKG_EXAMPLE and Metacademy GOLD directions for overlapping pairs."""
+        # Build Metacademy positive oriented edges (space-delimited)
+        meta_edges: dict[frozenset, tuple] = {}
+        for line in META_FILE.read_text().splitlines():
+            parts = line.strip().split(" ")
+            if len(parts) == 3 and parts[2] == "1" and parts[0] != parts[1]:
+                col1, col2 = parts[0], parts[1]
+                e = oriented_edge(SourceKind.GOLD, col1, col2)
+                meta_edges[frozenset(e)] = e
+
+        conflicts = []
+        checks = 0
+        contributing_files = set()
+        for f in sorted(DATA_DIR.glob("MEKG_with*.txt")):
+            for line in f.read_text().splitlines():
+                parts = line.strip().split(";")
+                if len(parts) != 3 or parts[2] != "1":
+                    continue
+                c1 = parts[0].removesuffix(".txt")
+                c2 = parts[1].removesuffix(".txt")
+                if c1 == c2:
+                    continue
+                mekg_e = oriented_edge(SourceKind.MEKG_EXAMPLE, c1, c2)
+                key = frozenset(mekg_e)
+                if key in meta_edges:
+                    checks += 1
+                    contributing_files.add(f.name)
+                    if mekg_e != meta_edges[key]:
+                        conflicts.append((f.name, c1, c2, mekg_e, meta_edges[key]))
+
+        # Exactly 129 positive row checks across 5 files overlap with Metacademy
+        assert checks >= 120, f"Expected at least 120 Metacademy checks, got {checks}"
+        assert len(contributing_files) == 5, f"Expected 5 contributing files for Metacademy, got {len(contributing_files)}"
+        assert len(conflicts) == 0, (
+            f"{len(conflicts)} cross-source conflicts with Metacademy found: {conflicts[:3]}"
         )
 
 
@@ -244,6 +284,36 @@ class TestConceptGraph:
         g.add_node("recursion")
         assert g.has_node("recursion")
         assert g.num_nodes() == 1
+
+    def test_add_node_empty_raises(self):
+        g = ConceptGraph()
+        with pytest.raises(ValueError, match="cannot be empty"):
+            g.add_node("")
+
+    def test_add_node_txt_suffix_raises(self):
+        g = ConceptGraph()
+        with pytest.raises(ValueError, match="cannot end in '.txt'"):
+            g.add_node("hash_table.txt")
+
+    def test_add_prereq_edge_empty_name_raises(self):
+        g = ConceptGraph()
+        with pytest.raises(ValueError, match="cannot be empty"):
+            g.add_prereq_edge("", "linked_list")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            g.add_prereq_edge("pointer", "")
+
+    def test_add_prereq_edge_txt_suffix_raises(self):
+        g = ConceptGraph()
+        with pytest.raises(ValueError, match="cannot end in '.txt'"):
+            g.add_prereq_edge("pointer.txt", "linked_list")
+        with pytest.raises(ValueError, match="cannot end in '.txt'"):
+            g.add_prereq_edge("pointer", "linked_list.txt")
+
+    def test_add_node_valid_names(self):
+        g = ConceptGraph()
+        g.add_node("hash_table")
+        g.add_node("Godel's_completeness_theorem")
+        assert g.num_nodes() == 2
 
     def test_add_prereq_edge_adds_nodes(self):
         g = ConceptGraph()
@@ -414,3 +484,50 @@ class TestGoldJudgmentSet:
         assert js.get("binary_search_tree", "asymptotic_complexity") != js.get(
             "linked_list", "dijkstra_algorithm"
         )
+
+    def test_judgment_for_edge_gold_dsa(self):
+        """DSA row dijkstra_algorithm;graph;1:
+        col1=dijkstra_algorithm, col2=graph -> graph is prereq of dijkstra_algorithm.
+        So judgment_for_edge('graph', 'dijkstra_algorithm') must be True.
+        The reversed edge judgment_for_edge('dijkstra_algorithm', 'graph') queries
+        row col1=graph, col2=dijkstra_algorithm, which is labeled 0 in DSA -> False.
+        """
+        js = GoldJudgmentSet(source_kind=SourceKind.GOLD)
+        # Record real DSA rows
+        js.record("dijkstra_algorithm", "graph", 1)
+        js.record("graph", "dijkstra_algorithm", 0)
+        assert js.judgment_for_edge("graph", "dijkstra_algorithm") is True
+        assert js.judgment_for_edge("dijkstra_algorithm", "graph") is False
+
+    def test_judgment_for_edge_mekg_example(self):
+        """MEKG example row asymptotic_complexity.txt;hash_table.txt;1:
+        col1=asymptotic_complexity, col2=hash_table -> asymptotic_complexity is prereq of hash_table.
+        So judgment_for_edge('asymptotic_complexity', 'hash_table') must be True.
+        """
+        js = GoldJudgmentSet(source_kind=SourceKind.MEKG_EXAMPLE)
+        js.record("asymptotic_complexity", "hash_table", 1)
+        js.record("hash_table", "asymptotic_complexity", 0)
+        assert js.judgment_for_edge("asymptotic_complexity", "hash_table") is True
+        assert js.judgment_for_edge("hash_table", "asymptotic_complexity") is False
+
+    def test_judgment_for_edge_unjudged_pair_none_both_directions(self):
+        """If a pair is not recorded in either direction, judgment_for_edge
+        returns None in both directions."""
+        js = GoldJudgmentSet(source_kind=SourceKind.GOLD)
+        assert js.judgment_for_edge("binary_search_tree", "asymptotic_complexity") is None
+        assert js.judgment_for_edge("asymptotic_complexity", "binary_search_tree") is None
+
+    def test_judgment_for_edge_dsa_actual_file_missing_pair(self):
+        """In real DSA, asymptotic_complexity;binary_search_tree;0 is present,
+        but binary_search_tree;asymptotic_complexity is omitted (missing).
+        Verify judgment_for_edge behavior against actual DSA data:
+        - ('asymptotic_complexity', 'binary_search_tree') as prereq->dependent maps to
+          row ('binary_search_tree', 'asymptotic_complexity') which is missing -> None.
+        - ('binary_search_tree', 'asymptotic_complexity') as prereq->dependent maps to
+          row ('asymptotic_complexity', 'binary_search_tree') which is in file -> False.
+        """
+        js = GoldJudgmentSet(source_kind=SourceKind.GOLD)
+        js.record("asymptotic_complexity", "binary_search_tree", 0)
+        # Note: binary_search_tree;asymptotic_complexity was never recorded because it's missing in DSA
+        assert js.judgment_for_edge("asymptotic_complexity", "binary_search_tree") is None
+        assert js.judgment_for_edge("binary_search_tree", "asymptotic_complexity") is False

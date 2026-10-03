@@ -110,6 +110,19 @@ def embed_text(name: str) -> str:
     return name.replace("_", " ")
 
 
+def _validate_concept_name(name: str) -> None:
+    """Enforce that concept names are non-empty and stripped of '.txt' suffixes.
+
+    Per [D-16] and [D-21], nodes must be bare concept names.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"Concept name cannot be empty, got {name!r}")
+    if name.endswith(".txt"):
+        raise ValueError(
+            f"Concept name cannot end in '.txt' (D-16/D-21: nodes must be bare names), got {name!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # ConceptGraph — the main in-memory graph object
 # ---------------------------------------------------------------------------
@@ -144,6 +157,7 @@ class ConceptGraph:
 
     def add_node(self, name: str) -> None:
         """Add a concept node if it doesn't already exist."""
+        _validate_concept_name(name)
         self._g.add_node(name)
 
     def has_node(self, name: str) -> bool:
@@ -165,6 +179,8 @@ class ConceptGraph:
 
         Both nodes are added automatically if not already present.
         """
+        _validate_concept_name(prereq)
+        _validate_concept_name(dependent)
         if prereq == dependent:
             raise ValueError(
                 f"Self-loop not allowed: {prereq!r} → {dependent!r}"
@@ -300,6 +316,31 @@ class GoldJudgmentSet:
         if lbl is _Label.MISSING:
             return None
         return lbl is _Label.ONE
+
+    def judgment_for_edge(self, prereq: str, dependent: str) -> Optional[bool]:
+        """Return True/False/None for judged-1 / judged-0 / not-judged on canonical edge.
+
+        Takes a CANONICAL pair (prereq, dependent) where prereq is asserted to be
+        a prerequisite of dependent, and looks up the judgment using the column order
+        defined by this set's source_kind. Reuses :func:`oriented_edge` as the single
+        source of truth for the column mapping.
+
+        Parameters
+        ----------
+        prereq:
+            The candidate prerequisite concept name.
+        dependent:
+            The candidate dependent concept name.
+
+        Returns
+        -------
+        Optional[bool]
+            True if judged 1 (prerequisite relationship exists),
+            False if judged 0 (explicitly judged non-prerequisite),
+            None if the pair was not judged in the dataset (missing).
+        """
+        col1, col2 = oriented_edge(self.source_kind, prereq, dependent)
+        return self.is_prerequisite(col1, col2)
 
     def all_judged_pairs(self) -> list[tuple[str, str, int]]:
         """Return all (col1, col2, label_int) triples."""
