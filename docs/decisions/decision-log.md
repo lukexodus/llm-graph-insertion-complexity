@@ -173,3 +173,11 @@ for DSA/Metacademy. Reasoning: contains exclusively elementary school mathematic
 articles (matching Section 6.2 crowdsourced CSVs), with 0% overlap with DSA or
 Metacademy; build-phase text must be sourced externally or via parametric LLM prompts.
 
+**[D-19]** Example MEKG files directionality resolved: in all ten example MEKG files
+(`MEKG_with*.txt`), `concept1.txt;concept2.txt;1` means `concept1` is a prerequisite of
+`concept2` (`col1 is prerequisite of col2`, i.e., prerequisite -> dependent).
+Reasoning: systematically verified across all ten files in DATA-002; 100% of positive
+edges overlapping with DSA/Metacademy match the reversed column order relative to D-15.
+Corpus loader (INFRA-003) must apply this reversed mapping for example MEKG files.
+
+

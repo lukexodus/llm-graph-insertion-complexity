@@ -60,6 +60,7 @@ Ten files confirmed present in `repositories/dataset/EKG-Dataset/`:
 *(Note exact filenames: 7 of the 10 files contain `with_<n>_nodes` with underscores).*
 
 - **Format:** **All 10 files are semicolon-delimited (`;`)**, matching DSA. None are space-delimited.
+- **Directionality / Semantics (CRITICAL — REVERSED FROM D-15):** in **all 10 files without exception**, `concept1.txt;concept2.txt;1` means **`concept1` is a prerequisite of `concept2`** (i.e. Column 1 is the prerequisite, Column 2 is the dependent concept). This is **unanimously reversed** from the DSA and Metacademy convention ([D-15]), where Column 2 was the prerequisite. Verified systematically across all 10 files in task DATA-002 (see report `docs/reports/DATA-002-gemini-mekg-directionality.md` and decision-log [D-19]).
 - **Concept Name Extension Quirk (CRITICAL):** in all 10 files, every concept name has a `.txt` filename suffix attached (e.g. `hash_table.txt;asymptotic_complexity.txt;0`). Loaders must strip `.txt` from node names when parsing.
 - **Coverage:** each file contains $N \times N$ lines (full Cartesian product including $N$ self-loops, all labeled `0`).
 - **Concept name edge case:** `Godel's_completeness_theorem.txt` in `MEKG_with_8_nodes(logic).txt` contains an apostrophe without quoting; parses cleanly.
