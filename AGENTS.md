@@ -16,6 +16,40 @@ anyway — a redundant note costs almost nothing; a lost finding costs a
 future agent having to re-derive it from scratch, or worse, silently redoing
 work already done.
 
+**This repo is the sole source of truth, always — never the APC AI, never
+any chat transcript, never any AI's stated memory of a past conversation.**
+The APC AI has no filesystem access and no persistent memory across its own
+sessions; if something it says ever conflicts with what's actually in a
+repo file, the repo file is correct and the APC AI's statement is stale.
+This applies to you too: if a task prompt or a piece of relayed context
+seems to assume something about this repo that you can check directly (you
+have filesystem access; the APC AI does not), check it, and say so in your
+report if it was wrong — don't silently defer to a prompt's assumption over
+what you can see yourself.
+
+## Reporting changes efficiently — send deltas, not full files
+
+**When you edit or add to a file that already exists in the repo (shared
+docs like `decision-log.md`, `data-formats.md`, `status.md`, or anything
+else), relay your change back to Luke/the APC AI as a diff or a clear
+before/after excerpt of just the changed part — not the full resulting
+file.** A full-file paste forces whoever's reading it to hunt for what
+actually changed, which defeats the purpose of writing efficient,
+scannable reports. A standard unified diff (`git diff` output) is the
+easiest format for this — if you're working in a git-tracked checkout, just
+include the relevant diff output in your report rather than re-typing the
+change.
+
+**Exceptions, where a full file genuinely is the right thing to send:**
+- You created a brand-new file (there's no "before" to diff against).
+- The change is a near-total rewrite where a diff would be longer and
+  harder to read than the whole file.
+- You're asked explicitly for full content.
+
+If you're ever unsure which applies, default to the diff — it's easy for
+the reader to ask for more context, but hard to un-paste a wall of
+mostly-unchanged text.
+
 ## Before starting any task
 
 1. Read `docs/context/complete-context.md` if you haven't already this

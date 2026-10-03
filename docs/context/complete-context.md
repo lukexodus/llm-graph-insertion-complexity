@@ -154,6 +154,17 @@ did, what you found, and anything the APC AI or a future agent needs to know
 purposes of this project, equivalent to a change that never happened, because
 no future session will know to look for it.
 
+**This repo — not the APC AI, not any chat transcript — is the sole source
+of truth.** The APC AI has no filesystem access and no memory beyond what's
+written here; anything it says that conflicts with the repo's actual current
+state is simply stale, not authoritative. When the APC AI produces an edit
+to an existing file, it should be relayed as a delta (diff or before/after
+excerpt), not a full-file paste — the same rule `AGENTS.md` sets for local
+agents reporting back, now applied symmetrically in the other direction, so
+that reviewing any change (by a human, by a local agent, by a future APC
+instance) means reading only what moved, not re-diffing a wall of unchanged
+text by eye.  
+
 ## 7. Open items — things that are genuinely unresolved right now
 
 - **DATA-001** (see `tasks/status.md`): independent verification of
