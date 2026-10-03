@@ -243,3 +243,9 @@ unacceptable zero-shot accuracy. Evidence:
 (3) Operational timing isolation: validation overhead (shortlist contract checks and pre-mutation edge validation) is timed separately in `InsertionMetrics.validate_s` and excluded from `total_s`. Total insertion wall time is strictly defined as `total_s = shortlist_s + decide_s + apply_s + update_s`;
 (4) Strict zero-embedding assertion during updates: `InsertionMetrics.embedding_calls_in_update: int = 0` tracks discrete embedding calls during `on_inserted()`, eliminating false passes or fragile assertions due to floating-point timing noise in `embed_in_update_s`.
 Reasoning: ensures fail-fast trial safety before any strategy execution, guarantees zero undetected unmetered embedding calls by enforcing instance identity, eliminates measurement pollution of strategy insertion timing by driver validation overheads (which scale with shortlist size), and provides robust integer assertions for the single-embedding invariant. Affects: `insert_node`, `InsertionMetrics`, `StrategyConformanceSuite`, `tests/test_strategy_interface.py`, `docs/context/strategy-interface.md`, STRAT-001 through STRAT-004.
+
+**[D-29]** Shared LLM decision step model, granularity, and concurrency locked:
+(1) LLM = DeepSeek V4 Flash via DeepSeek's official API, non-thinking mode (`{"thinking": {"type": "disabled"}}`), temperature 0;
+(2) Granularity = one LLM call per (new, candidate) pair; no batching;
+(3) Concurrency = 1: the decision step is strictly sequential (no threads/async).
+Reasoning: cost is negligible at this model's price; pairwise makes llm_calls equal shortlist size for every strategy (thesis 3.2.2 "one at a time"); sequential calls keep per-call latency uncontaminated by our own load. Affects: `PairwiseDecisionStep`, `DeepSeekClient`, `MeteredLLMClient`, INFRA-006, `pilot_dsa_zero_shot.py`, and all strategy insertion experiments.

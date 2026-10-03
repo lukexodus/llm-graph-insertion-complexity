@@ -62,5 +62,33 @@ __all__ = [
     "DEFAULT_DATASET_ROOT",
     "CORPUS_DOMAIN_CONTEXT_MAP",
     "TAG_DOMAIN_CONTEXT_MAP",
+    # LLM & Decision Step
+    "LLMResponse",
+    "LLMSnapshot",
+    "LLMClient",
+    "MeteredLLMClient",
+    "DeepSeekClient",
+    "FakeLLMClient",
+    "LLMTransportError",
+    "PairwiseDecisionStep",
+    "DecisionParseError",
+    "PROMPT_VERSION",
+    "SYSTEM_PROMPT",
 ]
+
+from graph_insertion.llm import (
+    DeepSeekClient,
+    FakeLLMClient,
+    LLMClient,
+    LLMResponse,
+    LLMSnapshot,
+    LLMTransportError,
+    MeteredLLMClient,
+)
+from graph_insertion.decision import (
+    DecisionParseError,
+    PROMPT_VERSION,
+    PairwiseDecisionStep,
+    SYSTEM_PROMPT,
+)
 
