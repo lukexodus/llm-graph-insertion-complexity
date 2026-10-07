@@ -184,6 +184,7 @@ def score_pilot(
     correct_calls_sensitivity = 0
     total_calls_sensitivity = 0
     direction_flips = 0
+    calls_with_gold_and_pred_edge = 0
 
     for (new_name, cand), rec in call_results.items():
         is_prereq_gold = gold.judgment_for_edge(new_name, cand)
@@ -216,10 +217,12 @@ def score_pilot(
             conf_matrix[gold_token_standard][pred_token] += 1
             if pred_token == gold_token_standard:
                 correct_calls_standard += 1
-            if (gold_token_standard == "X_PREREQ_Y" and pred_token == "Y_PREREQ_X") or (
-                gold_token_standard == "Y_PREREQ_X" and pred_token == "X_PREREQ_Y"
-            ):
-                direction_flips += 1
+            if gold_token_standard in ("X_PREREQ_Y", "Y_PREREQ_X") and pred_token in ("X_PREREQ_Y", "Y_PREREQ_X"):
+                calls_with_gold_and_pred_edge += 1
+                if (gold_token_standard == "X_PREREQ_Y" and pred_token == "Y_PREREQ_X") or (
+                    gold_token_standard == "Y_PREREQ_X" and pred_token == "X_PREREQ_Y"
+                ):
+                    direction_flips += 1
 
         if gold_token_sens in classes:
             total_calls_sensitivity += 1
@@ -232,6 +235,9 @@ def score_pilot(
     )
     accuracy_sensitivity = (
         correct_calls_sensitivity / total_calls_sensitivity if total_calls_sensitivity > 0 else 0.0
+    )
+    direction_flip_rate = (
+        direction_flips / calls_with_gold_and_pred_edge if calls_with_gold_and_pred_edge > 0 else 0.0
     )
 
     # 3. Per-held-out-node insertion evaluation
@@ -272,10 +278,10 @@ def score_pilot(
                 "shortlist_recall": round(agg.shortlist_recall_micro, 4),
             },
             "macro": {
-                "precision": round(agg.precision_macro, 4),
-                "recall": round(agg.recall_macro, 4),
-                "f1": round(agg.f1_macro, 4),
-                "shortlist_recall": round(agg.shortlist_recall_macro, 4),
+                "precision": round(agg.precision_macro, 4) if agg.precision_macro is not None else None,
+                "recall": round(agg.recall_macro, 4) if agg.recall_macro is not None else None,
+                "f1": round(agg.f1_macro, 4) if agg.f1_macro is not None else None,
+                "shortlist_recall": round(agg.shortlist_recall_macro, 4) if agg.shortlist_recall_macro is not None else None,
                 "n_precision_defined": agg.n_precision_defined,
                 "n_recall_defined": agg.n_recall_defined,
                 "n_f1_defined": agg.n_f1_defined,
@@ -285,9 +291,9 @@ def score_pilot(
                 "precision_micro": round(agg.precision_micro_sensitivity, 4),
                 "recall_micro": round(agg.recall_micro_sensitivity, 4),
                 "f1_micro": round(agg.f1_micro_sensitivity, 4),
-                "precision_macro": round(agg.precision_macro_sensitivity, 4),
-                "recall_macro": round(agg.recall_macro_sensitivity, 4),
-                "f1_macro": round(agg.f1_macro_sensitivity, 4),
+                "precision_macro": round(agg.precision_macro_sensitivity, 4) if agg.precision_macro_sensitivity is not None else None,
+                "recall_macro": round(agg.recall_macro_sensitivity, 4) if agg.recall_macro_sensitivity is not None else None,
+                "f1_macro": round(agg.f1_macro_sensitivity, 4) if agg.f1_macro_sensitivity is not None else None,
                 "n_precision_sensitivity_defined": agg.n_precision_sensitivity_defined,
                 "n_recall_sensitivity_defined": agg.n_recall_sensitivity_defined,
                 "n_f1_sensitivity_defined": agg.n_f1_sensitivity_defined,
@@ -301,6 +307,8 @@ def score_pilot(
             },
         },
         "direction_flips": direction_flips,
+        "calls_with_gold_and_pred_edge": calls_with_gold_and_pred_edge,
+        "direction_flip_rate": round(direction_flip_rate, 4),
         "swap_consistency": {
             "consistent_pairs": swap_consistent_pairs,
             "total_unordered_pairs": total_unordered,
@@ -317,8 +325,110 @@ def score_pilot(
     }
 
 
+def evaluate_acceptance(summary: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate DSA pilot against G1 validity and G2 usefulness criteria ([D-34]).
+
+    Parameters
+    ----------
+    summary:
+        Pilot summary dictionary containing configuration, usage, retries,
+        and evaluation results.
+
+    Returns
+    -------
+    dict[str, Any]
+        Per-criterion evaluations and overall PASS / FAIL / CONDITIONAL verdict.
+    """
+    total_calls = summary.get("total_calls", 812) or 812
+
+    # G1 Validity quantities
+    tf = summary.get("transport_failure_count", summary.get("transport_failures", 0))
+    pf = summary.get("parse_failure_count", summary.get("retries_and_errors", {}).get("parse_failures", 0))
+    pf_rate = summary.get("retries_and_errors", {}).get("parse_failure_rate", (pf / total_calls) if total_calls else 0.0)
+    rt = summary.get("token_usage", {}).get("reasoning_tokens", 0)
+
+    conf_m = summary.get("configured_model") or summary.get("model_id") or ""
+    obs_m = summary.get("observed_model_ids", [])
+    pv = summary.get("prompt_version") or summary.get("PROMPT_VERSION") or ""
+
+    retries = summary.get("retried_call_count", summary.get("retries_and_errors", {}).get("retries", 0))
+    retry_rate = (retries / total_calls) if total_calls else 0.0
+
+    g1_tf_pass = (tf == 0)
+    g1_pf_pass = (pf <= 8) and (pf_rate <= 0.01)
+    g1_rt_pass = (rt == 0)
+    g1_model_pass = (len(obs_m) == 1 and obs_m[0] == conf_m)
+    g1_pv_pass = (pv == "v2")
+    g1_retries_pass = (retry_rate <= 0.02)
+
+    g1_pass = (
+        g1_tf_pass
+        and g1_pf_pass
+        and g1_rt_pass
+        and g1_model_pass
+        and g1_pv_pass
+        and g1_retries_pass
+    )
+    g1_verdict = "PASS" if g1_pass else "FAIL"
+
+    # G2 Usefulness quantities
+    ev = summary.get("evaluation", {})
+    nis = ev.get("node_insertion_scoring", {})
+    micro = nis.get("micro", {})
+    recall = micro.get("recall", ev.get("recall_micro", 0.0))
+    f1 = micro.get("f1", ev.get("f1_micro", 0.0))
+
+    flips = ev.get("direction_flips", 0)
+    flip_denom = ev.get("calls_with_gold_and_pred_edge", 0)
+    if "direction_flip_rate" in ev:
+        flip_rate = ev["direction_flip_rate"]
+    else:
+        flip_rate = (flips / flip_denom) if flip_denom > 0 else 0.0
+
+    g2_recall_pass = (recall >= 0.70)
+    g2_f1_pass = (f1 >= 0.50)
+    g2_flips_pass = (flip_rate <= 0.15)
+
+    if g2_recall_pass and g2_f1_pass and g2_flips_pass:
+        g2_verdict = "PASS"
+    elif f1 < 0.35 or recall < 0.50:
+        g2_verdict = "FAIL"
+    else:
+        g2_verdict = "CONDITIONAL"
+
+    overall_verdict = g2_verdict if g1_pass else "INVALID"
+
+    return {
+        "g1_validity": {
+            "transport_failures": {"value": tf, "passed": g1_tf_pass},
+            "parse_failures": {"value": pf, "rate": round(pf_rate, 4), "passed": g1_pf_pass},
+            "reasoning_tokens": {"value": rt, "passed": g1_rt_pass},
+            "model_identity": {
+                "configured": conf_m,
+                "observed": obs_m,
+                "passed": g1_model_pass,
+            },
+            "prompt_version": {"value": pv, "passed": g1_pv_pass},
+            "retries": {"value": retries, "rate": round(retry_rate, 4), "passed": g1_retries_pass},
+            "verdict": g1_verdict,
+        },
+        "g2_usefulness": {
+            "recall_micro": {"value": round(recall, 4), "threshold_pass": 0.70, "threshold_fail": 0.50, "passed": g2_recall_pass},
+            "f1_micro": {"value": round(f1, 4), "threshold_pass": 0.50, "threshold_fail": 0.35, "passed": g2_f1_pass},
+            "direction_flip_rate": {"value": round(flip_rate, 4), "flips": flips, "denominator": flip_denom, "threshold_pass": 0.15, "passed": g2_flips_pass},
+            "verdict": g2_verdict,
+        },
+        "overall_verdict": overall_verdict,
+    }
+
+
 def print_pilot_summary(summary: dict[str, Any]) -> None:
     """Print readable summary to stdout."""
+    def _format_metric(val: Optional[float]) -> str:
+        if val is None:
+            return "undefined"
+        return f"{val:.2%}"
+
     ev = summary.get("evaluation", {})
     nis = ev.get("node_insertion_scoring", {})
     micro = nis.get("micro", {})
@@ -327,25 +437,36 @@ def print_pilot_summary(summary: dict[str, Any]) -> None:
     swap = ev.get("swap_consistency", {})
 
     print("\n--- PILOT SUMMARY ---")
-    print(f"3-Way Accuracy (Standard): {ev.get('accuracy_3way_standard', 0.0):.2%}")
-    print(f"3-Way Accuracy (Sensitivity: Missing as NONE): {ev.get('accuracy_3way_sensitivity_missing_as_none', 0.0):.2%}")
+    print(f"3-Way Accuracy (Standard): {_format_metric(ev.get('accuracy_3way_standard'))}")
+    print(f"3-Way Accuracy (Sensitivity: Missing as NONE): {_format_metric(ev.get('accuracy_3way_sensitivity_missing_as_none'))}")
     print(
-        f"Node Insertion Micro: Precision={micro.get('precision', 0.0):.2%}, "
-        f"Recall={micro.get('recall', 0.0):.2%}, F1={micro.get('f1', 0.0):.2%}"
+        f"Node Insertion Micro: Precision={_format_metric(micro.get('precision'))}, "
+        f"Recall={_format_metric(micro.get('recall'))}, F1={_format_metric(micro.get('f1'))}"
     )
     print(
-        f"Node Insertion Macro: Precision={macro.get('precision', 0.0):.2%}, "
-        f"Recall={macro.get('recall', 0.0):.2%}, F1={macro.get('f1', 0.0):.2%}"
+        f"Node Insertion Macro: Precision={_format_metric(macro.get('precision'))}, "
+        f"Recall={_format_metric(macro.get('recall'))}, F1={_format_metric(macro.get('f1'))}"
     )
     print(
         f"Totals: TP={totals.get('tp', 0)}, FP={totals.get('fp', 0)}, FN={totals.get('fn', 0)}, "
         f"Unjudged Predictions={totals.get('unjudged_predictions', 0)}"
     )
-    print(f"Direction Flips: {ev.get('direction_flips', 0)}")
     print(
-        f"Swap Consistency Rate: {swap.get('swap_consistency_rate', 0.0):.2%} "
+        f"Direction Flips: {ev.get('direction_flips', 0)} "
+        f"({_format_metric(ev.get('direction_flip_rate'))} of {ev.get('calls_with_gold_and_pred_edge', 0)} edge calls)"
+    )
+    print(
+        f"Swap Consistency Rate: {_format_metric(swap.get('swap_consistency_rate'))} "
         f"({swap.get('consistent_pairs', 0)}/{swap.get('total_unordered_pairs', 0)})"
     )
+
+    acc = summary.get("acceptance", {})
+    if acc:
+        g1 = acc.get("g1_validity", {})
+        g2 = acc.get("g2_usefulness", {})
+        print(f"Acceptance G1 Validity: {g1.get('verdict', 'N/A')}")
+        print(f"Acceptance G2 Usefulness: {g2.get('verdict', 'N/A')}")
+        print(f"Overall Acceptance Verdict: {acc.get('overall_verdict', 'N/A')}")
 
     retries = summary.get("retries_and_errors", {})
     if "parse_failures" in retries:
@@ -428,6 +549,7 @@ def run_pilot(
                     "response_text": resp.text,
                     "raw_token": raw_token,
                     "latency_s": resp.latency_s,
+                    "model": resp.model_id,
                     "input_tokens": resp.input_tokens,
                     "output_tokens": resp.output_tokens,
                     "reasoning_tokens": resp.reasoning_tokens,
@@ -454,14 +576,37 @@ def run_pilot(
     snap = meter.snapshot()
     total_cost = (snap.input_tokens * price_in + snap.output_tokens * price_out) / 1_000_000
 
+    # Client parameters extraction
+    inner_client = getattr(client, "client", client)
+    base_url = getattr(inner_client, "base_url", getattr(client, "base_url", None))
+    temperature = getattr(inner_client, "temperature", getattr(client, "temperature", 0.0))
+    t_obj = getattr(inner_client, "thinking", getattr(client, "thinking", {"type": "disabled"}))
+    thinking_mode = t_obj.get("type", "disabled") if isinstance(t_obj, dict) else str(t_obj)
+    max_tokens = getattr(inner_client, "max_tokens", getattr(client, "max_tokens", 16))
+
+    observed_model_ids = sorted(list(set(r.get("model", "") for r in call_records if r.get("model"))))
+    if not observed_model_ids and hasattr(client, "model_ids_seen"):
+        observed_model_ids = sorted(list(client.model_ids_seen))
+    if not observed_model_ids:
+        observed_model_ids = [model_name]
+
     summary: dict[str, Any] = {
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "prompt_version": PROMPT_VERSION,
+        "configured_model": model_name,
         "model_id": model_name,
+        "observed_model_ids": observed_model_ids,
+        "base_url": base_url,
+        "temperature": temperature,
+        "thinking_mode": thinking_mode,
+        "max_tokens": max_tokens,
         "dataset": "DSA_gold_standard_MEKG",
         "num_nodes": num_nodes,
         "total_calls": call_index,
         "planned_calls": planned_calls,
+        "parse_failure_count": snap.parse_failures,
+        "retried_call_count": snap.retries,
+        "transport_failure_count": 0,
         "prices": {
             "price_in_per_m": price_in,
             "price_out_per_m": price_out,
@@ -489,6 +634,7 @@ def run_pilot(
         },
         "evaluation": scored["evaluation"],
     }
+    summary["acceptance"] = evaluate_acceptance(summary)
 
     summary_file = output_dir / "summary.json"
     with summary_file.open("w", encoding="utf-8") as f_sum:
@@ -591,6 +737,7 @@ def main() -> None:
                 pass
 
         summary["evaluation"] = scored["evaluation"]
+        summary["acceptance"] = evaluate_acceptance(summary)
         summary["re-scored_at_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with summary_file.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)

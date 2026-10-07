@@ -23,14 +23,18 @@ from graph_insertion.strategy import DecisionOutcome, DecisionStep
 # Prompt Version and Templates
 # ---------------------------------------------------------------------------
 
-PROMPT_VERSION: str = "v1"
+PROMPT_VERSION: str = "v2"
 
 SYSTEM_PROMPT: str = (
     "You judge prerequisite relationships between concepts in a curriculum. "
     "A concept P is a prerequisite of a concept Q if a learner needs to understand P, "
     "directly or indirectly through other concepts, before learning Q. "
     "Answer with exactly one of: X_PREREQ_Y (X is a prerequisite of Y), "
-    "Y_PREREQ_X (Y is a prerequisite of X), NONE (neither). Output only that token."
+    "Y_PREREQ_X (Y is a prerequisite of X), NONE (neither). Output only that token.\n\n"
+    "Examples:\n"
+    "Concept X: fractions / Concept Y: ratios -> X_PREREQ_Y\n"
+    "Concept X: calculus / Concept Y: limits -> Y_PREREQ_X\n"
+    "Concept X: poetry / Concept Y: plumbing -> NONE"
 )
 
 VALID_TOKENS: frozenset[str] = frozenset({"X_PREREQ_Y", "Y_PREREQ_X", "NONE"})

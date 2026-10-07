@@ -208,8 +208,8 @@ class TestScoreAggregation:
             decided_edges=(("a", "h"), ("h", "b"), ("h", "c")),
         )
 
-        # Node 2: No predictions made (decided_edges=())
-        # TP=0, FP=0, FN=1 -> precision=None, recall=0.0, F1=None
+        # Node 2: Gold incident edge exists, but no predictions made (decided_edges=())
+        # TP=0, FP=0, FN=1 -> precision=None, recall=0.0, F1=0.0 (included in macro F1!)
         judgments.record("d", "a", 0)
         judgments.record("a", "d", 0)
         s2 = score_node_insertion(
@@ -221,17 +221,82 @@ class TestScoreAggregation:
         )
         assert s2.precision is None
         assert s2.recall == 0.0
-        assert s2.f1 is None
+        assert s2.f1 == 0.0
 
         agg = aggregate_scores([s1, s2])
-        # Only s1 has defined precision and f1; both have defined recall
+        # s1 has defined precision; both have defined recall and f1
         assert agg.n_precision_defined == 1
         assert agg.n_recall_defined == 2
-        assert agg.n_f1_defined == 1
+        assert agg.n_f1_defined == 2
         # Macro precision: mean of defined only = 1.0 / 1 = 1.0
         assert agg.precision_macro == 1.0
         # Macro recall: mean of defined = (1.0 + 0.0) / 2 = 0.5
         assert agg.recall_macro == 0.5
-        # Macro f1: mean of defined only = 1.0 / 1 = 1.0
-        assert agg.f1_macro == 1.0
+        # Macro f1: mean of defined = (1.0 + 0.0) / 2 = 0.5
+        assert agg.f1_macro == 0.5
+
+    def test_macro_f1_zero_and_undefined_cases(self):
+        # Case (i): node with gold edges and zero predictions gives F1 = 0.0, included in macro F1
+        g1 = ConceptGraph()
+        g1.add_node("x")
+        g1.add_node("y")
+        g1.add_prereq_edge("x", "y")  # incident to both
+        j1 = GoldJudgmentSet()
+        j1.record("x", "y", 1)
+        j1.record("y", "x", 0)
+        s_i = score_node_insertion(
+            node="x",
+            gold_graph=g1,
+            judgments=j1,
+            shortlist_candidates=("y",),
+            decided_edges=(),
+        )
+        assert s_i.tp == 0 and s_i.fn == 1 and s_i.fp == 0
+        assert s_i.f1 == 0.0
+        assert s_i.precision is None
+
+        # Case (ii): node with no gold edges and one false positive gives F1 = 0.0
+        g2 = ConceptGraph()
+        g2.add_node("isolated")
+        g2.add_node("other")
+        j2 = GoldJudgmentSet()
+        j2.record("isolated", "other", 0)
+        j2.record("other", "isolated", 0)
+        s_ii = score_node_insertion(
+            node="isolated",
+            gold_graph=g2,
+            judgments=j2,
+            shortlist_candidates=("other",),
+            decided_edges=(("isolated", "other"),),
+        )
+        assert s_ii.tp == 0 and s_ii.fn == 0 and s_ii.fp == 1
+        assert s_ii.f1 == 0.0
+        assert s_ii.precision == 0.0
+        assert s_ii.recall is None
+
+        # Case (iii): node with no gold edges and no predictions is excluded (F1 = None)
+        s_iii = score_node_insertion(
+            node="isolated",
+            gold_graph=g2,
+            judgments=j2,
+            shortlist_candidates=("other",),
+            decided_edges=(),
+        )
+        assert s_iii.tp == 0 and s_iii.fn == 0 and s_iii.fp == 0
+        assert s_iii.f1 is None
+        assert s_iii.precision is None
+        assert s_iii.recall is None
+
+        # Case (iv): when n_defined == 0, macro value must be None
+        agg_empty = aggregate_scores([s_iii])
+        assert agg_empty.n_f1_defined == 0
+        assert agg_empty.f1_macro is None
+        assert agg_empty.precision_macro is None
+        assert agg_empty.recall_macro is None
+
+        # Aggregation with case (i), case (ii), and case (iii):
+        # case (iii) excluded, case (i) and (ii) yield 0.0
+        agg_both = aggregate_scores([s_i, s_ii, s_iii])
+        assert agg_both.n_f1_defined == 2
+        assert agg_both.f1_macro == 0.0
 

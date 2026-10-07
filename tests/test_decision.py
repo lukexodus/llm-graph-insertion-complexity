@@ -18,6 +18,7 @@ from graph_insertion.decision import (
 from graph_insertion.embedding import FakeEmbedder, MeteredEmbedder
 from graph_insertion.graph_representation import ConceptGraph, GoldJudgmentSet, SourceKind
 from graph_insertion.llm import FakeLLMClient, MeteredLLMClient
+from graph_insertion.loader import discover_corpora, load_corpus
 from graph_insertion.strategy import insert_node
 from scripts.pilot_dsa_zero_shot import (
     compute_gold_unordered_label,
@@ -248,3 +249,29 @@ class TestInsertNodeIntegration:
         assert delta.input_tokens == 30
         assert delta.output_tokens == 4
         assert strat.on_inserted_called is True
+
+
+class TestPromptVersionAndCorpusDisjointness:
+    """Verify prompt v2 pinning and disjointness with all evaluation corpora."""
+
+    def test_prompt_v2_pinning(self):
+        assert PROMPT_VERSION == "v2"
+        expected_examples = (
+            "Concept X: fractions / Concept Y: ratios -> X_PREREQ_Y",
+            "Concept X: calculus / Concept Y: limits -> Y_PREREQ_X",
+            "Concept X: poetry / Concept Y: plumbing -> NONE",
+        )
+        for ex in expected_examples:
+            assert ex in SYSTEM_PROMPT, f"Missing example in SYSTEM_PROMPT: {ex}"
+        assert not SYSTEM_PROMPT.endswith("\n")
+
+    def test_few_shot_examples_disjoint_from_all_corpora(self):
+        example_concepts = {"fractions", "ratios", "calculus", "limits", "poetry", "plumbing"}
+        specs = discover_corpora()
+        assert len(specs) == 12
+        for spec in specs:
+            corpus = load_corpus(spec)
+            nodes = corpus.graph.nodes()
+            intersection = example_concepts & nodes
+            assert not intersection, f"Corpus {spec.name} contains few-shot concepts: {intersection}"
+

@@ -101,10 +101,10 @@ class AggregateScore:
     recall_micro: float
     f1_micro: float
     # Macro aggregates (Standard - undefined values excluded from mean)
-    shortlist_recall_macro: float
-    precision_macro: float
-    recall_macro: float
-    f1_macro: float
+    shortlist_recall_macro: Optional[float]
+    precision_macro: Optional[float]
+    recall_macro: Optional[float]
+    f1_macro: Optional[float]
     n_shortlist_recall_defined: int
     n_precision_defined: int
     n_recall_defined: int
@@ -114,9 +114,9 @@ class AggregateScore:
     precision_micro_sensitivity: float
     recall_micro_sensitivity: float
     f1_micro_sensitivity: float
-    precision_macro_sensitivity: float
-    recall_macro_sensitivity: float
-    f1_macro_sensitivity: float
+    precision_macro_sensitivity: Optional[float]
+    recall_macro_sensitivity: Optional[float]
+    f1_macro_sensitivity: Optional[float]
     n_precision_sensitivity_defined: int
     n_recall_sensitivity_defined: int
     n_f1_sensitivity_defined: int
@@ -205,28 +205,18 @@ def score_node_insertion(
     # Undefined recall if no gold positives (tp + fn == 0)
     recall: Optional[float] = (tp / (tp + fn)) if (tp + fn > 0) else None
 
-    f1: Optional[float]
-    if precision is not None and recall is not None:
-        if precision + recall > 0:
-            f1 = 2 * precision * recall / (precision + recall)
-        else:
-            f1 = 0.0
-    else:
-        f1 = None
+    f1: Optional[float] = (
+        (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn > 0) else None
+    )
 
     # Sensitivity metrics (unjudged pair counted as NONE / not a prereq -> predicted edge is FP)
     fp_sens = fp + excluded
     precision_sens: Optional[float] = (tp / (tp + fp_sens)) if (tp + fp_sens > 0) else None
     recall_sens: Optional[float] = recall
 
-    f1_sens: Optional[float]
-    if precision_sens is not None and recall_sens is not None:
-        if precision_sens + recall_sens > 0:
-            f1_sens = 2 * precision_sens * recall_sens / (precision_sens + recall_sens)
-        else:
-            f1_sens = 0.0
-    else:
-        f1_sens = None
+    f1_sens: Optional[float] = (
+        (2 * tp / (2 * tp + fp_sens + fn)) if (2 * tp + fp_sens + fn > 0) else None
+    )
 
     return NodeScore(
         node=node,
@@ -267,10 +257,10 @@ def aggregate_scores(node_scores: Sequence[NodeScore]) -> AggregateScore:
             precision_micro=0.0,
             recall_micro=0.0,
             f1_micro=0.0,
-            shortlist_recall_macro=0.0,
-            precision_macro=0.0,
-            recall_macro=0.0,
-            f1_macro=0.0,
+            shortlist_recall_macro=None,
+            precision_macro=None,
+            recall_macro=None,
+            f1_macro=None,
             n_shortlist_recall_defined=0,
             n_precision_defined=0,
             n_recall_defined=0,
@@ -279,9 +269,9 @@ def aggregate_scores(node_scores: Sequence[NodeScore]) -> AggregateScore:
             precision_micro_sensitivity=0.0,
             recall_micro_sensitivity=0.0,
             f1_micro_sensitivity=0.0,
-            precision_macro_sensitivity=0.0,
-            recall_macro_sensitivity=0.0,
-            f1_macro_sensitivity=0.0,
+            precision_macro_sensitivity=None,
+            recall_macro_sensitivity=None,
+            f1_macro_sensitivity=None,
             n_precision_sensitivity_defined=0,
             n_recall_sensitivity_defined=0,
             n_f1_sensitivity_defined=0,
@@ -308,16 +298,16 @@ def aggregate_scores(node_scores: Sequence[NodeScore]) -> AggregateScore:
         else 0.0
     )
 
-    # Macro standard (undefined values excluded from unweighted mean)
+    # Macro standard (undefined values excluded from unweighted mean; None if no defined values)
     sl_recall_vals = [s.shortlist_recall for s in node_scores if s.shortlist_recall is not None]
     prec_vals = [s.precision for s in node_scores if s.precision is not None]
     rec_vals = [s.recall for s in node_scores if s.recall is not None]
     f1_vals = [s.f1 for s in node_scores if s.f1 is not None]
 
-    sl_recall_macro = sum(sl_recall_vals) / len(sl_recall_vals) if sl_recall_vals else 0.0
-    prec_macro = sum(prec_vals) / len(prec_vals) if prec_vals else 0.0
-    rec_macro = sum(rec_vals) / len(rec_vals) if rec_vals else 0.0
-    f1_macro = sum(f1_vals) / len(f1_vals) if f1_vals else 0.0
+    sl_recall_macro = sum(sl_recall_vals) / len(sl_recall_vals) if sl_recall_vals else None
+    prec_macro = sum(prec_vals) / len(prec_vals) if prec_vals else None
+    rec_macro = sum(rec_vals) / len(rec_vals) if rec_vals else None
+    f1_macro = sum(f1_vals) / len(f1_vals) if f1_vals else None
 
     # Micro sensitivity
     prec_micro_sens = tp_tot / (tp_tot + fp_sens_tot) if (tp_tot + fp_sens_tot) > 0 else 0.0
@@ -328,14 +318,14 @@ def aggregate_scores(node_scores: Sequence[NodeScore]) -> AggregateScore:
         else 0.0
     )
 
-    # Macro sensitivity (undefined values excluded from unweighted mean)
+    # Macro sensitivity (undefined values excluded from unweighted mean; None if no defined values)
     prec_sens_vals = [s.precision_sensitivity for s in node_scores if s.precision_sensitivity is not None]
     rec_sens_vals = [s.recall_sensitivity for s in node_scores if s.recall_sensitivity is not None]
     f1_sens_vals = [s.f1_sensitivity for s in node_scores if s.f1_sensitivity is not None]
 
-    prec_macro_sens = sum(prec_sens_vals) / len(prec_sens_vals) if prec_sens_vals else 0.0
-    rec_macro_sens = sum(rec_sens_vals) / len(rec_sens_vals) if rec_sens_vals else 0.0
-    f1_macro_sens = sum(f1_sens_vals) / len(f1_sens_vals) if f1_sens_vals else 0.0
+    prec_macro_sens = sum(prec_sens_vals) / len(prec_sens_vals) if prec_sens_vals else None
+    rec_macro_sens = sum(rec_sens_vals) / len(rec_sens_vals) if rec_sens_vals else None
+    f1_macro_sens = sum(f1_sens_vals) / len(f1_sens_vals) if f1_sens_vals else None
 
     return AggregateScore(
         num_nodes=n,

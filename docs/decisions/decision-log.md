@@ -268,3 +268,29 @@ Reasoning: strict isolation prevents state leakage between trials; real-time jso
 (2) `MEKG_with7nodes` concept list correction: [D-30] reasoning stated that `MEKG_with7nodes` contains `graphical_models` and `factor_graphs`. Direct verification against `repositories/dataset/EKG-Dataset/MEKG_with7nodes.txt` (16 lines) shows the 7 nodes are exactly: `bayes_rule`, `bayesian_networks`, `conditional_independence`, `conditional_probability`, `independent_events`, `probability`, and `random_variable`. Neither `graphical_models` nor `factor_graphs` appears in this file. (The domain context `"probability and graphical models"` remains correct and locked).
 Reasoning: Corrects erroneous claims in [D-30] and preserves repo veracity as sole source of truth per AGENTS.md. Affects: `docs/decisions/decision-log.md`, `src/graph_insertion/scoring.py`, `scripts/pilot_dsa_zero_shot.py`, FIX-004.
 
+**[D-33]** Promotion of pairwise decision prompt to `PROMPT_VERSION = "v2"`:
+(1) `PROMPT_VERSION` v2 with three few-shot examples replaces v1;
+(2) Reasoning: v1 (zero-shot, no examples) collapsed to one token (`X_PREREQ_Y` on 6/6 DSA probes including 3 where it was incorrect, and 12/16 on a balanced 16-case general-education set, 0 `Y_PREREQ_X`); an option-reordered variant collapsed to `Y_PREREQ_X` (11/16); v2 (three balanced few-shot examples: fractions/ratios -> X_PREREQ_Y, calculus/limits -> Y_PREREQ_X, poetry/plumbing -> NONE) scored 16/16 on the balanced general-education set (6 `X_PREREQ_Y`, 6 `Y_PREREQ_X`, 4 `NONE`);
+(3) Held-out integrity: v2 was selected using only non-DSA, non-Metacademy pairs, strictly preserving DSA/Metacademy hold-out status. None of the 6 example concepts appear in any of the 12 evaluation corpora. Any future prompt changes must be tuned on non-DSA pairs and logged as a new version.
+Affects: `PairwiseDecisionStep`, `src/graph_insertion/decision.py`, `scripts/pilot_dsa_zero_shot.py`, all strategy experiments, thesis Section 3.2.6 / DOC-002.
+
+**[D-34]** Pilot acceptance criteria and correction to [D-32] item 1:
+(1) Pilot acceptance criteria:
+Basis: DSA pilot, prompt v2, standard scoring (unjudged pair excluded), micro-pooled node-insertion metrics. Gold has 108 positive of 812 calls (13.3%); predict-all-edge baseline F1 = 0.235.
+G1 validity (failure => fix and rerun, not a prompt verdict): zero transport failures; unparseable <=1% (<=8/812); reasoning_tokens == 0; exactly one observed model id equal to configured; prompt_version == "v2"; retried calls <=2%.
+G2 usefulness: PASS = micro recall >=0.70 and micro F1 >=0.50 and direction flips <=15% of calls where the model predicts an edge on a pair with a gold edge in either direction. FAIL = micro F1 <0.35 or recall <0.50 (D-21 revisit trigger; options: tune on non-DSA pairs, two-step yes/no, thinking mode via D-29 amendment). Otherwise CONDITIONAL (proceed, document limitation, no tuning on DSA).
+Reported, not gated: swap consistency, confusion matrices, sensitivity variant, latency.
+Reasoning: set before seeing any pilot results; thresholds are judgment-based, not derived from a benchmark; change only via a new decision entry made before a run;
+(2) Correction to [D-32] item 1 line count: [D-32] stated `repositories/dataset/EKG-Dataset/DSA_gold_standard_MEKG.txt` has "840 lines across 29 nodes". Direct measurement (`wc -l`) confirms the file has 841 lines (840 distinct ordered pairs + 1 duplicate row `binary_search_tree;recursion;1`), exactly matching `docs/context/data-formats.md`.
+Affects: `docs/decisions/decision-log.md`, `scripts/pilot_dsa_zero_shot.py`, `tests/test_pilot.py`, FIX-005.
+
+**[D-35]** Experimental sweep sizes, accuracy evaluation scope, local embedding model, and Strategy 2 threshold:
+(1) Sweep sizes & repeats: sweep sizes 50, 100, 200, 500, 1000, 2000 x 10 trials;
+(2) Accuracy mode: all 29 DSA nodes + seeded sample of 30 Metacademy nodes, 1 run each;
+(3) DATA-004 parameters: CS domain, graph-level domain string "computer science", snake_case per D-21, no edges, fixed seed, cached, deduplicated, no overlap with any corpus node, >=2100 names;
+(4) Embedding model: local sentence-transformers `all-MiniLM-L6-v2` on CPU, version pinned (local execution keeps `embed_s` free of network latency; hosted embedding APIs rejected);
+(5) Strategy 2 threshold: fixed a priori at 0.6, sensitivity analyses at 0.4 and 0.5, no tuning on evaluation corpora;
+(6) Artifact tracking: `results/` untracked in `.gitignore` except the accepted pilot run, which will be force-added.
+Reasoning: fixes experimental matrix before execution, isolates embedding computation timing from network jitter, prevents post-hoc threshold tuning on evaluation graphs, and keeps repository clean from intermediate sweep artifacts. Affects: `docs/tasks/status.md` (DATA-004), `.gitignore`, `harness.py`, `scripts/run_experiment.py`, STRAT-002, DATA-004.
+
+

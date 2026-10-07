@@ -227,6 +227,9 @@ def _extract_model_and_prompt_info(decision_step: Any) -> dict[str, Any]:
     observed_model_ids: list[str] = []
     base_url: Optional[str] = None
     prompt_version: Optional[str] = None
+    temperature: Optional[float] = None
+    thinking_mode: Optional[str] = None
+    max_tokens: Optional[int] = None
 
     if hasattr(decision_step, "PROMPT_VERSION"):
         prompt_version = str(getattr(decision_step, "PROMPT_VERSION"))
@@ -256,6 +259,25 @@ def _extract_model_and_prompt_info(decision_step: Any) -> dict[str, Any]:
                 base_url = str(getattr(c, "base_url"))
                 break
 
+        for c in (inner_client, client):
+            if hasattr(c, "temperature"):
+                temperature = getattr(c, "temperature")
+                break
+
+        for c in (inner_client, client):
+            if hasattr(c, "thinking"):
+                t_obj = getattr(c, "thinking")
+                thinking_mode = t_obj.get("type", "disabled") if isinstance(t_obj, dict) else str(t_obj)
+                break
+            elif hasattr(c, "thinking_mode"):
+                thinking_mode = str(getattr(c, "thinking_mode"))
+                break
+
+        for c in (inner_client, client):
+            if hasattr(c, "max_tokens"):
+                max_tokens = getattr(c, "max_tokens")
+                break
+
     if prompt_version is None:
         try:
             from graph_insertion.decision import PROMPT_VERSION
@@ -268,6 +290,9 @@ def _extract_model_and_prompt_info(decision_step: Any) -> dict[str, Any]:
         "observed_model_ids": observed_model_ids,
         "base_url": base_url,
         "prompt_version": prompt_version,
+        "temperature": temperature if temperature is not None else 0.0,
+        "thinking_mode": thinking_mode if thinking_mode is not None else "disabled",
+        "max_tokens": max_tokens if max_tokens is not None else 16,
     }
 
 
@@ -338,9 +363,9 @@ def write_manifest(
         "configured_model": model_info["configured_model"],
         "observed_model_ids": model_info["observed_model_ids"],
         "base_url": model_info["base_url"],
-        "temperature": 0.0,
-        "thinking_mode": "disabled",
-        "max_tokens": 16,
+        "temperature": model_info["temperature"],
+        "thinking_mode": model_info["thinking_mode"],
+        "max_tokens": model_info["max_tokens"],
         "prompt_version": model_info["prompt_version"],
         "model_id": model_info["configured_model"],
         "seeds": {"seed": config.seed},

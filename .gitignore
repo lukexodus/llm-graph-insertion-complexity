@@ -14,3 +14,4 @@ __pycache__/
 patch/
 *.egg-info/
 .env
+results/

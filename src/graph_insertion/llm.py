@@ -276,6 +276,10 @@ class DeepSeekClient:
         self.backoff_delays = tuple(backoff_delays)
         self._external_client = client is not None
         self._client = client or httpx.Client(timeout=self.timeout)
+        self.temperature: float = 0.0
+        self.max_tokens: int = 16
+        self.thinking: dict[str, Any] = {"type": "disabled"}
+        self.thinking_mode: str = "disabled"
 
     def close(self) -> None:
         """Close the underlying HTTP client if internally managed."""
@@ -301,9 +305,9 @@ class DeepSeekClient:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.0,
-            "max_tokens": 16,
-            "thinking": {"type": "disabled"},
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "thinking": self.thinking,
         }
 
         attempts = 0
@@ -433,6 +437,12 @@ class FakeLLMClient:
         self.cache_hit_tokens = cache_hit_tokens
         self.cache_miss_tokens = cache_miss_tokens
         self.model_id = model_id
+        self.model = model_id
+        self.base_url = "fake://localhost"
+        self.temperature = 0.0
+        self.max_tokens = output_tokens
+        self.thinking = {"type": "disabled"}
+        self.thinking_mode = "disabled"
         self.call_history: list[dict[str, Any]] = []
 
     def complete(self, system: str, user: str) -> LLMResponse:

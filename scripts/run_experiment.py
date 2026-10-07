@@ -27,6 +27,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from graph_insertion.decision import PROMPT_VERSION
 from graph_insertion.embedding import Embedder, FakeEmbedder
 from graph_insertion.graph_representation import ConceptGraph
 from graph_insertion.harness import (
@@ -81,7 +82,7 @@ class StubDecisionStep:
     """Minimal decision step stub for testing and dry runs."""
 
     def __init__(self) -> None:
-        self.PROMPT_VERSION = "v1"
+        self.PROMPT_VERSION = PROMPT_VERSION
 
     def decide(
         self,
