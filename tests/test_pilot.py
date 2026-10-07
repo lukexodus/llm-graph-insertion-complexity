@@ -348,3 +348,18 @@ class TestG2AcceptanceBoundaries:
         res = evaluate_acceptance(s)
         assert res["g2_usefulness"]["verdict"] == "CONDITIONAL"
 
+
+class TestPilotCliDefaults:
+    """Verify pilot CLI argument defaults match off-peak pricing per D-37 / D-38."""
+
+    def test_price_defaults(self, monkeypatch):
+        import sys
+        from scripts.pilot_dsa_zero_shot import parse_args
+
+        monkeypatch.setattr(sys, "argv", ["pilot_dsa_zero_shot.py"])
+        args = parse_args()
+        assert args.price_in == 0.15
+        assert args.price_out == 0.60
+        assert args.allow_peak is False
+
+

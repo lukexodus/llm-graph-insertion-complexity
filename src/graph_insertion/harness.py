@@ -651,6 +651,7 @@ def run_accuracy_experiment(
     *,
     corpora: Optional[dict[str, LoadedCorpus]] = None,
     warmup_fn: Optional[Callable[[], None]] = None,
+    progress_callback: Optional[Callable[[int, int, int, Optional[int]], None]] = None,
 ) -> dict[str, Any]:
     """Execute leave-one-out insertion accuracy benchmark across DSA and Metacademy."""
     # Safety checks
@@ -694,6 +695,12 @@ def run_accuracy_experiment(
 
     llm_meter = _extract_metered_llm(decision_step)
     cumulative_llm_calls = 0
+
+    total_trials = sum(
+        (min(config.metacademy_sample_size, len(loaded_corpus.graph.nodes())) if "metacademy" in cname.lower() else len(loaded_corpus.graph.nodes())) * config.repeats
+        for cname, loaded_corpus in corpora.items()
+    )
+    trials_completed = 0
 
     # Open raw.jsonl in append mode for immediate streaming flush
     with open(raw_jsonl_path, "a", encoding="utf-8") as raw_f:
@@ -818,6 +825,10 @@ def run_accuracy_experiment(
                         raw_f.write(json.dumps(rec) + "\n")
                         raw_f.flush()
 
+                        trials_completed += 1
+                        if progress_callback is not None:
+                            progress_callback(trials_completed, total_trials, retries_count, None)
+
                     except LLMTransportError as err:
                         harness_wall_s = time.perf_counter() - t0
                         rec = {
@@ -837,6 +848,10 @@ def run_accuracy_experiment(
                         }
                         raw_f.write(json.dumps(rec) + "\n")
                         raw_f.flush()
+
+                        trials_completed += 1
+                        if progress_callback is not None:
+                            progress_callback(trials_completed, total_trials, rec["retries"], None)
 
                         if config.fail_fast:
                             generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
@@ -861,6 +876,11 @@ def run_accuracy_experiment(
                         }
                         raw_f.write(json.dumps(rec) + "\n")
                         raw_f.flush()
+
+                        trials_completed += 1
+                        if progress_callback is not None:
+                            progress_callback(trials_completed, total_trials, 0, None)
+
                         generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
                         raise
 
@@ -881,6 +901,7 @@ def run_sweep_experiment(
     name_source: SyntheticNameSource,
     *,
     warmup_fn: Optional[Callable[[], None]] = None,
+    progress_callback: Optional[Callable[[int, int, int, Optional[int]], None]] = None,
 ) -> dict[str, Any]:
     """Execute cost sweep scaling benchmark over synthetic concept name sets."""
     # Safety checks
@@ -913,6 +934,9 @@ def run_sweep_experiment(
 
     llm_meter = _extract_metered_llm(decision_step)
     cumulative_llm_calls = 0
+
+    total_trials = len(config.sweep_sizes) * config.sweep_trials_per_size
+    trials_completed = 0
 
     pool_names = list(name_source.names)
 
@@ -1027,6 +1051,10 @@ def run_sweep_experiment(
                     raw_f.write(json.dumps(rec) + "\n")
                     raw_f.flush()
 
+                    trials_completed += 1
+                    if progress_callback is not None:
+                        progress_callback(trials_completed, total_trials, retries_count, n)
+
                 except LLMTransportError as err:
                     harness_wall_s = time.perf_counter() - t0
                     rec = {
@@ -1046,6 +1074,10 @@ def run_sweep_experiment(
                     }
                     raw_f.write(json.dumps(rec) + "\n")
                     raw_f.flush()
+
+                    trials_completed += 1
+                    if progress_callback is not None:
+                        progress_callback(trials_completed, total_trials, rec["retries"], n)
 
                     if config.fail_fast:
                         generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
@@ -1069,6 +1101,11 @@ def run_sweep_experiment(
                     }
                     raw_f.write(json.dumps(rec) + "\n")
                     raw_f.flush()
+
+                    trials_completed += 1
+                    if progress_callback is not None:
+                        progress_callback(trials_completed, total_trials, 0, n)
+
                     generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
                     raise
 
@@ -1089,6 +1126,7 @@ def run_experiment(
     corpora: Optional[dict[str, LoadedCorpus]] = None,
     name_source: Optional[SyntheticNameSource] = None,
     warmup_fn: Optional[Callable[[], None]] = None,
+    progress_callback: Optional[Callable[[int, int, int, Optional[int]], None]] = None,
 ) -> dict[str, Any]:
     """Unified entry point dispatching to accuracy or sweep runner."""
     if config.mode == "accuracy":
@@ -1099,6 +1137,7 @@ def run_experiment(
             embedder_factory,
             corpora=corpora,
             warmup_fn=warmup_fn,
+            progress_callback=progress_callback,
         )
     elif config.mode == "sweep":
         if name_source is None:
@@ -1110,6 +1149,7 @@ def run_experiment(
             embedder_factory,
             name_source=name_source,
             warmup_fn=warmup_fn,
+            progress_callback=progress_callback,
         )
     else:
         raise ValueError(f"Unknown experiment mode: {config.mode}")

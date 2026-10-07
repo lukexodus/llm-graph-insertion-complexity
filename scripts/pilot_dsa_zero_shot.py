@@ -478,12 +478,15 @@ def print_pilot_summary(summary: dict[str, Any]) -> None:
     if "median_latency" in timing:
         print(f"Latency: Median={timing.get('median_latency', 0.0):.3f}s, P95={timing.get('p95_latency', 0.0):.3f}s")
     usage = summary.get("token_usage", {})
+    prices = summary.get("prices", {})
     if "input_tokens" in usage:
         print(
             f"Tokens: In={usage.get('input_tokens')}, Out={usage.get('output_tokens')}, "
             f"Reasoning={usage.get('reasoning_tokens')}, CacheHit={usage.get('cache_hit_tokens')}"
         )
-        print(f"Estimated Cost: ${usage.get('estimated_cost_usd', 0.0):.4f}")
+        p_in = prices.get("price_in_per_m", 0.15)
+        p_out = prices.get("price_out_per_m", 0.60)
+        print(f"Estimated Cost: ${usage.get('estimated_cost_usd', 0.0):.4f} (rates: ${p_in:.2f}/M in, ${p_out:.2f}/M out)")
 
 
 def run_pilot(
@@ -665,14 +668,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--price-in",
         type=float,
-        default=0.14,
-        help="Price per 1M input tokens in USD (required for accurate cost accounting; default: 0.14).",
+        default=0.15,
+        help="Price per 1M input tokens in USD (required for accurate cost accounting; default: 0.15 off-peak per D-37).",
     )
     parser.add_argument(
         "--price-out",
         type=float,
-        default=0.28,
-        help="Price per 1M output tokens in USD (required for accurate cost accounting; default: 0.28).",
+        default=0.60,
+        help="Price per 1M output tokens in USD (required for accurate cost accounting; default: 0.60 per D-37).",
+    )
+    parser.add_argument(
+        "--allow-peak",
+        action="store_true",
+        help="Allow live run to execute during DeepSeek peak pricing hours.",
     )
     parser.add_argument(
         "--output-dir",
@@ -755,7 +763,7 @@ def main() -> None:
         print(f"Planned calls: {planned_calls} (29 nodes * 28 candidates)")
         print("To proceed with execution, re-run with '--confirm'.")
         print("Example live run:")
-        print("  python scripts/pilot_dsa_zero_shot.py --confirm --price-in 0.14 --price-out 0.28")
+        print("  python scripts/pilot_dsa_zero_shot.py --confirm --price-in 0.15 --price-out 0.60")
         print("Example offline test run:")
         print("  python scripts/pilot_dsa_zero_shot.py --confirm --offline-fake")
         print("=" * 60)
@@ -784,6 +792,21 @@ def main() -> None:
         )
         model_name = "fake-deepseek-flash"
     else:
+        from graph_insertion.schedule import format_peak_status, window_intersects_peak
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        print("--- DeepSeek Schedule Status ---")
+        print(format_peak_status(now_utc))
+        print("--------------------------------")
+        estimated_duration_s = planned_calls * 1.5
+        if window_intersects_peak(now_utc, estimated_duration_s) and not args.allow_peak:
+            print(
+                "ERROR: Execution window intersects DeepSeek peak pricing hours (01:00-04:00 or 06:00-10:00 UTC Mon-Fri).\n"
+                "To run anyway at peak rates, pass '--allow-peak'.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:
             print("ERROR: DEEPSEEK_API_KEY environment variable is required for live runs.", file=sys.stderr)

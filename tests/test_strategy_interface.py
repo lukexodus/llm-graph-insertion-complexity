@@ -199,7 +199,18 @@ class StrategyConformanceSuite:
 
     Subclasses must implement the `strategy_factory` fixture returning a
     callable: (graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy.
+
+    Class attributes
+    ----------------
+    uses_embeddings:
+        Set to True (default) for strategies that call the embedder during setup
+        and shortlist. Set to False for strategies that never embed (e.g. NullStrategy).
+        Controls which conformance assertions apply:
+        - True: embedding call counts, texts_log, and single-embedding-reuse are verified.
+        - False: the same tests instead assert zero embedding activity.
     """
+
+    uses_embeddings: bool = True
 
     @pytest.fixture
     def initial_graph(self) -> ConceptGraph:
@@ -210,6 +221,7 @@ class StrategyConformanceSuite:
         g.add_node("recursion")
         g.add_prereq_edge("pointer", "linked_list")
         return g
+
 
     def test_shortlist_is_subset_and_excludes_new_node(
         self, initial_graph, strategy_factory
@@ -258,7 +270,10 @@ class StrategyConformanceSuite:
     def test_d21_text_payload_compliance(
         self, initial_graph, strategy_factory
     ):
-        """Enforce D-21: all texts passed to the embedder (setup + insert) must equal embed_text(n)."""
+        """Enforce D-21: all texts passed to the embedder (setup + insert) must equal embed_text(n).
+
+        When uses_embeddings is False, asserts zero embedding calls and empty texts_log.
+        """
         raw_embedder = FakeEmbedder(dim=16, seed=42)
         meter = MeteredEmbedder(raw_embedder, record_texts=True)
         strat = strategy_factory(initial_graph, meter)
@@ -269,22 +284,30 @@ class StrategyConformanceSuite:
             strat, initial_graph, decision_step, "binary_search_tree", metered_embedder=meter
         )
 
-        assert meter.texts_log is not None
-        assert len(meter.texts_log) > 0
-        all_concepts = set(initial_graph.nodes())
-        for text in meter.texts_log:
-            assert "_" not in text
-            # Must equal embed_text(c) for some concept in the trial (initial or newly inserted)
-            assert any(embed_text(c) == text for c in all_concepts)
+        if not getattr(self.__class__, "uses_embeddings", True):
+            # Non-embedding strategy: zero embedding activity expected
+            assert meter.calls == 0, (
+                f"Non-embedding strategy produced {meter.calls} embedding call(s); expected 0"
+            )
+            assert meter.cumulative_seconds == 0.0
+            assert meter.texts_log == []
+        else:
+            assert meter.texts_log is not None
+            assert len(meter.texts_log) > 0
+            all_concepts = set(initial_graph.nodes())
+            for text in meter.texts_log:
+                assert "_" not in text
+                # Must equal embed_text(c) for some concept in the trial (initial or newly inserted)
+                assert any(embed_text(c) == text for c in all_concepts)
 
-        # Explicitly verify every initial node was embedded with embed_text()
-        for c in initial_graph.nodes():
-            assert embed_text(c) in meter.texts_log
+            # Explicitly verify every initial node was embedded with embed_text()
+            for c in initial_graph.nodes():
+                assert embed_text(c) in meter.texts_log
 
     def test_cached_embedding_reuse_single_embedding_per_insert(
         self, initial_graph, strategy_factory
     ):
-        """Verify that narrowing + update embeds new_name exactly once."""
+        """Verify that narrowing + update embeds new_name exactly once (or zero for non-embedding)."""
         raw_embedder = FakeEmbedder(dim=16, seed=42)
         meter = MeteredEmbedder(raw_embedder, record_texts=True)
         strat = strategy_factory(initial_graph, meter)
@@ -295,10 +318,19 @@ class StrategyConformanceSuite:
             strat, initial_graph, decision_step, "hash_table", metered_embedder=meter
         )
 
-        # In strategies that embed, new_name must be embedded only 1 time
-        assert res.metrics.embedding_calls <= 1
-        assert res.metrics.embedding_calls_in_update == 0
-        assert res.metrics.embed_in_update_s == 0.0
+        if not getattr(self.__class__, "uses_embeddings", True):
+            # Non-embedding strategy: exactly zero embedding calls in both phases
+            assert res.metrics.embedding_calls == 0, (
+                f"Non-embedding strategy produced {res.metrics.embedding_calls} embedding calls; expected 0"
+            )
+            assert res.metrics.embed_s == 0.0
+            assert res.metrics.embedding_calls_in_update == 0
+            assert res.metrics.embed_in_update_s == 0.0
+        else:
+            # In strategies that embed, new_name must be embedded only 1 time
+            assert res.metrics.embedding_calls <= 1
+            assert res.metrics.embedding_calls_in_update == 0
+            assert res.metrics.embed_in_update_s == 0.0
 
     def test_repeated_inserts_see_previous_nodes(
         self, initial_graph, strategy_factory
@@ -324,9 +356,44 @@ class StrategyConformanceSuite:
         for c in res2.shortlist.candidates:
             assert initial_graph.has_node(c)
 
+    def test_embedder_identity_stored_on_strategy(
+        self, initial_graph, strategy_factory
+    ):
+        """Embedding strategies must store the exact MeteredEmbedder passed to setup().
+
+        The insert_node driver checks `strategy._embedder is metered_embedder`; if the
+        strategy wraps or replaces the embedder, the identity check will raise ValueError.
+        This test verifies that does not happen.
+
+        Non-embedding strategies (uses_embeddings=False) have _embedder=None and
+        are excluded from this test (the identity check is bypassed for None by insert_node).
+        """
+        if not getattr(self.__class__, "uses_embeddings", True):
+            pytest.skip("Non-embedding strategy: _embedder is None by design")
+
+        raw_embedder = FakeEmbedder(dim=16, seed=42)
+        meter = MeteredEmbedder(raw_embedder)
+        strat = strategy_factory(initial_graph, meter)
+
+        # The factory already called setup(); verify the stored embedder is identical
+        strat_embedder = getattr(strat, "_embedder", None)
+        assert strat_embedder is meter, (
+            f"strategy._embedder is not the MeteredEmbedder passed to setup(). "
+            f"Got: {strat_embedder!r}. Expected: {meter!r}. "
+            "The strategy must store the exact object, not a copy or wrapper."
+        )
+
+        # Also verify that insert_node succeeds with the same meter (no ValueError)
+        ds = FakeDecisionStep(make_edge=False)
+        res = insert_node(strat, initial_graph, ds, "new_concept", metered_embedder=meter)
+        assert initial_graph.has_node("new_concept")
+        _ = res  # metrics available
+
 
 class TestTinyFakeStrategyConformance(StrategyConformanceSuite):
     """Instantiate the reusable conformance suite on the reference TinyFakeStrategy."""
+
+    uses_embeddings: bool = True
 
     @pytest.fixture
     def strategy_factory(self) -> Callable[[ConceptGraph, Embedder], NarrowingStrategy]:
@@ -336,6 +403,81 @@ class TestTinyFakeStrategyConformance(StrategyConformanceSuite):
             return strat
 
         return _factory
+
+
+# ===========================================================================
+# Meta-Tests: prove uses_embeddings flag flips the right assertions
+# ===========================================================================
+
+class _MinimalEmbeddingStrategy:
+    """Minimal strategy that DOES embed (for meta-test purposes only)."""
+    name = "meta_embedding"
+    uses_embeddings: bool = True
+    _embedder = None
+
+    def setup(self, graph, embedder):
+        self._graph = graph
+        self._embedder = embedder
+        for node in graph.nodes():
+            embedder.embed(embed_text(node))
+
+    def shortlist(self, new_name):
+        self._embedder.embed(embed_text(new_name))
+        nodes = [n for n in sorted(self._graph.nodes()) if n != new_name]
+        return Shortlist(candidates=tuple(nodes[:1]), scores=(1.0,))
+
+    def on_inserted(self, new_name, edges): pass
+    def config(self): return {}
+    def diagnostics(self): return {}
+
+
+class _MinimalNonEmbeddingStrategy:
+    """Minimal strategy that does NOT embed (for meta-test purposes only)."""
+    name = "meta_non_embedding"
+    uses_embeddings: bool = False
+    _embedder = None
+
+    def setup(self, graph, embedder):
+        self._graph = graph
+        # intentionally does NOT store embedder
+
+    def shortlist(self, new_name):
+        nodes = [n for n in sorted(self._graph.nodes()) if n != new_name]
+        return Shortlist(candidates=tuple(nodes[:1]), scores=(0.0,))
+
+    def on_inserted(self, new_name, edges): pass
+    def config(self): return {}
+    def diagnostics(self): return {}
+
+
+class TestEmbeddingConformanceSuiteMetaTest(StrategyConformanceSuite):
+    """Meta-test: embedding strategy passes all conformance tests with uses_embeddings=True."""
+
+    uses_embeddings: bool = True
+
+    @pytest.fixture
+    def strategy_factory(self):
+        def _factory(graph, embedder):
+            strat = _MinimalEmbeddingStrategy()
+            strat.setup(graph, embedder)
+            return strat
+        return _factory
+
+
+class TestNonEmbeddingConformanceSuiteMetaTest(StrategyConformanceSuite):
+    """Meta-test: non-embedding strategy passes all conformance tests with uses_embeddings=False."""
+
+    uses_embeddings: bool = False
+
+    @pytest.fixture
+    def strategy_factory(self):
+        def _factory(graph, embedder):
+            strat = _MinimalNonEmbeddingStrategy()
+            strat.setup(graph, embedder)
+            return strat
+        return _factory
+
+
 
 
 # ===========================================================================
