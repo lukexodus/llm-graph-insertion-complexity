@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-scripts/run_experiment.py — INFRA-004 / INFRA-005
-=================================================
+scripts/run_experiment.py — INFRA-004 / INFRA-005 / FIX-008
+===========================================================
 CLI driver for graph insertion experimental measurement harness:
   - Mode "accuracy": Leave-one-out benchmark across DSA and Metacademy corpora.
   - Mode "sweep": Cost-only scaling sweep over synthetic concept names.
@@ -9,9 +9,11 @@ CLI driver for graph insertion experimental measurement harness:
 Safety & Guardrails:
   - --dry-run prints insertion plans and estimated upper-bound LLM calls without mutating state.
   - Live execution requires explicit --confirm.
-  - Halts cleanly if --max-llm-calls is reached.
+  - Halts cleanly if --max-llm-calls is reached (process-local cap).
   - Supports incremental checkpointing and resuming (--resume, --retry-failed, --fail-fast).
-  - DeepSeek peak pricing guard: refuses to start live runs during peak windows unless --allow-peak given ([D-37], [D-38]).
+  - DeepSeek peak pricing guard: computed worst-case window estimation; refuses live runs
+    during peak windows unless --allow-peak given ([D-37], [D-38], [D-40]).
+  - Call-driven progress reporting with 30s heartbeat.
 """
 
 from __future__ import annotations
@@ -34,13 +36,14 @@ if str(SRC_DIR) not in sys.path:
 
 from graph_insertion.decision import PROMPT_VERSION, PairwiseDecisionStep
 from graph_insertion.embedding import Embedder, FakeEmbedder
-from graph_insertion.graph_representation import ConceptGraph
+from graph_insertion.graph_representation import ConceptGraph, embed_text
 from graph_insertion.harness import (
     HarnessConfig,
     SyntheticNameSource,
     run_experiment,
 )
-from graph_insertion.loader import discover_corpora, load_corpus
+from graph_insertion.loader import LoadedCorpus, discover_corpora, load_corpus
+from graph_insertion.schedule import format_peak_status, window_intersects_peak
 from graph_insertion.strategies.null import NullStrategy
 from graph_insertion.strategy import (
     DecisionOutcome,
@@ -118,24 +121,24 @@ STRATEGY_REGISTRY: dict[str, Callable[[int, int], NarrowingStrategy]] = {
 
 
 # ===========================================================================
-# Progress Reporter (D1)
+# Call-Driven Progress Reporter (D1, FIX-008)
 # ===========================================================================
 
 class ProgressReporter:
-    """Plain-text progress tracker emitting to stderr periodically.
+    """Call-driven progress tracker emitting to stderr periodically.
 
     Parameters
     ----------
-    total:
-        Total planned insertions.
+    total_calls:
+        Total planned upper-bound LLM calls.
+    total_trials:
+        Total planned trial count.
     strategy_name:
         Name of the narrowing strategy.
     size:
         Current graph size (int) if in sweep mode, or None for accuracy mode.
     interval_s:
-        Minimum seconds between progress line prints (default 30.0).
-    interval_n:
-        Minimum number of insertions between progress line prints (default 10).
+        Minimum seconds between progress heartbeat prints (default 30.0).
     stream:
         Output stream (default sys.stderr).
     clock:
@@ -144,79 +147,97 @@ class ProgressReporter:
 
     def __init__(
         self,
-        total: int,
+        total_calls: int,
+        total_trials: int,
         strategy_name: str,
         size: Optional[int] = None,
         *,
         interval_s: float = 30.0,
-        interval_n: int = 10,
         stream: Any = sys.stderr,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.total = total
+        self.total_calls = total_calls
+        self.total_trials = total_trials
         self.strategy_name = strategy_name
         self.size = size
         self.interval_s = interval_s
-        self.interval_n = interval_n
         self.stream = stream
         self.clock = clock
 
         self.start_time = self.clock()
         self.last_print_time = self.start_time
-        self.last_print_n = 0
-        self.done = 0
+        self.calls_done = 0
+        self.trials_done = 0
         self.retries = 0
+        self._hook_active = False
+
+    def on_llm_call(self, calls_done: int, cumulative_retries: int) -> bool:
+        """Heartbeat hook invoked on every LLM call completion.
+
+        Emits heartbeat if interval_s has elapsed.
+        """
+        self._hook_active = True
+        self.calls_done = calls_done
+        self.retries = cumulative_retries
+
+        now = self.clock()
+        if now - self.last_print_time >= self.interval_s:
+            self._print_line(now - self.start_time)
+            self.last_print_time = now
+            return True
+        return False
 
     def update(
         self,
-        done: int,
-        total: int,
-        retries: int = 0,
+        trials_done: int,
+        total_trials: int,
+        delta_retries: int = 0,
         size: Optional[int] = None,
         force: bool = False,
     ) -> bool:
-        """Record progress. Emits progress line if intervals elapsed or force=True.
+        """Trial completion callback from harness.
 
-        Returns True if a line was emitted, False otherwise.
+        Emits progress line on trial completion, interval expiration, or force=True.
+        Avoids double-counting retries when on_llm_call hook is active.
         """
-        self.done = done
-        self.total = total
-        self.retries += retries
+        self.trials_done = trials_done
+        self.total_trials = total_trials
         if size is not None:
             self.size = size
 
+        if not self._hook_active:
+            # When hook is inactive, accumulate per-trial retry deltas from harness
+            self.retries += delta_retries
+
         now = self.clock()
         elapsed = now - self.start_time
-        time_since_last = now - self.last_print_time
-        n_since_last = self.done - self.last_print_n
-
-        should_print = (
-            force
-            or self.done == self.total
-            or (time_since_last >= self.interval_s and n_since_last > 0)
-            or (self.interval_n > 0 and n_since_last >= self.interval_n)
-        )
+        should_print = force or (trials_done == total_trials) or (now - self.last_print_time >= self.interval_s)
 
         if should_print:
             self._print_line(elapsed)
             self.last_print_time = now
-            self.last_print_n = self.done
             return True
         return False
 
     def _print_line(self, elapsed: float) -> None:
-        if self.done > 0 and self.done < self.total:
-            rate = elapsed / self.done
-            eta_s = rate * (self.total - self.done)
+        if self.calls_done > 0 and self.calls_done < self.total_calls:
+            rate = elapsed / self.calls_done
+            eta_s = rate * (self.total_calls - self.calls_done)
             eta_str = f"{eta_s:.1f}s"
-        elif self.done >= self.total:
+        elif self.calls_done >= self.total_calls and self.total_calls > 0:
             eta_str = "0.0s"
+        elif self.trials_done > 0 and self.trials_done < self.total_trials:
+            # Fallback ETA by trials if no calls reported
+            rate = elapsed / self.trials_done
+            eta_s = rate * (self.total_trials - self.trials_done)
+            eta_str = f"{eta_s:.1f}s"
         else:
             eta_str = "unknown"
 
         tag = f"{self.strategy_name}" + (f"/n={self.size}" if self.size is not None else "")
         msg = (
-            f"[{tag}] {self.done}/{self.total} insertions "
+            f"[{tag}] {self.calls_done}/{self.total_calls} calls "
+            f"(trial {self.trials_done}/{self.total_trials}) "
             f"elapsed={elapsed:.1f}s ETA={eta_str} retries={self.retries}\n"
         )
         self.stream.write(msg)
@@ -224,7 +245,51 @@ class ProgressReporter:
 
 
 # ===========================================================================
-# Names File Loading and Validation (C4)
+# Planned Calls & Pre-Flight Calculation (FIX-008)
+# ===========================================================================
+
+def compute_planned_calls_upper_bound(
+    config: HarnessConfig,
+    corpora: Optional[dict[str, LoadedCorpus]] = None,
+) -> int:
+    """Compute worst-case upper bound on total LLM API calls."""
+    if config.mode == "sweep":
+        # In sweep mode: sum over sweep sizes of (n * trials_per_size)
+        return sum(n * config.sweep_trials_per_size for n in config.sweep_sizes)
+    elif config.mode == "accuracy":
+        # In accuracy mode: sum over held-out nodes of (n_nodes - 1)
+        total_calls = 0
+        if corpora:
+            for cname, lc in corpora.items():
+                n_nodes = len(lc.graph.nodes())
+                k_sample = min(config.metacademy_sample_size, n_nodes) if "metacademy" in cname.lower() else n_nodes
+                total_calls += k_sample * (n_nodes - 1) * config.repeats
+        return total_calls
+    return 0
+
+
+def compute_preflight_estimate(
+    planned_calls: int,
+    est_seconds_per_call: float,
+    price_in: float,
+    price_out: float,
+) -> dict[str, float]:
+    """Compute duration and cost estimate based on prompt v2 pilot telemetry."""
+    estimated_seconds = planned_calls * est_seconds_per_call
+    input_tokens_est = planned_calls * 152.0
+    output_tokens_est = planned_calls * 2.5
+    estimated_cost_usd = (input_tokens_est * price_in + output_tokens_est * price_out) / 1_000_000.0
+    return {
+        "planned_calls": planned_calls,
+        "estimated_seconds": estimated_seconds,
+        "estimated_cost_usd": estimated_cost_usd,
+        "input_tokens_est": input_tokens_est,
+        "output_tokens_est": output_tokens_est,
+    }
+
+
+# ===========================================================================
+# Names File Loading and Validation (C4, FIX-008)
 # ===========================================================================
 
 def load_and_validate_names_file(
@@ -241,7 +306,7 @@ def load_and_validate_names_file(
       1. At least min_required_names present.
       2. No duplicates.
       3. Valid snake_case matching ^[a-z][a-z0-9]*(_[a-z0-9]+)*$.
-      4. Zero overlap with concepts in the 12 loaded corpora.
+      4. Zero overlap with concepts in the 12 loaded corpora (exact name and embed_text form).
     """
     if not path.exists():
         raise FileNotFoundError(f"Names file not found: {path}")
@@ -280,15 +345,21 @@ def load_and_validate_names_file(
                 f"Invalid concept name {name!r}: must match snake_case pattern ^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
             )
 
-    # Validate zero overlap with all corpus nodes
+    # Validate zero overlap with all corpus nodes (exact name and embed_text form)
     all_corpora = discover_corpora()
     corpus_nodes: set[str] = set()
+    corpus_embed_texts: set[str] = set()
     for spec in all_corpora:
         try:
             lc = load_corpus(spec)
-            corpus_nodes.update(lc.graph.nodes())
-        except Exception:
-            pass
+            nodes = set(lc.graph.nodes())
+            corpus_nodes.update(nodes)
+            corpus_embed_texts.update(embed_text(n) for n in nodes)
+        except Exception as exc:
+            corpus_name = getattr(spec, "name", str(spec))
+            raise RuntimeError(
+                f"Failed to load benchmark corpus {corpus_name!r} during names validation: {exc}"
+            ) from exc
 
     overlap = set(names) & corpus_nodes
     if overlap:
@@ -296,6 +367,15 @@ def load_and_validate_names_file(
         raise ValueError(
             f"Names file overlaps with corpus concept names ({len(overlap)} overlaps, e.g. {sample}). "
             "Names file concepts must be completely disjoint from all benchmark corpora."
+        )
+
+    names_embed_texts = {embed_text(n): n for n in names}
+    embed_overlap = set(names_embed_texts.keys()) & corpus_embed_texts
+    if embed_overlap:
+        sample_names = sorted(names_embed_texts[t] for t in embed_overlap)[:5]
+        raise ValueError(
+            f"Names file overlaps with corpus concepts in embed_text form ({len(embed_overlap)} overlaps, e.g. {sample_names}). "
+            "Concept names when formatted as text payloads must be completely disjoint from benchmark corpora."
         )
 
     return names
@@ -384,6 +464,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to JSON file containing synthetic concept names for sweep mode.",
     )
     parser.add_argument(
+        "--est-seconds-per-call",
+        type=float,
+        default=1.0,
+        help="Estimated seconds per API call for pre-flight duration calculation (default: 1.0).",
+    )
+    parser.add_argument(
+        "--price-in",
+        type=float,
+        default=0.15,
+        help="Price per 1M input tokens in USD (default: 0.15 off-peak per D-37).",
+    )
+    parser.add_argument(
+        "--price-out",
+        type=float,
+        default=0.60,
+        help="Price per 1M output tokens in USD (default: 0.60 off-peak per D-37).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="DeepSeek model identifier (default from env DEEPSEEK_MODEL or 'deepseek-flash').",
+    )
+    parser.add_argument(
         "--max-llm-calls",
         type=int,
         default=None,
@@ -458,40 +562,6 @@ def main() -> int:
     strategy_factory = lambda: strat_factory_fn(config.seed, args.k)
     embedder_factory = lambda: FakeEmbedder(dim=32, seed=config.seed)
 
-    # Decision step wiring & live peak check (D2)
-    decision_step: DecisionStep
-    if args.live:
-        from graph_insertion.llm import DeepSeekClient, MeteredLLMClient
-        from graph_insertion.schedule import format_peak_status, window_intersects_peak
-
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        print("--- DeepSeek Schedule Status ---")
-        print(format_peak_status(now_utc))
-        print("--------------------------------")
-
-        # Estimate duration
-        estimated_duration_s = 600.0  # default estimate
-        if window_intersects_peak(now_utc, estimated_duration_s) and not args.allow_peak:
-            print(
-                "ERROR: Execution window intersects DeepSeek peak pricing hours (01:00-04:00 or 06:00-10:00 UTC Mon-Fri).\n"
-                "To run anyway at peak rates, pass '--allow-peak'.",
-                file=sys.stderr,
-            )
-            return 1
-
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if not api_key:
-            print("ERROR: DEEPSEEK_API_KEY environment variable is required for --live runs.", file=sys.stderr)
-            return 1
-        raw_client = DeepSeekClient(api_key=api_key)
-        decision_step = PairwiseDecisionStep(MeteredLLMClient(raw_client))
-    else:
-        try:
-            from graph_insertion.llm import FakeLLMClient, MeteredLLMClient
-            decision_step = PairwiseDecisionStep(MeteredLLMClient(FakeLLMClient()))
-        except ImportError:
-            decision_step = StubDecisionStep()
-
     # Corpora selection
     corpora = None
     if config.mode == "accuracy":
@@ -505,7 +575,80 @@ def main() -> int:
                 "metacademy_gold_standard_MEKG": load_corpus("metacademy"),
             }
 
-    # Synthetic name source for sweep (C4)
+    # Compute planned calls upper bound
+    planned_calls_upper_bound = compute_planned_calls_upper_bound(config, corpora)
+
+    # Estimate total trials
+    if config.mode == "accuracy":
+        total_planned_trials = 0
+        if corpora:
+            for cname, lc in corpora.items():
+                k_sample = min(config.metacademy_sample_size, len(lc.graph.nodes())) if "metacademy" in cname.lower() else len(lc.graph.nodes())
+                total_planned_trials += k_sample * config.repeats
+    else:
+        total_planned_trials = len(config.sweep_sizes) * config.sweep_trials_per_size
+
+    # Decision step wiring & live peak check (FIX-008)
+    decision_step: DecisionStep
+    metered_client = None
+
+    if args.live:
+        from graph_insertion.llm import DeepSeekClient, MeteredLLMClient
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        est = compute_preflight_estimate(
+            planned_calls_upper_bound,
+            args.est_seconds_per_call,
+            args.price_in,
+            args.price_out,
+        )
+
+        print("=" * 65)
+        print("LIVE EXPERIMENT PRE-FLIGHT ESTIMATE")
+        print(f"Planned calls (upper bound): {est['planned_calls']}")
+        print(f"Estimated duration:          {est['estimated_seconds']:.1f}s ({est['estimated_seconds']/60:.1f} min) (assuming {args.est_seconds_per_call:.1f}s/call)")
+        print(f"Estimated cost:              ${est['estimated_cost_usd']:.4f} USD")
+        print(f"Cost assumptions:            ~152 in, ~2.5 out tokens/call at ${args.price_in:.2f}/M in, ${args.price_out:.2f}/M out")
+        print("-" * 65)
+        print(format_peak_status(now_utc))
+        print("=" * 65)
+
+        if window_intersects_peak(now_utc, est["estimated_seconds"]) and not args.allow_peak:
+            end_utc = now_utc + datetime.timedelta(seconds=est["estimated_seconds"])
+            print(
+                f"ERROR: Planned execution window [{now_utc.strftime('%H:%M:%S')}, "
+                f"{end_utc.strftime('%H:%M:%S')} UTC] "
+                "intersects DeepSeek peak pricing hours (01:00-04:00 or 06:00-10:00 UTC Mon-Fri).\n"
+                "To run anyway at peak rates, pass '--allow-peak'.",
+                file=sys.stderr,
+            )
+            return 1
+
+        if not args.confirm and not args.dry_run:
+            print(
+                "ERROR: Live execution requires explicit '--confirm' flag to proceed.",
+                file=sys.stderr,
+            )
+            return 1
+
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            print("ERROR: DEEPSEEK_API_KEY environment variable is required for --live runs.", file=sys.stderr)
+            return 1
+
+        # Builds DeepSeekClient identically to scripts/pilot_dsa_zero_shot.py
+        raw_client = DeepSeekClient(api_key=api_key, model=args.model)
+        metered_client = MeteredLLMClient(raw_client)
+        decision_step = PairwiseDecisionStep(metered_client)
+    else:
+        try:
+            from graph_insertion.llm import FakeLLMClient, MeteredLLMClient
+            metered_client = MeteredLLMClient(FakeLLMClient())
+            decision_step = PairwiseDecisionStep(metered_client)
+        except ImportError:
+            decision_step = StubDecisionStep()
+
+    # Synthetic name source for sweep (C4, FIX-008)
     name_source = None
     if config.mode == "sweep":
         max_size = max(config.sweep_sizes) if config.sweep_sizes else 2000
@@ -522,24 +665,17 @@ def main() -> int:
                 domain_context="computer science",
             )
 
-    # Progress reporter setup (D1)
-    # Estimate total trials
-    if config.mode == "accuracy":
-        total_planned = 0
-        if corpora:
-            for cname, lc in corpora.items():
-                k_sample = min(config.metacademy_sample_size, len(lc.graph.nodes())) if "metacademy" in cname.lower() else len(lc.graph.nodes())
-                total_planned += k_sample * config.repeats
-    else:
-        total_planned = len(config.sweep_sizes) * config.sweep_trials_per_size
-
+    # Progress reporter setup (call-driven heartbeat)
     progress_reporter = ProgressReporter(
-        total=total_planned,
+        total_calls=planned_calls_upper_bound,
+        total_trials=total_planned_trials,
         strategy_name=args.strategy,
         size=config.sweep_sizes[0] if config.sweep_sizes else None,
         interval_s=30.0,
-        interval_n=10,
     )
+
+    if metered_client is not None and hasattr(metered_client, "set_on_call"):
+        metered_client.set_on_call(progress_reporter.on_llm_call)
 
     try:
         result = run_experiment(

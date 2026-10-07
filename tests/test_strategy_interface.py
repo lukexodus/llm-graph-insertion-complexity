@@ -41,8 +41,11 @@ class TinyFakeStrategy:
     of new_name per insertion trial.
     """
 
+    uses_embeddings: bool = True
+
     def __init__(self, top_k: int = 2, seed: int = 42) -> None:
         self.name = "tiny_fake"
+        self.uses_embeddings = True
         self.top_k = top_k
         self.seed = seed
         self._graph: Optional[ConceptGraph] = None

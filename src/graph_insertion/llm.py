@@ -148,8 +148,14 @@ class MeteredLLMClient:
     Provides point-in-time snapshots and snapshot subtraction for delta accounting.
     """
 
-    def __init__(self, client: LLMClient) -> None:
+    def __init__(
+        self,
+        client: LLMClient,
+        *,
+        on_call: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
         self.client = client
+        self.on_call = on_call
         self.calls: int = 0
         self.attempts: int = 0
         self.retries: int = 0
@@ -164,6 +170,10 @@ class MeteredLLMClient:
         self.failed_parses: list[str] = []
         self.model_ids_seen: set[str] = set()
         self.failed_calls: list[dict[str, Any]] = []
+
+    def set_on_call(self, on_call: Optional[Callable[[int, int], None]]) -> None:
+        """Register or update a callback invoked with (calls_done, cumulative_retries) on every LLM call."""
+        self.on_call = on_call
 
     def complete(self, system: str, user: str) -> LLMResponse:
         """Delegate completion to wrapped client and record usage."""
@@ -182,6 +192,11 @@ class MeteredLLMClient:
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
             })
+            if self.on_call is not None:
+                try:
+                    self.on_call(self.calls, self.retries)
+                except Exception:
+                    pass
             raise
 
         self.calls += 1
@@ -196,6 +211,11 @@ class MeteredLLMClient:
         self.cache_miss_tokens += resp.cache_miss_tokens
         if resp.model_id:
             self.model_ids_seen.add(resp.model_id)
+        if self.on_call is not None:
+            try:
+                self.on_call(self.calls, self.retries)
+            except Exception:
+                pass
         return resp
 
     def record_parse_failure(self, raw_text: str) -> None:

@@ -58,6 +58,7 @@ from graph_insertion.strategy import (
     Shortlist,
     insert_node,
 )
+from scripts.run_experiment import load_and_validate_names_file
 
 # Import conformance suite
 from tests.test_strategy_interface import StrategyConformanceSuite
@@ -257,17 +258,17 @@ class TestNullStrategyAccuracyMode:
             assert m["embedding_calls_in_update"] == 0
 
     def test_shortlist_recall_spot_check(self, dsa_corpus, tmp_path):
-        """C1 spot-check: independently compute expected shortlisted candidate for 3 specific nodes.
+        """C1 spot-check: independently compute expected shortlisted candidate for specific nodes.
 
         NullStrategy(seed=42, k=1) draws from sorted(graph.nodes()) using random.Random(42).
-        We verify shortlist_recall matches expected value (1 if gold edge exists, else 0).
+        Includes nodes with expected candidate inside gold neighbours (hit, nonzero recall)
+        and outside gold neighbours (miss, zero recall). No silent None skips; asserts both branches ran.
         """
         import random
 
         gold_graph = dsa_corpus.graph
-        all_nodes = sorted(gold_graph.nodes())
-        # Pick 3 held-out nodes deterministically
-        test_nodes = all_nodes[:3]
+        # Pick specific nodes: asymptotic_complexity & b_tree (hit), avl_tree & binary_search (miss)
+        test_nodes = ["asymptotic_complexity", "avl_tree", "b_tree", "binary_search"]
 
         config = HarnessConfig(
             mode="accuracy",
@@ -295,31 +296,66 @@ class TestNullStrategyAccuracyMode:
             if r.get("status") == "success"
         }
 
+        branches_run = {"hit": 0, "miss": 0}
         for held_out in test_nodes:
-            # Independently compute expected shortlisted node
             existing = [n for n in sorted(gold_graph.nodes()) if n != held_out]
             rng = random.Random(42)
             expected_candidate = rng.sample(existing, 1)[0]
 
             rec = recs_by_node[held_out]
-            # Verify shortlist size in rec
             assert rec["metrics"]["shortlist_size"] == 1
 
-            # shortlist_recall: fraction of gold neighbours in shortlist (k=1 so at most 1 hit)
             gold_neighbors = set(gold_graph.prerequisites_of(held_out)) | set(gold_graph.dependents_of(held_out))
-            if len(gold_neighbors) > 0:
-                expected_shortlist_recall = 1.0 / len(gold_neighbors) if expected_candidate in gold_neighbors else 0.0
-            else:
-                expected_shortlist_recall = None
+            assert len(gold_neighbors) > 0, f"Expected node {held_out} to have gold neighbors"
+            expected_shortlist_recall = 1.0 / len(gold_neighbors) if expected_candidate in gold_neighbors else 0.0
 
             actual_shortlist_recall = rec["score"].get("shortlist_recall")
-            if actual_shortlist_recall is not None and expected_shortlist_recall is not None:
-                assert abs(actual_shortlist_recall - expected_shortlist_recall) < 1e-9, (
-                    f"Node {held_out}: expected shortlist_recall={expected_shortlist_recall}, "
-                    f"got {actual_shortlist_recall} (candidate={expected_candidate}, n_neighbors={len(gold_neighbors)})"
-                )
-            elif expected_shortlist_recall is None:
-                assert actual_shortlist_recall is None
+            assert actual_shortlist_recall is not None, f"Node {held_out}: shortlist_recall was None"
+            assert abs(actual_shortlist_recall - expected_shortlist_recall) < 1e-9, (
+                f"Node {held_out}: expected shortlist_recall={expected_shortlist_recall}, "
+                f"got {actual_shortlist_recall} (candidate={expected_candidate}, n_neighbors={len(gold_neighbors)})"
+            )
+
+            if expected_shortlist_recall > 0.0:
+                branches_run["hit"] += 1
+            else:
+                branches_run["miss"] += 1
+
+        assert branches_run["hit"] >= 1, "Hit branch (nonzero recall) was not exercised"
+        assert branches_run["miss"] >= 1, "Miss branch (zero recall) was not exercised"
+
+    def test_null_analytic_mean_recall_approaches_k_over_n_minus_1(self):
+        """Analytic test (5d): for uniform random shortlist of size k from n-1 nodes,
+
+        the theoretical expected shortlist_recall is k / (n - 1) for any node with d >= 1
+        gold neighbours. Here n=11 nodes (1 held out, 10 existing), k=2, d=2 =>
+        expected mean shortlist_recall = 2 / 10 = 0.20.
+        Tested across 2000 seeds with tolerance +-0.03 (~7 standard errors).
+        """
+        nodes = [f"concept_{i:02d}" for i in range(11)]
+        g = ConceptGraph(domain_context="computer science")
+        for n in nodes:
+            g.add_node(n)
+        g.add_prereq_edge("concept_01", "concept_00")
+        g.add_prereq_edge("concept_02", "concept_00")
+
+        held_out = "concept_00"
+        gold_neighbors = {"concept_01", "concept_02"}
+        recalls = []
+
+        for seed in range(2000):
+            strat = NullStrategy(seed=seed, k=2)
+            strat.setup(g, FakeEmbedder())
+            sl = strat.shortlist(held_out)
+            hits = len(set(sl.candidates) & gold_neighbors)
+            recalls.append(hits / len(gold_neighbors))
+
+        mean_recall = sum(recalls) / len(recalls)
+        expected_recall = 2.0 / 10.0  # 0.20
+        tolerance = 0.03
+        assert abs(mean_recall - expected_recall) < tolerance, (
+            f"Mean recall {mean_recall:.4f} differs from expected {expected_recall:.4f} by > {tolerance}"
+        )
 
     def test_shortlist_recall_in_valid_range(self, dsa_corpus, tmp_path):
         """shortlist_recall is always in [0, 1] across all 29 DSA nodes."""
@@ -503,7 +539,10 @@ class TestNullStrategyResume:
         # Read partial results
         raw_path = out / "raw.jsonl"
         partial_lines = [l for l in raw_path.read_text().strip().splitlines() if l.strip()]
-        assert len(partial_lines) >= 1, "Expected at least 1 record after partial run"
+        partial_records = [json.loads(l) for l in partial_lines]
+        total = 3
+        # 5a: First run must stop early (assert 1 <= partial < total)
+        assert 1 <= len(partial_records) < total, f"Expected 1 <= partial < {total}, got {len(partial_records)}"
 
         # Second run: resume=True, no max_llm_calls limit
         config2 = HarnessConfig(
@@ -512,7 +551,7 @@ class TestNullStrategyResume:
             output_dir=out,
             seed=42,
             sweep_sizes=(3,),
-            sweep_trials_per_size=3,
+            sweep_trials_per_size=total,
             confirm=True,
             resume=True,
         )
@@ -524,11 +563,13 @@ class TestNullStrategyResume:
             name_source=name_source,
         )
 
-        # Final state: exactly 3 records, no duplicate keys
+        # 5a: After resume, record count equals total, partial records are unchanged, keys unique
         final_lines = [l for l in raw_path.read_text().strip().splitlines() if l.strip()]
-        records = [json.loads(l) for l in final_lines]
-        keys = [r["key"] for r in records if r.get("status") == "success"]
-        assert len(keys) == 3, f"Expected 3 successful records, got {len(keys)}"
+        final_records = [json.loads(l) for l in final_lines]
+        assert len(final_records) == total, f"Expected {total} records, got {len(final_records)}"
+        assert final_records[:len(partial_records)] == partial_records, "Partial records were modified on resume"
+        keys = [r["key"] for r in final_records if r.get("status") == "success"]
+        assert len(keys) == total, f"Expected {total} successful records, got {len(keys)}"
         assert len(set(keys)) == len(keys), f"Duplicate keys found: {keys}"
 
     def test_max_llm_calls_is_process_local_not_cumulative(self, tmp_path):
@@ -536,8 +577,11 @@ class TestNullStrategyResume:
 
         Per harness.py: max_llm_calls cap is evaluated via cumulative_llm_calls, which
         starts at 0 at process start and does NOT include records from prior runs.
-        This means a resume with max_llm_calls=N can make N more calls even if the
-        prior run already made many calls.
+        This means a resume with max_llm_calls=N makes N more calls even if the
+        prior run already made N calls.
+
+        Under cumulative semantics, resume with max=2 would make 0 calls (stopping at 2 total).
+        Under process-local semantics, it adds exactly 2 more, yielding 4 records total.
         """
         name_source = self._make_name_source(200)
         out = tmp_path / "max_calls_resume"
@@ -563,8 +607,9 @@ class TestNullStrategyResume:
         )
         raw_path = out / "raw.jsonl"
         after_first = sum(1 for l in raw_path.read_text().strip().splitlines() if l.strip())
+        assert after_first == 2, f"Expected exactly 2 records after first run with max_llm_calls=2, got {after_first}"
 
-        # Resume with max_llm_calls=2: should allow 2 MORE calls (not affected by prior 2)
+        # Resume with max_llm_calls=2: adds exactly 2 MORE calls (process-local)
         config2 = HarnessConfig(
             mode="sweep",
             run_id=run_id,
@@ -584,9 +629,11 @@ class TestNullStrategyResume:
             name_source=name_source,
         )
         after_second = sum(1 for l in raw_path.read_text().strip().splitlines() if l.strip())
-        # After resume with max_llm_calls=2, at least 1 more record should be added
-        assert after_second >= after_first, "Resume should add records, not remove them"
-        assert after_second <= 5, "Total cannot exceed sweep_trials_per_size=5"
+        # 5b: Assert exact numbers that fail under cumulative semantics (2 -> 4)
+        assert after_second == 4, (
+            f"Expected exactly 4 records after process-local resume with max_llm_calls=2, got {after_second} "
+            f"(cumulative semantics would have produced 2)"
+        )
 
 
 # ===========================================================================
@@ -606,51 +653,47 @@ class TestNamesFileValidation:
         path: Path,
         max_size: int,
     ) -> list[str]:
-        """Replicate the names-file loading logic from run_experiment.py.
+        return load_and_validate_names_file(path, min_required_names=max_size + 1)
 
-        Accepts either:
-          - A plain JSON list: ["name1", "name2", ...]
-          - An object: {"meta": {...}, "names": ["name1", ...]}
+    def test_failing_corpus_load_raises(self, tmp_path, monkeypatch):
+        """Corpus load failures during names validation must raise RuntimeError with corpus name."""
+        import scripts.run_experiment as run_exp
 
-        Validates:
-          - len(names) >= max_size + 1
-          - No duplicates
-          - All match snake_case pattern ^[a-z][a-z0-9]*(_[a-z0-9]+)*$
-          - No overlap with any corpus node
-        """
-        data = json.loads(path.read_text())
-        if isinstance(data, list):
-            names = data
-        elif isinstance(data, dict) and "names" in data:
-            names = data["names"]
-        else:
-            raise ValueError(f"names-file must be a JSON array or an object with a 'names' key")
+        names = self._make_valid_names(20)
+        f = tmp_path / "names.json"
+        f.write_text(json.dumps(names))
 
-        if len(names) < max_size + 1:
-            raise ValueError(
-                f"names-file has {len(names)} names but max_size={max_size} requires at least {max_size + 1}"
-            )
-        if len(set(names)) != len(names):
-            raise ValueError("names-file contains duplicate names")
-        for name in names:
-            if not self.SNAKE_CASE_RE.match(name):
-                raise ValueError(f"Name {name!r} does not match snake_case pattern")
+        def broken_load_corpus(spec):
+            raise IOError("corrupt benchmark file")
 
-        # Check against corpus nodes
-        all_corpora = discover_corpora()
-        corpus_nodes: set[str] = set()
-        for spec in all_corpora:
-            try:
-                lc = load_corpus(spec)
-                corpus_nodes.update(lc.graph.nodes())
-            except Exception:
-                pass
+        monkeypatch.setattr(run_exp, "load_corpus", broken_load_corpus)
+        with pytest.raises(RuntimeError, match="Failed to load benchmark corpus"):
+            load_and_validate_names_file(f, min_required_names=5)
 
-        overlaps = set(names) & corpus_nodes
-        if overlaps:
-            raise ValueError(f"names-file names overlap with corpus nodes: {sorted(overlaps)[:5]}")
+    def test_embed_text_overlap_raises(self, tmp_path, monkeypatch):
+        """Reject names whose embed_text form overlaps with any corpus node."""
+        import types
+        import scripts.run_experiment as run_exp
+        from graph_insertion.graph_representation import ConceptGraph
 
-        return names
+        # Valid snake_case names whose embed_text is "mock concept"
+        names = ["mock_concept", "placeholder_concept_00001", "placeholder_concept_00002"]
+        f = tmp_path / "names.json"
+        f.write_text(json.dumps(names))
+
+        mock_g = ConceptGraph()
+        # Node with spaces so direct name comparison does NOT match, but embed_text does match
+        mock_g.add_node("mock concept")
+        lc = types.SimpleNamespace(graph=mock_g)
+
+        class MockSpec:
+            name = "mock_corpus"
+
+        monkeypatch.setattr(run_exp, "discover_corpora", lambda: [MockSpec()])
+        monkeypatch.setattr(run_exp, "load_corpus", lambda spec: lc)
+
+        with pytest.raises(ValueError, match="embed_text form"):
+            load_and_validate_names_file(f, min_required_names=3)
 
     def test_plain_list_format(self, tmp_path):
         names = self._make_valid_names(50)
@@ -696,7 +739,7 @@ class TestNamesFileValidation:
         names = make_placeholder_names(10) + corpus_names
         f = tmp_path / "names.json"
         f.write_text(json.dumps(names))
-        with pytest.raises(ValueError, match="overlap with corpus"):
+        with pytest.raises(ValueError, match="overlaps with corpus"):
             self._load_and_validate_names_file(f, max_size=5)
 
     def test_snake_case_pattern_valid_examples(self):

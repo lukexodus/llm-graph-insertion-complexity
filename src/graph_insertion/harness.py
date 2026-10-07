@@ -442,6 +442,7 @@ def generate_summary_csv(jsonl_path: Path, csv_path: Path, mode: str) -> None:
             "apply_s",
             "update_s",
             "validate_s",
+            "embed_s",
         )
         for tk in timing_keys:
             vals = [r["metrics"][tk] for r in successes if "metrics" in r and tk in r["metrics"]]

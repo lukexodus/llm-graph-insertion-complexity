@@ -54,20 +54,24 @@ def window_intersects_peak(
 ) -> bool:
     """Return True if the time window [start_utc, start_utc + duration_s] overlaps any peak.
 
-    Checks one sample point per minute across the window (upper-bound 24 × 60 = 1440 checks).
+    Checks 1-minute interval sample points across the window, as well as the exact start
+    and end points.
 
     Parameters
     ----------
     start_utc:
         Window start in UTC (naive or aware).
     duration_s:
-        Estimated duration in seconds.
+        Estimated duration in seconds (must be non-negative).
     """
+    if duration_s < 0:
+        raise ValueError(f"duration_s must be non-negative, got {duration_s}")
     end_utc = start_utc + datetime.timedelta(seconds=duration_s)
-    # Check at 1-minute resolution
+    if is_deepseek_peak(start_utc) or is_deepseek_peak(end_utc):
+        return True
     step = datetime.timedelta(minutes=1)
-    current = start_utc
-    while current <= end_utc:
+    current = start_utc + step
+    while current < end_utc:
         if is_deepseek_peak(current):
             return True
         current += step

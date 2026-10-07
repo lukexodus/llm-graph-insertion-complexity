@@ -128,6 +128,35 @@ class TestWindowIntersectsPeak:
         start = datetime.datetime(2026, 10, 10, 1, 0, 0)
         assert window_intersects_peak(start, duration_s=14400) is False
 
+    def test_weekday_pht_0600_window_refused(self):
+        """A 9h window starting 06:00 PHT on a weekday must intersect peak and be refused."""
+        # 06:00 PHT on Tuesday 2026-10-06 = 22:00 UTC on Monday 2026-10-05
+        # 22:00 UTC + 9h = 07:00 UTC Tuesday (crosses 01:00-04:00 peak window on Tuesday)
+        start_utc = datetime.datetime(2026, 10, 5, 22, 0, 0)
+        duration_9h = 9 * 3600
+        assert window_intersects_peak(start_utc, duration_s=duration_9h) is True
+
+    def test_weekday_pht_1830_window_passes(self):
+        """The same 9h window starting 18:30 PHT on a weekday must pass (fully off-peak)."""
+        # 18:30 PHT on Tuesday 2026-10-06 = 10:30 UTC on Tuesday 2026-10-06
+        # 10:30 UTC + 9h = 19:30 UTC Tuesday (entirely within off-peak 10:00-24:00 UTC)
+        start_utc = datetime.datetime(2026, 10, 6, 10, 30, 0)
+        duration_9h = 9 * 3600
+        assert window_intersects_peak(start_utc, duration_s=duration_9h) is False
+
+    def test_weekend_9h_window_passes(self):
+        """9h window starting on weekend passes unconditionally."""
+        # Saturday 10:00 PHT = 02:00 UTC Saturday
+        start_utc = datetime.datetime(2026, 10, 10, 2, 0, 0)
+        duration_9h = 9 * 3600
+        assert window_intersects_peak(start_utc, duration_s=duration_9h) is False
+
+    def test_exact_end_point_in_peak(self):
+        """Window ending exactly at peak start boundary is detected."""
+        # Monday 00:50:00 UTC + 10 min = 01:00:00 UTC (start of peak window)
+        start_utc = datetime.datetime(2026, 10, 5, 0, 50, 0)
+        assert window_intersects_peak(start_utc, duration_s=600) is True
+
 
 class TestFormatPeakStatus:
     """Test format_peak_status output format."""
