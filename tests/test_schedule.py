@@ -157,6 +157,20 @@ class TestWindowIntersectsPeak:
         start_utc = datetime.datetime(2026, 10, 5, 0, 50, 0)
         assert window_intersects_peak(start_utc, duration_s=600) is True
 
+    def test_non_minute_aligned_end_point_in_peak(self):
+        """Window with non-minute-aligned start ending at peak boundary is detected.
+
+        Start = Monday 2026-10-05 00:50:30 UTC, duration = 570s (9m30s).
+        End = 00:50:30 + 570s = 01:00:00 UTC (exact start of peak window).
+        Arithmetic confirmation: Pre-FIX-008 1-minute step sampling starting from 00:50:30
+        would check 00:50:30, 00:51:30, ..., 00:59:30. The next 1-minute step would be
+        01:00:30 > end_utc, so the loop terminated after 00:59:30. Since all sampled points
+        were off-peak (:30s mark) and 01:00:00 fell strictly between 00:59:30 and 01:00:30,
+        pre-FIX-008 sampling missed the peak entirely. The explicit end_utc check detects it.
+        """
+        start_utc = datetime.datetime(2026, 10, 5, 0, 50, 30)
+        assert window_intersects_peak(start_utc, duration_s=570) is True
+
 
 class TestFormatPeakStatus:
     """Test format_peak_status output format."""

@@ -178,6 +178,28 @@ class NarrowingStrategy(Protocol):
         """Return operational diagnostics for the most recent insertion trial."""
         ...
 
+    # Optional method ([D-41]):
+    # def max_candidates(self, n_existing: int) -> int:
+    #     """Return upper bound on candidates shortlisted when graph has n_existing nodes."""
+    #     ...
+
+
+def candidate_upper_bound(strategy: Any, n_existing: int) -> int:
+    """Return an upper bound on candidates shortlisted by strategy given n_existing nodes.
+
+    If strategy defines max_candidates(n_existing: int) -> int, its result is evaluated
+    and clamped to [0, n_existing]. Otherwise, falls back to n_existing (brute-force upper bound).
+    Always clamped to [0, n_existing].
+    """
+    if hasattr(strategy, "max_candidates") and callable(strategy.max_candidates):
+        try:
+            bound = int(strategy.max_candidates(n_existing))
+        except Exception:
+            bound = n_existing
+    else:
+        bound = n_existing
+    return max(0, min(n_existing, bound))
+
 
 def insert_node(
     strategy: NarrowingStrategy,

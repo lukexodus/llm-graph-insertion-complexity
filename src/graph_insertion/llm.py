@@ -12,6 +12,7 @@ Decisions recorded here:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol, Sequence, Union, runtime_checkable
@@ -170,10 +171,23 @@ class MeteredLLMClient:
         self.failed_parses: list[str] = []
         self.model_ids_seen: set[str] = set()
         self.failed_calls: list[dict[str, Any]] = []
+        self.on_call_errors: int = 0
 
     def set_on_call(self, on_call: Optional[Callable[[int, int], None]]) -> None:
         """Register or update a callback invoked with (calls_done, cumulative_retries) on every LLM call."""
         self.on_call = on_call
+
+    def _invoke_on_call(self) -> None:
+        if self.on_call is not None:
+            try:
+                self.on_call(self.calls, self.retries)
+            except Exception as e:
+                self.on_call_errors += 1
+                if self.on_call_errors == 1:
+                    print(
+                        f"Warning: MeteredLLMClient on_call callback raised exception: {e}",
+                        file=sys.stderr,
+                    )
 
     def complete(self, system: str, user: str) -> LLMResponse:
         """Delegate completion to wrapped client and record usage."""
@@ -192,11 +206,7 @@ class MeteredLLMClient:
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
             })
-            if self.on_call is not None:
-                try:
-                    self.on_call(self.calls, self.retries)
-                except Exception:
-                    pass
+            self._invoke_on_call()
             raise
 
         self.calls += 1
@@ -211,11 +221,7 @@ class MeteredLLMClient:
         self.cache_miss_tokens += resp.cache_miss_tokens
         if resp.model_id:
             self.model_ids_seen.add(resp.model_id)
-        if self.on_call is not None:
-            try:
-                self.on_call(self.calls, self.retries)
-            except Exception:
-                pass
+        self._invoke_on_call()
         return resp
 
     def record_parse_failure(self, raw_text: str) -> None:
@@ -256,6 +262,7 @@ class MeteredLLMClient:
         self.failed_parses.clear()
         self.model_ids_seen.clear()
         self.failed_calls.clear()
+        self.on_call_errors = 0
 
 
 

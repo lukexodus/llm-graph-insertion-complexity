@@ -239,6 +239,8 @@ class StrategyConformanceSuite:
             assert cand in existing_nodes
             assert cand != "dijkstra_algorithm"
         assert len(res.candidates) == len(set(res.candidates))
+        if hasattr(strat, "max_candidates") and callable(strat.max_candidates):
+            assert len(res.candidates) <= strat.max_candidates(len(existing_nodes))
 
     def test_shortlist_does_not_mutate_graph(
         self, initial_graph, strategy_factory
@@ -249,11 +251,13 @@ class StrategyConformanceSuite:
         n_before = initial_graph.num_nodes()
         e_before = initial_graph.num_edges()
 
-        _ = strat.shortlist("dijkstra_algorithm")
+        res = strat.shortlist("dijkstra_algorithm")
 
         assert initial_graph.num_nodes() == n_before
         assert initial_graph.num_edges() == e_before
         assert not initial_graph.has_node("dijkstra_algorithm")
+        if hasattr(strat, "max_candidates") and callable(strat.max_candidates):
+            assert len(res.candidates) <= strat.max_candidates(n_before)
 
     def test_same_seed_gives_same_shortlist(
         self, initial_graph, strategy_factory
@@ -269,6 +273,10 @@ class StrategyConformanceSuite:
 
         assert sl1.candidates == sl2.candidates
         assert sl1.scores == sl2.scores
+        if hasattr(strat1, "max_candidates") and callable(strat1.max_candidates):
+            assert len(sl1.candidates) <= strat1.max_candidates(initial_graph.num_nodes())
+        if hasattr(strat2, "max_candidates") and callable(strat2.max_candidates):
+            assert len(sl2.candidates) <= strat2.max_candidates(initial_graph.num_nodes())
 
     def test_d21_text_payload_compliance(
         self, initial_graph, strategy_factory
@@ -358,6 +366,20 @@ class StrategyConformanceSuite:
         # The candidates evaluated for heap must come from the updated graph containing hash_table
         for c in res2.shortlist.candidates:
             assert initial_graph.has_node(c)
+        if hasattr(strat, "max_candidates") and callable(strat.max_candidates):
+            assert len(res1.shortlist.candidates) <= strat.max_candidates(4)
+            assert len(res2.shortlist.candidates) <= strat.max_candidates(5)
+
+    def test_max_candidates_bound_if_defined(
+        self, initial_graph, strategy_factory
+    ):
+        """If strategy defines max_candidates(), candidates count must not exceed max_candidates(n_existing)."""
+        embedder = FakeEmbedder(dim=16, seed=42)
+        strat = strategy_factory(initial_graph, embedder)
+        n_existing = initial_graph.num_nodes()
+        res = strat.shortlist("dijkstra_algorithm")
+        if hasattr(strat, "max_candidates") and callable(strat.max_candidates):
+            assert len(res.candidates) <= strat.max_candidates(n_existing)
 
     def test_embedder_identity_stored_on_strategy(
         self, initial_graph, strategy_factory

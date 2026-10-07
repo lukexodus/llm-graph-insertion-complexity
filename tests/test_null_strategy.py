@@ -330,7 +330,7 @@ class TestNullStrategyAccuracyMode:
         the theoretical expected shortlist_recall is k / (n - 1) for any node with d >= 1
         gold neighbours. Here n=11 nodes (1 held out, 10 existing), k=2, d=2 =>
         expected mean shortlist_recall = 2 / 10 = 0.20.
-        Tested across 2000 seeds with tolerance +-0.03 (~7 standard errors).
+        Tested across 2000 seeds with tolerance +-0.03 (about 5 standard errors, SE about 0.006).
         """
         nodes = [f"concept_{i:02d}" for i in range(11)]
         g = ConceptGraph(domain_context="computer science")

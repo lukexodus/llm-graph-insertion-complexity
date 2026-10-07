@@ -105,3 +105,10 @@ class NullStrategy:
         """Return operational diagnostics for the most recent shortlist call."""
         n = len(list(self._graph.nodes())) if self._graph is not None else 0
         return {"k": self.k, "candidate_count": n}
+
+    def max_candidates(self, n_existing: int) -> int:
+        """Return the maximum number of candidates this strategy will shortlist given n_existing nodes.
+
+        For NullStrategy, at most min(k, n_existing) candidates are shortlisted.
+        """
+        return min(self.k, n_existing)

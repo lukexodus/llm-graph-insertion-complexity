@@ -320,6 +320,22 @@ def load_existing_results(jsonl_path: Path) -> dict[str, dict[str, Any]]:
     return results
 
 
+def _load_existing_keys(raw_jsonl_path: Path, retry_failed: bool = False) -> set[str]:
+    """Load trial keys from raw.jsonl that should be skipped on resume.
+
+    A trial is skipped if status is 'success', or if status is 'failed' and retry_failed is False.
+    """
+    existing_results = load_existing_results(raw_jsonl_path)
+    skipped_keys: set[str] = set()
+    for key, rec in existing_results.items():
+        status = rec.get("status")
+        if status == "success":
+            skipped_keys.add(key)
+        elif status == "failed" and not retry_failed:
+            skipped_keys.add(key)
+    return skipped_keys
+
+
 def compute_metric_stats(values: Sequence[float]) -> dict[str, float]:
     """Calculate mean, median, stdev, min, and max for a sequence of values."""
     if not values:

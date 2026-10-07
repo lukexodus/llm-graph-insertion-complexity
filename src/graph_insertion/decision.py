@@ -25,6 +25,8 @@ from graph_insertion.strategy import DecisionOutcome, DecisionStep
 
 PROMPT_VERSION: str = "v2"
 
+CALLS_PER_CANDIDATE: int = 1  # Exactly 1 pairwise LLM call per shortlisted candidate ([D-29])
+
 SYSTEM_PROMPT: str = (
     "You judge prerequisite relationships between concepts in a curriculum. "
     "A concept P is a prerequisite of a concept Q if a learner needs to understand P, "

@@ -47,17 +47,24 @@ Candidate insertion proceeds in two distinct stages:
 ```
 1. Instantiation:
    strategy = ConcreteStrategy(config_params..., seed=seed)
+   # Attributes:
+   #   uses_embeddings: bool (default True; False for non-embedding strategies like NullStrategy, [D-38](2))
+   # Optional method ([D-41]):
+   #   max_candidates(n_existing: int) -> int
+   #   Evaluated pre-flight (BEFORE setup) by harness and CLI estimators via candidate_upper_bound().
 
 2. Initialization (UNTIMED):
    strategy.setup(initial_graph, embedder)
    # Embeds initial graph concepts, populates baseline indexes/buckets.
    # Note: Trial isolation requires a fresh strategy instance and a deep copy of the graph (graph.copy()).
+   # Embedding strategies store embedder as self._embedder; non-embedding strategies leave self._embedder = None.
 
 3. Incremental Insertion (TIMED via insert_node):
    result = insert_node(strategy, graph, decision_step, new_concept, metered_embedder=metered_embedder)
-   ├─ Step 0: Driver verifies metered_embedder identity (strategy._embedder is metered_embedder)
+   ├─ Step 0: Driver verifies metered_embedder identity (strategy._embedder is metered_embedder; bypassed if None)
    ├─ Step 1: strategy.shortlist(new_concept)          --> Shortlist(candidates, scores)
    │          (Driver validates candidates: must be subset of existing nodes, no duplicates, excludes new_concept; timed in validate_s)
+   │          (If max_candidates is implemented, len(candidates) <= max_candidates(n_existing))
    ├─ Step 2: decision_step.decide(...)                --> DecisionOutcome(edges, llm_calls, llm_seconds)
    │          (Empty shortlist skips LLM calls: 0 calls, 0 edges)
    ├─ Step 3: driver validates edges (timed in validate_s) and mutates ConceptGraph (timed via apply_s):
@@ -108,6 +115,8 @@ from graph_insertion import ConceptGraph, Embedder, Shortlist, embed_text
 class StrategySkeleton:
     """Template for implementing a candidate-narrowing strategy."""
 
+    uses_embeddings: bool = True  # Set to False for non-embedding strategies ([D-38](2))
+
     def __init__(self, seed: int = 42, **kwargs: Any) -> None:
         self.name = "strategy_name"
         self.seed = seed
@@ -116,9 +125,17 @@ class StrategySkeleton:
         self._cached_new_vec: np.ndarray | None = None
         # Internal state (e.g. index, matrices, buckets)
 
+    def max_candidates(self, n_existing: int) -> int:
+        """Optional ([D-41]): upper bound on shortlist candidate count given n_existing nodes.
+
+        Can be called before setup() to compute pre-flight planned LLM call budgets.
+        If omitted, harness defaults to brute-force n_existing.
+        """
+        return n_existing
+
     def setup(self, graph: ConceptGraph, embedder: Embedder) -> None:
         self._graph = graph
-        self._embedder = embedder
+        self._embedder = embedder if self.uses_embeddings else None
         # Build initial search structures over existing graph nodes
 
     def shortlist(self, new_name: str) -> Shortlist:
@@ -160,9 +177,9 @@ class StrategySkeleton:
 
 ## 6. Conformance Testing Suite Guide
 
-To ensure consistent behavior across all four strategies (STRAT-001 through STRAT-004), a reusable conformance test base class is provided in `tests/test_strategy_interface.py`: `StrategyConformanceSuite`.
+To ensure consistent behavior across all four strategies (STRAT-001 through STRAT-004) and baselines, a reusable conformance test base class is provided in `tests/test_strategy_interface.py`: `StrategyConformanceSuite`.
 
-Every strategy test module must subclass `StrategyConformanceSuite` and define a `strategy_factory` fixture returning a factory function `(graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy`:
+Every strategy test module must subclass `StrategyConformanceSuite`, set `uses_embeddings = True` (or `False` for non-embedding strategies, [D-38](2)), and define a `strategy_factory` fixture returning a factory function `(graph: ConceptGraph, embedder: Embedder) -> NarrowingStrategy`:
 
 ```python
 import pytest
@@ -170,6 +187,8 @@ from tests.test_strategy_interface import StrategyConformanceSuite
 from graph_insertion.strategies.my_strategy import MyConcreteStrategy
 
 class TestMyConcreteStrategyConformance(StrategyConformanceSuite):
+    uses_embeddings: bool = True
+
     @pytest.fixture
     def strategy_factory(self):
         def _factory(graph, embedder):
@@ -183,6 +202,8 @@ The conformance suite automatically verifies:
 1. **Candidate subset & exclusion:** `shortlist()` returns a subset of existing graph nodes, containing no duplicates, and never containing `new_name`.
 2. **Graph immutability:** `shortlist()` does not mutate node or edge sets in `ConceptGraph`.
 3. **Determinism:** Identical seeds produce identical shortlists and score sequences.
-4. **D-21 text payload compliance:** All texts passed to embedders match `embed_text(c)` for some concept $c$ in the trial (lowercase, no raw underscores, no domain descriptions).
-5. **Cached single-embedding reuse ([D-26]):** An insertion triggers exactly 1 embedding call (`embed_in_update_s == 0.0`), verifying that `on_inserted` reuses the vector computed in `shortlist`.
+4. **D-21 text payload compliance:** All texts passed to embedders match `embed_text(c)` for some concept $c$ in the trial (lowercase, no raw underscores, no domain descriptions). When `uses_embeddings=False`, asserts zero embedding calls, zero embedding time, and empty texts log.
+5. **Cached single-embedding reuse ([D-26]):** An insertion triggers exactly 1 embedding call (`embed_in_update_s == 0.0`), verifying that `on_inserted` reuses the vector computed in `shortlist`. When `uses_embeddings=False`, asserts exactly zero embedding calls in both phases.
 6. **Repeated insertions:** Successive calls to `insert_node()` correctly expose newly added nodes as candidates for subsequent insertions.
+7. **Embedder identity contract ([D-28]):** The exact `MeteredEmbedder` passed to `setup()` is stored as `strategy._embedder` (verified for embedding strategies; bypassed for non-embedding strategies where `_embedder is None`).
+8. **Max candidates bound ([D-41]):** If the strategy defines `max_candidates(n_existing)`, verifies `len(shortlist.candidates) <= max_candidates(n_existing)` across all shortlisting steps.

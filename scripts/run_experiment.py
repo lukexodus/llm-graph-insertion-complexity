@@ -34,12 +34,17 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from graph_insertion.decision import PROMPT_VERSION, PairwiseDecisionStep
+from graph_insertion.decision import (
+    CALLS_PER_CANDIDATE,
+    PROMPT_VERSION,
+    PairwiseDecisionStep,
+)
 from graph_insertion.embedding import Embedder, FakeEmbedder
 from graph_insertion.graph_representation import ConceptGraph, embed_text
 from graph_insertion.harness import (
     HarnessConfig,
     SyntheticNameSource,
+    _load_existing_keys,
     run_experiment,
 )
 from graph_insertion.loader import LoadedCorpus, discover_corpora, load_corpus
@@ -50,6 +55,7 @@ from graph_insertion.strategy import (
     DecisionStep,
     NarrowingStrategy,
     Shortlist,
+    candidate_upper_bound,
 )
 
 _SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
@@ -89,6 +95,9 @@ class StubNarrowingStrategy:
 
     def diagnostics(self) -> dict[str, Any]:
         return {}
+
+    def max_candidates(self, n_existing: int) -> int:
+        return min(self.top_k, n_existing)
 
 
 class StubDecisionStep:
@@ -248,24 +257,77 @@ class ProgressReporter:
 # Planned Calls & Pre-Flight Calculation (FIX-008)
 # ===========================================================================
 
+class PlannedCallsBound(int):
+    """Integer representing the remaining LLM calls upper bound, with metadata on full plan."""
+
+    full_plan_bound: int
+    remaining_bound: int
+
+    def __new__(cls, remaining_bound: int, full_plan_bound: int) -> PlannedCallsBound:
+        obj = super().__new__(cls, remaining_bound)
+        obj.remaining_bound = remaining_bound
+        obj.full_plan_bound = full_plan_bound
+        return obj
+
+
 def compute_planned_calls_upper_bound(
     config: HarnessConfig,
     corpora: Optional[dict[str, LoadedCorpus]] = None,
-) -> int:
-    """Compute worst-case upper bound on total LLM API calls."""
+    strategy: Optional[Any] = None,
+    raw_jsonl_path: Optional[Path] = None,
+) -> PlannedCallsBound:
+    """Compute worst-case upper bound on total LLM API calls, strategy-aware and resume-aware.
+
+    Instantiates/evaluates bounds per planned trial:
+      trial_bound = CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n_existing_at_trial)
+    On --resume, subtracts trials already completed (or skipped if failed and not retry_failed).
+    If config.max_llm_calls is set, caps the remaining bound to max_llm_calls.
+    """
+    skipped_keys: set[str] = set()
+    if config.resume and raw_jsonl_path is not None and raw_jsonl_path.exists():
+        skipped_keys = _load_existing_keys(raw_jsonl_path, retry_failed=config.retry_failed)
+
+    strategy_name = getattr(strategy, "name", "unknown") if strategy is not None else "unknown"
+
+    full_plan_bound = 0
+    remaining_bound = 0
+
     if config.mode == "sweep":
-        # In sweep mode: sum over sweep sizes of (n * trials_per_size)
-        return sum(n * config.sweep_trials_per_size for n in config.sweep_sizes)
+        for n in config.sweep_sizes:
+            trial_bound = CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n)
+            for trial_idx in range(config.sweep_trials_per_size):
+                trial_key = f"sweep:{strategy_name}:{n}:t{trial_idx}"
+                full_plan_bound += trial_bound
+                if trial_key in skipped_keys:
+                    continue
+                remaining_bound += trial_bound
+
     elif config.mode == "accuracy":
-        # In accuracy mode: sum over held-out nodes of (n_nodes - 1)
-        total_calls = 0
         if corpora:
-            for cname, lc in corpora.items():
-                n_nodes = len(lc.graph.nodes())
-                k_sample = min(config.metacademy_sample_size, n_nodes) if "metacademy" in cname.lower() else n_nodes
-                total_calls += k_sample * (n_nodes - 1) * config.repeats
-        return total_calls
-    return 0
+            for corpus_name, lc in corpora.items():
+                all_nodes = sorted(lc.graph.nodes())
+                if "metacademy" in corpus_name.lower():
+                    rng = random.Random(config.seed)
+                    sample_k = min(config.metacademy_sample_size, len(all_nodes))
+                    sampled_nodes = sorted(rng.sample(all_nodes, sample_k))
+                else:
+                    sampled_nodes = all_nodes
+
+                n_existing = max(0, len(all_nodes) - 1)
+                trial_bound = CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n_existing)
+
+                for rep in range(config.repeats):
+                    for h in sampled_nodes:
+                        trial_key = f"accuracy:{strategy_name}:{corpus_name}:{h}:r{rep}"
+                        full_plan_bound += trial_bound
+                        if trial_key in skipped_keys:
+                            continue
+                        remaining_bound += trial_bound
+
+    if config.max_llm_calls is not None:
+        remaining_bound = min(remaining_bound, config.max_llm_calls)
+
+    return PlannedCallsBound(remaining_bound, full_plan_bound)
 
 
 def compute_preflight_estimate(
@@ -286,6 +348,23 @@ def compute_preflight_estimate(
         "input_tokens_est": input_tokens_est,
         "output_tokens_est": output_tokens_est,
     }
+
+
+def build_live_client(
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Any:
+    """Construct a live DeepSeekClient instance configured for experimental evaluation.
+
+    Does not perform network I/O upon construction.
+    """
+    from graph_insertion.llm import DeepSeekClient
+    key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+    if not key:
+        raise ValueError(
+            "DEEPSEEK_API_KEY is required for live execution. Set the environment variable or pass api_key."
+        )
+    return DeepSeekClient(api_key=key, model=model)
 
 
 # ===========================================================================
@@ -485,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default=None,
-        help="DeepSeek model identifier (default from env DEEPSEEK_MODEL or 'deepseek-flash').",
+        help="DeepSeek model identifier (default 'deepseek-flash', or DEEPSEEK_MODEL env var if set).",
     )
     parser.add_argument(
         "--max-llm-calls",
@@ -575,8 +654,32 @@ def main() -> int:
                 "metacademy_gold_standard_MEKG": load_corpus("metacademy"),
             }
 
-    # Compute planned calls upper bound
-    planned_calls_upper_bound = compute_planned_calls_upper_bound(config, corpora)
+    # Gate: live sweep mode requires --names-file (Part B1)
+    if args.live and config.mode == "sweep" and not args.names_file:
+        print(
+            "ERROR: Live execution in sweep mode requires an external names file (--names-file) "
+            "generated from the verified DATA-004 concept name pool. Placeholder names are only permitted "
+            "for offline/non-live runs.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Output dir & raw_jsonl_path for resume calculation
+    output_dir = Path(config.output_dir) if config.output_dir else Path("results") / config.run_id
+    raw_jsonl_path = output_dir / "raw.jsonl"
+
+    # Instantiate strategy once via factory without calling setup()
+    uninitialized_strategy = strategy_factory()
+
+    # Compute planned calls upper bound (strategy-aware, resume-aware)
+    planned_calls_bound = compute_planned_calls_upper_bound(
+        config=config,
+        corpora=corpora,
+        strategy=uninitialized_strategy,
+        raw_jsonl_path=raw_jsonl_path,
+    )
+    planned_calls_upper_bound = planned_calls_bound.remaining_bound
+    full_plan_bound = planned_calls_bound.full_plan_bound
 
     # Estimate total trials
     if config.mode == "accuracy":
@@ -588,12 +691,12 @@ def main() -> int:
     else:
         total_planned_trials = len(config.sweep_sizes) * config.sweep_trials_per_size
 
-    # Decision step wiring & live peak check (FIX-008)
+    # Decision step wiring & live peak check (FIX-008, FIX-009)
     decision_step: DecisionStep
     metered_client = None
 
     if args.live:
-        from graph_insertion.llm import DeepSeekClient, MeteredLLMClient
+        from graph_insertion.llm import MeteredLLMClient
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         est = compute_preflight_estimate(
@@ -605,39 +708,45 @@ def main() -> int:
 
         print("=" * 65)
         print("LIVE EXPERIMENT PRE-FLIGHT ESTIMATE")
-        print(f"Planned calls (upper bound): {est['planned_calls']}")
-        print(f"Estimated duration:          {est['estimated_seconds']:.1f}s ({est['estimated_seconds']/60:.1f} min) (assuming {args.est_seconds_per_call:.1f}s/call)")
-        print(f"Estimated cost:              ${est['estimated_cost_usd']:.4f} USD")
-        print(f"Cost assumptions:            ~152 in, ~2.5 out tokens/call at ${args.price_in:.2f}/M in, ${args.price_out:.2f}/M out")
+        print(f"Full-plan calls (upper bound): {full_plan_bound}")
+        print(f"Remaining calls (upper bound): {est['planned_calls']}")
+        print(f"Estimated duration:            {est['estimated_seconds']:.1f}s ({est['estimated_seconds']/60:.1f} min) (assuming {args.est_seconds_per_call:.1f}s/call)")
+        print(f"Estimated cost:                ${est['estimated_cost_usd']:.4f} USD")
+        print(f"Cost assumptions:              ~152 in, ~2.5 out tokens/call at ${args.price_in:.2f}/M in, ${args.price_out:.2f}/M out")
         print("-" * 65)
         print(format_peak_status(now_utc))
         print("=" * 65)
 
-        if window_intersects_peak(now_utc, est["estimated_seconds"]) and not args.allow_peak:
+        would_be_refused = window_intersects_peak(now_utc, est["estimated_seconds"]) and not args.allow_peak
+        if would_be_refused:
             end_utc = now_utc + datetime.timedelta(seconds=est["estimated_seconds"])
-            print(
-                f"ERROR: Planned execution window [{now_utc.strftime('%H:%M:%S')}, "
-                f"{end_utc.strftime('%H:%M:%S')} UTC] "
-                "intersects DeepSeek peak pricing hours (01:00-04:00 or 06:00-10:00 UTC Mon-Fri).\n"
-                "To run anyway at peak rates, pass '--allow-peak'.",
-                file=sys.stderr,
+            refusal_msg = (
+                f"Peak check note: Planned execution window [{now_utc.strftime('%H:%M:%S')}, "
+                f"{end_utc.strftime('%H:%M:%S')} UTC] intersects DeepSeek peak pricing hours "
+                "(01:00-04:00 or 06:00-10:00 UTC Mon-Fri). A real live run would be REFUSED unless '--allow-peak' is passed."
             )
+        else:
+            refusal_msg = "Peak check note: Planned execution window falls within off-peak pricing hours. A real live run would be PERMITTED."
+
+        print(refusal_msg)
+
+        # --live --dry-run prints estimate and refusal note, exits 0 without key check or client construction
+        if args.dry_run:
+            print("Dry run complete (live pre-flight estimation only; no API calls or client construction).")
+            return 0
+
+        if would_be_refused:
+            print(f"ERROR: {refusal_msg}", file=sys.stderr)
             return 1
 
-        if not args.confirm and not args.dry_run:
+        if not args.confirm:
             print(
                 "ERROR: Live execution requires explicit '--confirm' flag to proceed.",
                 file=sys.stderr,
             )
             return 1
 
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if not api_key:
-            print("ERROR: DEEPSEEK_API_KEY environment variable is required for --live runs.", file=sys.stderr)
-            return 1
-
-        # Builds DeepSeekClient identically to scripts/pilot_dsa_zero_shot.py
-        raw_client = DeepSeekClient(api_key=api_key, model=args.model)
+        raw_client = build_live_client(model=args.model)
         metered_client = MeteredLLMClient(raw_client)
         decision_step = PairwiseDecisionStep(metered_client)
     else:

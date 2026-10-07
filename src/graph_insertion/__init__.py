@@ -30,6 +30,7 @@ from graph_insertion.strategy import (
     InsertionResult,
     NarrowingStrategy,
     Shortlist,
+    candidate_upper_bound,
     insert_node,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "InsertionResult",
     "DecisionStep",
     "NarrowingStrategy",
+    "candidate_upper_bound",
     "insert_node",
     # Loader
     "CorpusSpec",
@@ -74,6 +76,7 @@ __all__ = [
     "DecisionParseError",
     "PROMPT_VERSION",
     "SYSTEM_PROMPT",
+    "CALLS_PER_CANDIDATE",
 ]
 
 from graph_insertion.llm import (
@@ -86,6 +89,7 @@ from graph_insertion.llm import (
     MeteredLLMClient,
 )
 from graph_insertion.decision import (
+    CALLS_PER_CANDIDATE,
     DecisionParseError,
     PROMPT_VERSION,
     PairwiseDecisionStep,
