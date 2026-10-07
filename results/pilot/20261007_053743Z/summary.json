@@ -1,0 +1,191 @@
+{
+  "timestamp_utc": "2026-10-07T05:49:00.879000+00:00",
+  "prompt_version": "v2",
+  "configured_model": "deepseek-flash",
+  "model_id": "deepseek-flash",
+  "observed_model_ids": [
+    "deepseek-flash"
+  ],
+  "base_url": "https://api.deepseek.com",
+  "temperature": 0.0,
+  "thinking_mode": "disabled",
+  "max_tokens": 16,
+  "dataset": "DSA_gold_standard_MEKG",
+  "num_nodes": 29,
+  "total_calls": 812,
+  "planned_calls": 812,
+  "parse_failure_count": 0,
+  "retried_call_count": 0,
+  "transport_failure_count": 0,
+  "prices": {
+    "price_in_per_m": 0.15,
+    "price_out_per_m": 0.6
+  },
+  "token_usage": {
+    "input_tokens": 123872,
+    "output_tokens": 2035,
+    "reasoning_tokens": 0,
+    "cache_hit_tokens": 0,
+    "cache_miss_tokens": 123872,
+    "estimated_cost_usd": 0.019802
+  },
+  "timing_s": {
+    "mean_latency": 0.8335,
+    "median_latency": 0.8083,
+    "p95_latency": 1.1825,
+    "cumulative_latency": 676.8048,
+    "cumulative_retry_wait": 0.0
+  },
+  "retries_and_errors": {
+    "attempts": 812,
+    "retries": 0,
+    "parse_failures": 0,
+    "parse_failure_rate": 0.0
+  },
+  "evaluation": {
+    "accuracy_3way_standard": 0.8765,
+    "accuracy_3way_sensitivity_missing_as_none": 0.8756,
+    "node_insertion_scoring": {
+      "micro": {
+        "precision": 0.4853,
+        "recall": 0.6111,
+        "f1": 0.541,
+        "shortlist_recall": 1.0
+      },
+      "macro": {
+        "precision": 0.5523,
+        "recall": 0.6064,
+        "f1": 0.5346,
+        "shortlist_recall": 1.0,
+        "n_precision_defined": 29,
+        "n_recall_defined": 28,
+        "n_f1_defined": 29,
+        "n_shortlist_recall_defined": 28
+      },
+      "sensitivity": {
+        "precision_micro": 0.4818,
+        "recall_micro": 0.6111,
+        "f1_micro": 0.5388,
+        "precision_macro": 0.5519,
+        "recall_macro": 0.6064,
+        "f1_macro": 0.5342,
+        "n_precision_sensitivity_defined": 29,
+        "n_recall_sensitivity_defined": 28,
+        "n_f1_sensitivity_defined": 29
+      },
+      "totals": {
+        "tp": 66,
+        "fp": 70,
+        "fn": 42,
+        "fp_sensitivity": 71,
+        "unjudged_predictions": 1
+      }
+    },
+    "direction_flips": 12,
+    "calls_with_gold_and_pred_edge": 78,
+    "direction_flip_rate": 0.1538,
+    "swap_consistency": {
+      "consistent_pairs": 348,
+      "total_unordered_pairs": 406,
+      "swap_consistency_rate": 0.8571
+    },
+    "confusion_matrix_standard": {
+      "X_PREREQ_Y": {
+        "X_PREREQ_Y": 34,
+        "Y_PREREQ_X": 9,
+        "NONE": 11,
+        "PARSE_FAILURE": 0
+      },
+      "Y_PREREQ_X": {
+        "X_PREREQ_Y": 3,
+        "Y_PREREQ_X": 32,
+        "NONE": 19,
+        "PARSE_FAILURE": 0
+      },
+      "NONE": {
+        "X_PREREQ_Y": 28,
+        "Y_PREREQ_X": 30,
+        "NONE": 644,
+        "PARSE_FAILURE": 0
+      }
+    },
+    "confusion_matrix_sensitivity": {
+      "X_PREREQ_Y": {
+        "X_PREREQ_Y": 34,
+        "Y_PREREQ_X": 9,
+        "NONE": 11,
+        "PARSE_FAILURE": 0
+      },
+      "Y_PREREQ_X": {
+        "X_PREREQ_Y": 3,
+        "Y_PREREQ_X": 32,
+        "NONE": 19,
+        "PARSE_FAILURE": 0
+      },
+      "NONE": {
+        "X_PREREQ_Y": 29,
+        "Y_PREREQ_X": 30,
+        "NONE": 645,
+        "PARSE_FAILURE": 0
+      }
+    }
+  },
+  "acceptance": {
+    "g1_validity": {
+      "transport_failures": {
+        "value": 0,
+        "passed": true
+      },
+      "parse_failures": {
+        "value": 0,
+        "rate": 0.0,
+        "passed": true
+      },
+      "reasoning_tokens": {
+        "value": 0,
+        "passed": true
+      },
+      "model_identity": {
+        "configured": "deepseek-flash",
+        "observed": [
+          "deepseek-flash"
+        ],
+        "configured_equals_observed": true,
+        "passed": true
+      },
+      "prompt_version": {
+        "value": "v2",
+        "passed": true
+      },
+      "retries": {
+        "value": 0,
+        "rate": 0.0,
+        "passed": true
+      },
+      "verdict": "PASS"
+    },
+    "g2_usefulness": {
+      "recall_micro": {
+        "value": 0.6111,
+        "threshold_pass": 0.7,
+        "threshold_fail": 0.5,
+        "passed": false
+      },
+      "f1_micro": {
+        "value": 0.541,
+        "threshold_pass": 0.5,
+        "threshold_fail": 0.35,
+        "passed": true
+      },
+      "direction_flip_rate": {
+        "value": 0.1538,
+        "flips": 12,
+        "denominator": 78,
+        "threshold_pass": 0.15,
+        "passed": false
+      },
+      "verdict": "CONDITIONAL"
+    },
+    "overall_verdict": "CONDITIONAL"
+  }
+}

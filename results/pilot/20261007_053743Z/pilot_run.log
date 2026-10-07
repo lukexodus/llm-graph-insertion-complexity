@@ -1,0 +1,20 @@
+Loaded DSA: 29 nodes, domain context: 'data structures and algorithms'
+Executing 812 leave-one-out pairwise queries...
+Completed 812 calls. Computing evaluation metrics...
+
+--- PILOT SUMMARY ---
+3-Way Accuracy (Standard): 87.65%
+3-Way Accuracy (Sensitivity: Missing as NONE): 87.56%
+Node Insertion Micro: Precision=48.53%, Recall=61.11%, F1=54.10%
+Node Insertion Macro: Precision=55.23%, Recall=60.64%, F1=53.46%
+Totals: TP=66, FP=70, FN=42, Unjudged Predictions=1
+Direction Flips: 12 (15.38% of 78 edge calls)
+Swap Consistency Rate: 85.71% (348/406)
+Acceptance G1 Validity: PASS
+Acceptance G2 Usefulness: CONDITIONAL
+Overall Acceptance Verdict: CONDITIONAL
+Parse Failures: 0 (0.00%)
+Latency: Median=0.808s, P95=1.183s
+Tokens: In=123872, Out=2035, Reasoning=0, CacheHit=0
+Estimated Cost: $0.0198
+Saved artifacts to /home/lukexodus/projects/llm-graph-insertion-complexity/results/pilot/20261007_053743Z
