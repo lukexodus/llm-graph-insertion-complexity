@@ -26,6 +26,17 @@ import httpx
 class LLMTransportError(RuntimeError):
     """Raised when an LLM API request fails after retries or encounters non-retryable error."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int = 1,
+        retry_wait_s: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.retry_wait_s = retry_wait_s
+
 
 # ---------------------------------------------------------------------------
 # Data Structures
@@ -151,10 +162,28 @@ class MeteredLLMClient:
         self.cache_hit_tokens: int = 0
         self.cache_miss_tokens: int = 0
         self.failed_parses: list[str] = []
+        self.model_ids_seen: set[str] = set()
+        self.failed_calls: list[dict[str, Any]] = []
 
     def complete(self, system: str, user: str) -> LLMResponse:
         """Delegate completion to wrapped client and record usage."""
-        resp = self.client.complete(system, user)
+        try:
+            resp = self.client.complete(system, user)
+        except Exception as exc:
+            self.calls += 1
+            attempts = getattr(exc, "attempts", 1)
+            retry_wait_s = getattr(exc, "retry_wait_s", 0.0)
+            self.attempts += attempts
+            self.retries += max(0, attempts - 1)
+            self.cumulative_retry_wait_s += retry_wait_s
+            self.failed_calls.append({
+                "attempts": attempts,
+                "retry_wait_s": retry_wait_s,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            })
+            raise
+
         self.calls += 1
         self.attempts += resp.attempts
         self.retries += max(0, resp.attempts - 1)
@@ -165,6 +194,8 @@ class MeteredLLMClient:
         self.reasoning_tokens += resp.reasoning_tokens
         self.cache_hit_tokens += resp.cache_hit_tokens
         self.cache_miss_tokens += resp.cache_miss_tokens
+        if resp.model_id:
+            self.model_ids_seen.add(resp.model_id)
         return resp
 
     def record_parse_failure(self, raw_text: str) -> None:
@@ -203,6 +234,9 @@ class MeteredLLMClient:
         self.cache_hit_tokens = 0
         self.cache_miss_tokens = 0
         self.failed_parses.clear()
+        self.model_ids_seen.clear()
+        self.failed_calls.clear()
+
 
 
 # ---------------------------------------------------------------------------
@@ -285,48 +319,67 @@ class DeepSeekClient:
 
                 # Check status
                 if resp.status_code == 200:
-                    data = resp.json()
-                    choices = data.get("choices", [])
-                    if not choices:
-                        raise LLMTransportError(f"DeepSeek API response missing choices: {data}")
-                    content = choices[0].get("message", {}).get("content", "")
-                    usage = data.get("usage", {})
-                    input_tokens = usage.get("prompt_tokens", 0)
-                    output_tokens = usage.get("completion_tokens", 0)
-                    reasoning_tokens = (
-                        usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
-                        or usage.get("reasoning_tokens", 0)
-                    )
-                    cache_hit_tokens = (
-                        usage.get("prompt_cache_hit_tokens", 0)
-                        or usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                    )
-                    cache_miss_tokens = usage.get("prompt_cache_miss_tokens", 0) or max(
-                        0, input_tokens - cache_hit_tokens
-                    )
-                    model_id = data.get("model", self.model)
+                    try:
+                        data = resp.json()
+                    except Exception as e:
+                        last_exception = LLMTransportError(
+                            f"HTTP 200 with invalid JSON response: {e}",
+                            attempts=attempts,
+                            retry_wait_s=total_retry_wait_s,
+                        )
+                    else:
+                        choices = data.get("choices", [])
+                        if not choices:
+                            last_exception = LLMTransportError(
+                                f"DeepSeek API response missing choices: {data}",
+                                attempts=attempts,
+                                retry_wait_s=total_retry_wait_s,
+                            )
+                        else:
+                            content = choices[0].get("message", {}).get("content", "")
+                            usage = data.get("usage", {})
+                            input_tokens = usage.get("prompt_tokens", 0)
+                            output_tokens = usage.get("completion_tokens", 0)
+                            reasoning_tokens = (
+                                usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+                                or usage.get("reasoning_tokens", 0)
+                            )
+                            cache_hit_tokens = (
+                                usage.get("prompt_cache_hit_tokens", 0)
+                                or usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                            )
+                            cache_miss_tokens = usage.get("prompt_cache_miss_tokens", 0) or max(
+                                0, input_tokens - cache_hit_tokens
+                            )
+                            model_id = data.get("model", self.model)
 
-                    return LLMResponse(
-                        text=content,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                        cache_hit_tokens=cache_hit_tokens,
-                        cache_miss_tokens=cache_miss_tokens,
-                        latency_s=latency_s,
-                        model_id=model_id,
+                            return LLMResponse(
+                                text=content,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                reasoning_tokens=reasoning_tokens,
+                                cache_hit_tokens=cache_hit_tokens,
+                                cache_miss_tokens=cache_miss_tokens,
+                                latency_s=latency_s,
+                                model_id=model_id,
+                                attempts=attempts,
+                                retry_wait_s=total_retry_wait_s,
+                            )
+
+                # Retryable HTTP status codes
+                elif resp.status_code in (429, 500, 502, 503, 504):
+                    err_msg = f"HTTP {resp.status_code}: {resp.text}"
+                    last_exception = LLMTransportError(
+                        err_msg,
                         attempts=attempts,
                         retry_wait_s=total_retry_wait_s,
                     )
-
-                # Retryable HTTP status codes
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    err_msg = f"HTTP {resp.status_code}: {resp.text}"
-                    last_exception = LLMTransportError(err_msg)
                 else:
                     # Non-retryable 4xx
                     raise LLMTransportError(
-                        f"Non-retryable HTTP {resp.status_code} from DeepSeek API: {resp.text}"
+                        f"Non-retryable HTTP {resp.status_code} from DeepSeek API: {resp.text}",
+                        attempts=attempts,
+                        retry_wait_s=total_retry_wait_s,
                     )
 
             except (httpx.TimeoutException, httpx.NetworkError) as e:
@@ -342,7 +395,9 @@ class DeepSeekClient:
                 total_retry_wait_s += delay
 
         raise LLMTransportError(
-            f"DeepSeek API call failed after {attempts} attempts. Last error: {last_exception}"
+            f"DeepSeek API call failed after {attempts} attempts. Last error: {last_exception}",
+            attempts=attempts,
+            retry_wait_s=total_retry_wait_s,
         )
 
 

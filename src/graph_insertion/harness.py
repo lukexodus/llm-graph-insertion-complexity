@@ -32,6 +32,7 @@ from typing import Any, Callable, Optional, Sequence, Union
 
 from graph_insertion.embedding import Embedder, MeteredEmbedder
 from graph_insertion.graph_representation import ConceptGraph
+from graph_insertion.llm import LLMTransportError
 from graph_insertion.loader import LoadedCorpus, load_corpus
 from graph_insertion.scoring import (
     AggregateScore,
@@ -46,6 +47,8 @@ from graph_insertion.strategy import (
     NarrowingStrategy,
     insert_node,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ===========================================================================
@@ -101,7 +104,10 @@ class HarnessConfig:
     sweep_trials_per_size:
         Number of independent trials evaluated per size in sweep mode (default 10).
     max_llm_calls:
-        Safety cap on total LLM API calls across the entire experiment run.
+        Safety cap on total LLM API calls across the current execution process.
+        Note: counts successful insertions only, evaluated before each trial via
+        cumulative_llm_calls; can overshoot by one insertion trial; does not
+        persist/carry across --resume invocations.
     dry_run:
         If True, plans and prints insertions and estimated calls without executing.
     confirm:
@@ -145,7 +151,8 @@ class HarnessConfig:
 # ===========================================================================
 
 SECRET_KEY_PATTERN = re.compile(
-    r"(api_?key|secret|token|password|auth|credential|private_?key)", re.IGNORECASE
+    r"(api_?key|secret|password|credential|private_?key|auth|bearer|(?:^|_)token(?:$|_))",
+    re.IGNORECASE,
 )
 
 
@@ -173,16 +180,17 @@ def sanitize_metadata(obj: Any) -> Any:
 
 def get_git_info(cwd: Optional[Path] = None) -> dict[str, Any]:
     """Inspect current git repository commit and dirty working tree status."""
+    target_dir = cwd or REPO_ROOT
     try:
         commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd=cwd,
+            cwd=target_dir,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
         status = subprocess.check_output(
             ["git", "status", "--porcelain"],
-            cwd=cwd,
+            cwd=target_dir,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -213,19 +221,40 @@ def _extract_metered_llm(decision_step: Any) -> Optional[Any]:
     return None
 
 
-def _extract_model_and_prompt_info(decision_step: Any) -> tuple[Optional[str], Optional[str]]:
-    """Extract model ID and prompt version from decision step or client."""
-    model_id: Optional[str] = None
+def _extract_model_and_prompt_info(decision_step: Any) -> dict[str, Any]:
+    """Extract model ID, observed models, base_url, and prompt version from decision step or client."""
+    configured_model: Optional[str] = None
+    observed_model_ids: list[str] = []
+    base_url: Optional[str] = None
     prompt_version: Optional[str] = None
 
     if hasattr(decision_step, "PROMPT_VERSION"):
         prompt_version = str(getattr(decision_step, "PROMPT_VERSION"))
+
+    client = None
     if hasattr(decision_step, "llm_client"):
         client = getattr(decision_step, "llm_client")
-        if hasattr(client, "model_id") and getattr(client, "model_id"):
-            model_id = str(getattr(client, "model_id"))
-        elif hasattr(client, "client") and hasattr(client.client, "model_id"):
-            model_id = str(getattr(client.client, "model_id"))
+    elif hasattr(decision_step, "complete"):
+        client = decision_step
+
+    if client is not None:
+        if hasattr(client, "model_ids_seen"):
+            observed_model_ids = sorted(list(client.model_ids_seen))
+
+        inner_client = getattr(client, "client", client)
+
+        for c in (inner_client, client):
+            if hasattr(c, "model") and getattr(c, "model"):
+                configured_model = str(getattr(c, "model"))
+                break
+            elif hasattr(c, "model_id") and getattr(c, "model_id"):
+                configured_model = str(getattr(c, "model_id"))
+                break
+
+        for c in (inner_client, client):
+            if hasattr(c, "base_url") and getattr(c, "base_url"):
+                base_url = str(getattr(c, "base_url"))
+                break
 
     if prompt_version is None:
         try:
@@ -234,7 +263,12 @@ def _extract_model_and_prompt_info(decision_step: Any) -> tuple[Optional[str], O
         except ImportError:
             pass
 
-    return model_id, prompt_version
+    return {
+        "configured_model": configured_model,
+        "observed_model_ids": observed_model_ids,
+        "base_url": base_url,
+        "prompt_version": prompt_version,
+    }
 
 
 # ===========================================================================
@@ -289,7 +323,7 @@ def write_manifest(
     manifest_path = output_dir / "manifest.json"
 
     git_info = get_git_info()
-    model_id, prompt_version = _extract_model_and_prompt_info(decision_step)
+    model_info = _extract_model_and_prompt_info(decision_step)
 
     data = {
         "run_id": config.run_id,
@@ -301,8 +335,14 @@ def write_manifest(
         "platform": platform.platform(),
         "libraries": get_library_versions(),
         "strategy_config": strategy_config,
-        "model_id": model_id,
-        "prompt_version": prompt_version,
+        "configured_model": model_info["configured_model"],
+        "observed_model_ids": model_info["observed_model_ids"],
+        "base_url": model_info["base_url"],
+        "temperature": 0.0,
+        "thinking_mode": "disabled",
+        "max_tokens": 16,
+        "prompt_version": model_info["prompt_version"],
+        "model_id": model_info["configured_model"],
         "seeds": {"seed": config.seed},
         "sizes": list(config.sweep_sizes) if config.mode == "sweep" else [],
         "metacademy_sample_size": config.metacademy_sample_size if config.mode == "accuracy" else None,
@@ -317,18 +357,21 @@ def write_manifest(
 
 def generate_summary_csv(jsonl_path: Path, csv_path: Path, mode: str) -> None:
     """Generate summary.csv aggregated from records stored in raw.jsonl."""
-    records = []
+    records_by_key: dict[str, dict[str, Any]] = {}
     if not jsonl_path.exists():
         return
     with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
+        for idx, line in enumerate(f):
             line = line.strip()
             if line:
                 try:
-                    records.append(json.loads(line))
+                    rec = json.loads(line)
+                    key = rec.get("key") or f"unkeyed_{idx}"
+                    records_by_key[key] = rec
                 except Exception:
                     pass
 
+    records = list(records_by_key.values())
     if not records:
         return
 
@@ -350,6 +393,8 @@ def generate_summary_csv(jsonl_path: Path, csv_path: Path, mode: str) -> None:
         num_success = len(successes)
         num_failed = total_trials - num_success
 
+        n_with_retries = sum(1 for r in successes if r.get("retries", 0) > 0)
+
         row: dict[str, Any] = {
             "strategy": strat,
             "mode": mode,
@@ -357,13 +402,14 @@ def generate_summary_csv(jsonl_path: Path, csv_path: Path, mode: str) -> None:
             "num_trials": total_trials,
             "num_success": num_success,
             "num_failed": num_failed,
+            "n_with_retries": n_with_retries,
         }
 
         # Graph node counts
         n_vals = [r["metrics"]["n_before"] for r in successes if "metrics" in r]
         row["n"] = int(statistics.mean(n_vals)) if n_vals else 0
 
-        # Timing and metric distributions
+        # Timing and metric distributions over all successes
         timing_keys = (
             "total_s",
             "shortlist_s",
@@ -377,6 +423,17 @@ def generate_summary_csv(jsonl_path: Path, csv_path: Path, mode: str) -> None:
             st = compute_metric_stats(vals)
             for metric_stat, val in st.items():
                 row[f"{tk}_{metric_stat}"] = val
+
+        # total_s breakdown over zero-retry insertions
+        zero_retry_successes = [r for r in successes if r.get("retries", 0) == 0]
+        zero_retry_total_s = [
+            r["metrics"]["total_s"]
+            for r in zero_retry_successes
+            if "metrics" in r and "total_s" in r["metrics"]
+        ]
+        zero_st = compute_metric_stats(zero_retry_total_s)
+        for metric_stat, val in zero_st.items():
+            row[f"total_s_zero_retries_{metric_stat}"] = val
 
         # Harness wall time and unaccounted time
         harness_vals = [r.get("harness_wall_s", 0.0) for r in successes]
@@ -417,22 +474,32 @@ def generate_summary_csv(jsonl_path: Path, csv_path: Path, mode: str) -> None:
                 row["precision_macro"] = agg.precision_macro
                 row["recall_macro"] = agg.recall_macro
                 row["f1_macro"] = agg.f1_macro
+                row["n_precision_defined"] = agg.n_precision_defined
+                row["n_recall_defined"] = agg.n_recall_defined
+                row["n_f1_defined"] = agg.n_f1_defined
                 row["shortlist_recall_micro"] = agg.shortlist_recall_micro
                 row["shortlist_recall_macro"] = agg.shortlist_recall_macro
+                row["n_shortlist_recall_defined"] = agg.n_shortlist_recall_defined
                 row["precision_micro_sensitivity"] = agg.precision_micro_sensitivity
                 row["recall_micro_sensitivity"] = agg.recall_micro_sensitivity
                 row["f1_micro_sensitivity"] = agg.f1_micro_sensitivity
                 row["precision_macro_sensitivity"] = agg.precision_macro_sensitivity
                 row["recall_macro_sensitivity"] = agg.recall_macro_sensitivity
                 row["f1_macro_sensitivity"] = agg.f1_macro_sensitivity
+                row["n_precision_sensitivity_defined"] = agg.n_precision_sensitivity_defined
+                row["n_recall_sensitivity_defined"] = agg.n_recall_sensitivity_defined
+                row["n_f1_sensitivity_defined"] = agg.n_f1_sensitivity_defined
                 row["unjudged_predictions_total"] = agg.excluded_total
             else:
                 for metric in (
                     "precision_micro", "recall_micro", "f1_micro",
                     "precision_macro", "recall_macro", "f1_macro",
+                    "n_precision_defined", "n_recall_defined", "n_f1_defined",
                     "shortlist_recall_micro", "shortlist_recall_macro",
+                    "n_shortlist_recall_defined",
                     "precision_micro_sensitivity", "recall_micro_sensitivity", "f1_micro_sensitivity",
                     "precision_macro_sensitivity", "recall_macro_sensitivity", "f1_macro_sensitivity",
+                    "n_precision_sensitivity_defined", "n_recall_sensitivity_defined", "n_f1_sensitivity_defined",
                     "unjudged_predictions_total",
                 ):
                     row[metric] = 0.0
@@ -620,7 +687,7 @@ def run_accuracy_experiment(
 
             for rep in range(config.repeats):
                 for h in sampled_nodes:
-                    trial_key = f"accuracy:{corpus_name}:{h}:r{rep}"
+                    trial_key = f"accuracy:{strategy_name}:{corpus_name}:{h}:r{rep}"
 
                     # Resume check
                     if trial_key in existing_results:
@@ -631,6 +698,7 @@ def run_accuracy_experiment(
                             continue
 
                     # LLM call limit safety check
+                    # Note: counts successful insertions only, can overshoot by one trial, does not carry across --resume
                     if config.max_llm_calls is not None and cumulative_llm_calls >= config.max_llm_calls:
                         print(f"Safety limit reached: {cumulative_llm_calls} >= {config.max_llm_calls} LLM calls. Aborting cleanly.")
                         generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
@@ -646,7 +714,28 @@ def run_accuracy_experiment(
                     raw_embedder = embedder_factory()
                     metered_embedder = MeteredEmbedder(raw_embedder)
 
-                    strategy.setup(g_prime, metered_embedder)
+                    try:
+                        strategy.setup(g_prime, metered_embedder)
+                    except Exception as err:
+                        rec = {
+                            "key": trial_key,
+                            "run_id": config.run_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "status": "failed",
+                            "strategy": strategy_name,
+                            "mode": "accuracy",
+                            "corpus": corpus_name,
+                            "node": h,
+                            "repeat": rep,
+                            "harness_wall_s": 0.0,
+                            "retries": 0,
+                            "error_type": type(err).__name__,
+                            "error_message": str(err),
+                        }
+                        raw_f.write(json.dumps(rec) + "\n")
+                        raw_f.flush()
+                        generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
+                        raise
 
                     gc.collect()
 
@@ -666,10 +755,12 @@ def run_accuracy_experiment(
 
                         snap_after = llm_meter.snapshot() if llm_meter is not None else None
                         snap_delta_dict = None
+                        retries_count = 0
                         if snap_before is not None and snap_after is not None:
                             delta = snap_after - snap_before
                             snap_delta_dict = asdict(delta)
                             snap_delta_dict["failed_parses"] = list(delta.failed_parses)
+                            retries_count = delta.retries
 
                         cumulative_llm_calls += res.metrics.llm_calls
 
@@ -692,6 +783,7 @@ def run_accuracy_experiment(
                             "corpus": corpus_name,
                             "node": h,
                             "repeat": rep,
+                            "retries": retries_count,
                             "metrics": asdict(res.metrics),
                             "harness_wall_s": harness_wall_s,
                             "unaccounted_s": unaccounted_s,
@@ -701,7 +793,7 @@ def run_accuracy_experiment(
                         raw_f.write(json.dumps(rec) + "\n")
                         raw_f.flush()
 
-                    except Exception as err:
+                    except LLMTransportError as err:
                         harness_wall_s = time.perf_counter() - t0
                         rec = {
                             "key": trial_key,
@@ -714,6 +806,7 @@ def run_accuracy_experiment(
                             "node": h,
                             "repeat": rep,
                             "harness_wall_s": harness_wall_s,
+                            "retries": max(0, getattr(err, "attempts", 1) - 1),
                             "error_type": type(err).__name__,
                             "error_message": str(err),
                         }
@@ -723,6 +816,28 @@ def run_accuracy_experiment(
                         if config.fail_fast:
                             generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
                             raise
+                    except Exception as err:
+                        # Non-transport driver contract or unexpected errors abort immediately
+                        harness_wall_s = time.perf_counter() - t0
+                        rec = {
+                            "key": trial_key,
+                            "run_id": config.run_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "status": "failed",
+                            "strategy": strategy_name,
+                            "mode": "accuracy",
+                            "corpus": corpus_name,
+                            "node": h,
+                            "repeat": rep,
+                            "harness_wall_s": harness_wall_s,
+                            "retries": 0,
+                            "error_type": type(err).__name__,
+                            "error_message": str(err),
+                        }
+                        raw_f.write(json.dumps(rec) + "\n")
+                        raw_f.flush()
+                        generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
+                        raise
 
     # Generate summary CSV
     generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="accuracy")
@@ -785,7 +900,7 @@ def run_sweep_experiment(
                 )
 
             for trial_idx in range(config.sweep_trials_per_size):
-                trial_key = f"sweep:{n}:t{trial_idx}"
+                trial_key = f"sweep:{strategy_name}:{n}:t{trial_idx}"
 
                 if trial_key in existing_results:
                     prior = existing_results[trial_key]
@@ -794,13 +909,15 @@ def run_sweep_experiment(
                     if prior.get("status") == "failed" and not config.retry_failed:
                         continue
 
+                # LLM call limit safety check
+                # Note: counts successful insertions only, can overshoot by one trial, does not carry across --resume
                 if config.max_llm_calls is not None and cumulative_llm_calls >= config.max_llm_calls:
                     print(f"Safety limit reached: {cumulative_llm_calls} >= {config.max_llm_calls} LLM calls. Aborting cleanly.")
                     generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
                     return {"status": "max_llm_calls_reached", "cumulative_llm_calls": cumulative_llm_calls}
 
-                # Seeded deterministic sampling for trial
-                trial_seed = config.seed + (size_idx * 10000) + trial_idx
+                # Seeded deterministic sampling for trial directly derived from n
+                trial_seed = config.seed + (n * 1000) + trial_idx
                 rng = random.Random(trial_seed)
                 sampled = rng.sample(pool_names, n + 1)
                 existing_concepts = sampled[:n]
@@ -816,7 +933,28 @@ def run_sweep_experiment(
                 raw_embedder = embedder_factory()
                 metered_embedder = MeteredEmbedder(raw_embedder)
 
-                strategy.setup(graph, metered_embedder)
+                try:
+                    strategy.setup(graph, metered_embedder)
+                except Exception as err:
+                    rec = {
+                        "key": trial_key,
+                        "run_id": config.run_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "status": "failed",
+                        "strategy": strategy_name,
+                        "mode": "sweep",
+                        "size": n,
+                        "trial": trial_idx,
+                        "node": new_name,
+                        "harness_wall_s": 0.0,
+                        "retries": 0,
+                        "error_type": type(err).__name__,
+                        "error_message": str(err),
+                    }
+                    raw_f.write(json.dumps(rec) + "\n")
+                    raw_f.flush()
+                    generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
+                    raise
 
                 gc.collect()
 
@@ -836,10 +974,12 @@ def run_sweep_experiment(
 
                     snap_after = llm_meter.snapshot() if llm_meter is not None else None
                     snap_delta_dict = None
+                    retries_count = 0
                     if snap_before is not None and snap_after is not None:
                         delta = snap_after - snap_before
                         snap_delta_dict = asdict(delta)
                         snap_delta_dict["failed_parses"] = list(delta.failed_parses)
+                        retries_count = delta.retries
 
                     cumulative_llm_calls += res.metrics.llm_calls
 
@@ -853,6 +993,7 @@ def run_sweep_experiment(
                         "size": n,
                         "trial": trial_idx,
                         "node": new_name,
+                        "retries": retries_count,
                         "metrics": asdict(res.metrics),
                         "harness_wall_s": harness_wall_s,
                         "unaccounted_s": unaccounted_s,
@@ -861,6 +1002,29 @@ def run_sweep_experiment(
                     raw_f.write(json.dumps(rec) + "\n")
                     raw_f.flush()
 
+                except LLMTransportError as err:
+                    harness_wall_s = time.perf_counter() - t0
+                    rec = {
+                        "key": trial_key,
+                        "run_id": config.run_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "status": "failed",
+                        "strategy": strategy_name,
+                        "mode": "sweep",
+                        "size": n,
+                        "trial": trial_idx,
+                        "node": new_name,
+                        "harness_wall_s": harness_wall_s,
+                        "retries": max(0, getattr(err, "attempts", 1) - 1),
+                        "error_type": type(err).__name__,
+                        "error_message": str(err),
+                    }
+                    raw_f.write(json.dumps(rec) + "\n")
+                    raw_f.flush()
+
+                    if config.fail_fast:
+                        generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
+                        raise
                 except Exception as err:
                     harness_wall_s = time.perf_counter() - t0
                     rec = {
@@ -874,15 +1038,14 @@ def run_sweep_experiment(
                         "trial": trial_idx,
                         "node": new_name,
                         "harness_wall_s": harness_wall_s,
+                        "retries": 0,
                         "error_type": type(err).__name__,
                         "error_message": str(err),
                     }
                     raw_f.write(json.dumps(rec) + "\n")
                     raw_f.flush()
-
-                    if config.fail_fast:
-                        generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
-                        raise
+                    generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
+                    raise
 
     generate_summary_csv(raw_jsonl_path, summary_csv_path, mode="sweep")
     return {"status": "completed", "run_id": config.run_id, "output_dir": str(output_dir)}

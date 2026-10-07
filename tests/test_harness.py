@@ -29,6 +29,7 @@ from graph_insertion.graph_representation import (
     GoldJudgmentSet,
     SourceKind,
 )
+from graph_insertion.llm import LLMTransportError
 from graph_insertion.harness import (
     HarnessConfig,
     SyntheticNameSource,
@@ -125,7 +126,7 @@ class FlakyDecisionStep:
         domain_context: Optional[str] = None,
     ) -> DecisionOutcome:
         if new_name == self.failing_node:
-            raise RuntimeError(f"Simulated network transport error on {new_name}")
+            raise LLMTransportError(f"Simulated network transport error on {new_name}")
         return DecisionOutcome(
             edges=(),
             llm_calls=len(candidates),
@@ -351,7 +352,7 @@ class TestHarnessResumeAndFailureHandling:
         b_records = [r for r in raw_lines if r["node"] == "b"]
         assert len(b_records) == 1
         assert b_records[0]["status"] == "failed"
-        assert b_records[0]["error_type"] == "RuntimeError"
+        assert b_records[0]["error_type"] == "LLMTransportError"
 
         other_records = [r for r in raw_lines if r["node"] != "b"]
         assert len(other_records) == 3
@@ -367,7 +368,7 @@ class TestHarnessResumeAndFailureHandling:
             fail_fast=True,
         )
 
-        with pytest.raises(RuntimeError, match="Simulated network transport error on b"):
+        with pytest.raises(LLMTransportError, match="Simulated network transport error on b"):
             run_accuracy_experiment(
                 config=config,
                 strategy_factory=lambda: SpyStrategy(),
@@ -545,3 +546,131 @@ class TestSweepRunner:
             assert int(r["num_trials"]) == 3
             assert int(r["num_success"]) == 3
             assert float(r["total_s_mean"]) >= 0.0
+
+
+class TestHarnessHardeningAndEnrichment:
+    """Verify FIX-004 hardening policies: driver contract aborts, setup aborts, manifest enrichment."""
+
+    def test_driver_contract_error_aborts_immediately_and_writes_failure_row(self, tmp_path, mini_corpus):
+        class BadShortlistStrategy(SpyStrategy):
+            def shortlist(self, new_name: str) -> Shortlist:
+                # Return non-existent candidate to trigger ValueError in insert_node
+                return Shortlist(candidates=("non_existent_node",))
+
+        run_dir = tmp_path / "driver_error_run"
+        config = HarnessConfig(
+            mode="accuracy",
+            output_dir=run_dir,
+            confirm=True,
+            fail_fast=False,  # Even with fail_fast=False, driver contract error must abort immediately
+        )
+
+        with pytest.raises(ValueError, match="not an existing graph node"):
+            run_accuracy_experiment(
+                config=config,
+                strategy_factory=lambda: BadShortlistStrategy(),
+                decision_step=DeterministicDecisionStep(),
+                embedder_factory=lambda: FakeEmbedder(dim=8),
+                corpora={"mini_corpus": mini_corpus},
+            )
+
+        raw_lines = [json.loads(line) for line in (run_dir / "raw.jsonl").read_text().splitlines() if line]
+        assert len(raw_lines) == 1
+        assert raw_lines[0]["status"] == "failed"
+        assert raw_lines[0]["error_type"] == "ValueError"
+
+    def test_setup_error_aborts_immediately_and_writes_failure_row(self, tmp_path, mini_corpus):
+        class FailingSetupStrategy(SpyStrategy):
+            def setup(self, graph: ConceptGraph, embedder: Embedder) -> None:
+                raise RuntimeError("Setup failed explicitly")
+
+        run_dir = tmp_path / "setup_error_run"
+        config = HarnessConfig(
+            mode="accuracy",
+            output_dir=run_dir,
+            confirm=True,
+            fail_fast=False,
+        )
+
+        with pytest.raises(RuntimeError, match="Setup failed explicitly"):
+            run_accuracy_experiment(
+                config=config,
+                strategy_factory=lambda: FailingSetupStrategy(),
+                decision_step=DeterministicDecisionStep(),
+                embedder_factory=lambda: FakeEmbedder(dim=8),
+                corpora={"mini_corpus": mini_corpus},
+            )
+
+        raw_lines = [json.loads(line) for line in (run_dir / "raw.jsonl").read_text().splitlines() if line]
+        assert len(raw_lines) == 1
+        assert raw_lines[0]["status"] == "failed"
+        assert raw_lines[0]["error_type"] == "RuntimeError"
+
+    def test_manifest_model_and_tokens_not_redacted(self, tmp_path, mini_corpus):
+        run_dir = tmp_path / "manifest_test_run"
+        config = HarnessConfig(
+            mode="accuracy",
+            output_dir=run_dir,
+            dry_run=True,
+        )
+
+        class DummyStep:
+            PROMPT_VERSION = "v1"
+            class InnerClient:
+                model = "deepseek-v4-flash"
+                base_url = "https://api.deepseek.com"
+            llm_client = InnerClient()
+
+        run_accuracy_experiment(
+            config=config,
+            strategy_factory=lambda: SpyStrategy(),
+            decision_step=DummyStep(),
+            embedder_factory=lambda: FakeEmbedder(dim=8),
+            corpora={"mini_corpus": mini_corpus},
+        )
+
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert manifest["configured_model"] == "deepseek-v4-flash"
+        assert manifest["base_url"] == "https://api.deepseek.com"
+        assert manifest["temperature"] == 0.0
+        assert manifest["thinking_mode"] == "disabled"
+        assert manifest["max_tokens"] == 16  # NOT redacted!
+        assert manifest["prompt_version"] == "v1"
+
+    def test_trial_key_has_strategy_name_and_summary_deduplicates(self, tmp_path, mini_corpus):
+        run_dir = tmp_path / "dedupe_run"
+        config = HarnessConfig(
+            mode="accuracy",
+            output_dir=run_dir,
+            confirm=True,
+        )
+
+        run_accuracy_experiment(
+            config=config,
+            strategy_factory=lambda: SpyStrategy(),
+            decision_step=DeterministicDecisionStep(),
+            embedder_factory=lambda: FakeEmbedder(dim=8),
+            corpora={"mini_corpus": mini_corpus},
+        )
+
+        raw_lines = [json.loads(line) for line in (run_dir / "raw.jsonl").read_text().splitlines() if line]
+        for r in raw_lines:
+            assert r["key"].startswith("accuracy:spy_strategy:mini_corpus:")
+
+        # Append duplicate line with higher total_s
+        dup_rec = dict(raw_lines[0])
+        dup_rec["metrics"] = dict(dup_rec["metrics"])
+        dup_rec["metrics"]["total_s"] = 999.0
+        with open(run_dir / "raw.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(dup_rec) + "\n")
+
+        from graph_insertion.harness import generate_summary_csv
+        summary_csv = run_dir / "summary.csv"
+        generate_summary_csv(run_dir / "raw.jsonl", summary_csv, mode="accuracy")
+
+        with open(summary_csv, "r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        # Number of trials is still 4 because the duplicate was deduped (last record wins)
+        assert int(rows[0]["num_trials"]) == 4
+

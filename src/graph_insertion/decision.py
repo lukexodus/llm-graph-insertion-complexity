@@ -36,6 +36,25 @@ SYSTEM_PROMPT: str = (
 VALID_TOKENS: frozenset[str] = frozenset({"X_PREREQ_Y", "Y_PREREQ_X", "NONE"})
 
 
+def parse_token(text: str) -> Optional[str]:
+    """Parse raw LLM response text into a valid prerequisite decision token.
+
+    Parameters
+    ----------
+    text:
+        Raw completion text returned by the model.
+
+    Returns
+    -------
+    Optional[str]
+        'X_PREREQ_Y', 'Y_PREREQ_X', 'NONE', or None if unparseable.
+    """
+    token = text.strip().upper()
+    if token in VALID_TOKENS:
+        return token
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -105,7 +124,7 @@ class PairwiseDecisionStep:
             resp = self.llm_client.complete(system=SYSTEM_PROMPT, user=user_prompt)
             total_llm_seconds += resp.latency_s
 
-            token = resp.text.strip().upper()
+            token = parse_token(resp.text)
 
             if token == "X_PREREQ_Y":
                 # X (new_name) is prerequisite of Y (cand) -> canonical (prereq, dependent)
@@ -130,3 +149,4 @@ class PairwiseDecisionStep:
             llm_calls=len(candidates),
             llm_seconds=total_llm_seconds,
         )
+

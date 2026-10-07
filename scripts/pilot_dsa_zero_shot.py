@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-pilot_dsa_zero_shot.py — INFRA-006
-==================================
+pilot_dsa_zero_shot.py — INFRA-006 / FIX-004
+============================================
 Offline/online pilot script for zero-shot leave-one-out prerequisite evaluation on DSA.
 
 Features:
   - Brute-force leave-one-out: 29 nodes * 28 candidates = 812 calls ([D-29])
   - Strict guardrails: requires --confirm, checks --max-calls limit
   - No hardcoded prices: accepts --price-in and --price-out (per million tokens)
-  - Full evaluation: 3-way accuracy, confusion matrix, directed edge P/R/F1,
+  - Full evaluation: 3-way accuracy, confusion matrix, per-held-out-node scoring,
     direction flips, swap consistency, parse failure rate, latency percentiles,
     token totals (including reasoning and prompt cache), and estimated cost.
-  - Sensitivity analysis for DSA unjudged row (default excluded vs. treated as NONE)
+  - Sensitivity analysis for DSA unjudged row ([D-30], [D-32])
+  - Pure scoring function score_pilot() callable offline or via --rescore
   - Saves raw call records (JSONL) and aggregate metrics (JSON) under results/pilot/<UTC_TIMESTAMP>/
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import datetime
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -36,9 +38,11 @@ if str(SRC_DIR) not in sys.path:
 from graph_insertion.decision import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
+    DecisionParseError,
     PairwiseDecisionStep,
+    parse_token,
 )
-from graph_insertion.graph_representation import embed_text
+from graph_insertion.graph_representation import ConceptGraph, embed_text
 from graph_insertion.llm import (
     DeepSeekClient,
     FakeLLMClient,
@@ -46,6 +50,11 @@ from graph_insertion.llm import (
     MeteredLLMClient,
 )
 from graph_insertion.loader import load_corpus
+from graph_insertion.scoring import (
+    NodeScore,
+    aggregate_scores,
+    score_node_insertion,
+)
 
 
 def compute_gold_unordered_label(
@@ -99,6 +108,260 @@ def map_token_to_unordered_relation(
         raise ValueError(f"Pair ({new_name}, {cand}) does not match ({a}, {b})")
 
 
+def score_pilot(
+    call_records: Sequence[dict[str, Any]],
+    gold: Any,
+    gold_graph: Optional[ConceptGraph] = None,
+) -> dict[str, Any]:
+    """Pure evaluation function over recorded pilot pairwise calls.
+
+    Computes 3-way accuracy, confusion matrix, direction flips, swap consistency,
+    and per-held-out-node insertion scores (micro/macro/sensitivity).
+
+    Parameters
+    ----------
+    call_records:
+        Sequence of recorded call dicts containing 'new_name', 'candidate',
+        and 'response_text' (or 'raw_token').
+    gold:
+        GoldJudgmentSet ground truth.
+    gold_graph:
+        Optional reference ConceptGraph. If None, loaded from DSA corpus.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionary containing 'evaluation', 'node_scores', and 'aggregate'.
+    """
+    if gold_graph is None:
+        corpus = load_corpus("DSA_gold_standard_MEKG")
+        gold_graph = corpus.graph
+
+    call_results: dict[tuple[str, str], dict[str, Any]] = {
+        (r["new_name"], r["candidate"]): r for r in call_records
+    }
+    nodes = sorted(list({r["new_name"] for r in call_records} | {r["candidate"] for r in call_records}))
+
+    # 1. Unordered pair swap consistency
+    unordered_pairs = []
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            unordered_pairs.append((nodes[i], nodes[j]))
+
+    total_unordered = len(unordered_pairs)
+    swap_consistent_pairs = 0
+    excluded_unordered = 0
+
+    for a, b in unordered_pairs:
+        if (a, b) in call_results and (b, a) in call_results:
+            rec_ab = call_results[(a, b)]
+            rec_ba = call_results[(b, a)]
+            tok_ab = parse_token(rec_ab.get("response_text", rec_ab.get("raw_token", ""))) or "PARSE_FAILURE"
+            tok_ba = parse_token(rec_ba.get("response_text", rec_ba.get("raw_token", ""))) or "PARSE_FAILURE"
+
+            rel_ab = map_token_to_unordered_relation(tok_ab, a, b, a, b)
+            rel_ba = map_token_to_unordered_relation(tok_ba, b, a, a, b)
+
+            gold_label, is_unjudged = compute_gold_unordered_label(gold, a, b)
+            if is_unjudged:
+                excluded_unordered += 1
+
+            if rel_ab == rel_ba and rel_ab != "PARSE_FAILURE":
+                swap_consistent_pairs += 1
+
+    swap_consistency_rate = (
+        swap_consistent_pairs / total_unordered if total_unordered > 0 else 0.0
+    )
+
+    # 2. 3-way evaluation on calls
+    classes = ["X_PREREQ_Y", "Y_PREREQ_X", "NONE"]
+    pred_col_names = ["X_PREREQ_Y", "Y_PREREQ_X", "NONE", "PARSE_FAILURE"]
+    conf_matrix = {g: {p: 0 for p in pred_col_names} for g in classes}
+    conf_matrix_sensitivity = {g: {p: 0 for p in pred_col_names} for g in classes}
+
+    correct_calls_standard = 0
+    total_calls_standard = 0
+    correct_calls_sensitivity = 0
+    total_calls_sensitivity = 0
+    direction_flips = 0
+
+    for (new_name, cand), rec in call_results.items():
+        is_prereq_gold = gold.judgment_for_edge(new_name, cand)
+        is_reverse_gold = gold.judgment_for_edge(cand, new_name)
+
+        tok = parse_token(rec.get("response_text", rec.get("raw_token", "")))
+        pred_token = tok if tok in classes else "PARSE_FAILURE"
+
+        gold_token_standard: Optional[str] = None
+        gold_token_sens: str
+
+        if is_prereq_gold is None or is_reverse_gold is None:
+            gold_token_standard = None
+            gold_token_sens = "NONE"
+        elif is_prereq_gold is True and is_reverse_gold is False:
+            gold_token_standard = "X_PREREQ_Y"
+            gold_token_sens = "X_PREREQ_Y"
+        elif is_reverse_gold is True and is_prereq_gold is False:
+            gold_token_standard = "Y_PREREQ_X"
+            gold_token_sens = "Y_PREREQ_X"
+        elif is_prereq_gold is False and is_reverse_gold is False:
+            gold_token_standard = "NONE"
+            gold_token_sens = "NONE"
+        else:
+            gold_token_standard = "ANOMALY"
+            gold_token_sens = "ANOMALY"
+
+        if gold_token_standard in classes:
+            total_calls_standard += 1
+            conf_matrix[gold_token_standard][pred_token] += 1
+            if pred_token == gold_token_standard:
+                correct_calls_standard += 1
+            if (gold_token_standard == "X_PREREQ_Y" and pred_token == "Y_PREREQ_X") or (
+                gold_token_standard == "Y_PREREQ_X" and pred_token == "X_PREREQ_Y"
+            ):
+                direction_flips += 1
+
+        if gold_token_sens in classes:
+            total_calls_sensitivity += 1
+            conf_matrix_sensitivity[gold_token_sens][pred_token] += 1
+            if pred_token == gold_token_sens:
+                correct_calls_sensitivity += 1
+
+    accuracy_standard = (
+        correct_calls_standard / total_calls_standard if total_calls_standard > 0 else 0.0
+    )
+    accuracy_sensitivity = (
+        correct_calls_sensitivity / total_calls_sensitivity if total_calls_sensitivity > 0 else 0.0
+    )
+
+    # 3. Per-held-out-node insertion evaluation
+    node_scores: list[NodeScore] = []
+    for n in nodes:
+        node_calls = [r for r in call_records if r["new_name"] == n]
+        candidates = [r["candidate"] for r in node_calls]
+        decided_edges = []
+        for r in node_calls:
+            tok = parse_token(r.get("response_text", r.get("raw_token", "")))
+            cand = r["candidate"]
+            if tok == "X_PREREQ_Y":
+                # new_node n is prereq of cand -> edge (n, cand)
+                decided_edges.append((n, cand))
+            elif tok == "Y_PREREQ_X":
+                # cand is prereq of new_node n -> edge (cand, n)
+                decided_edges.append((cand, n))
+
+        n_score = score_node_insertion(
+            node=n,
+            gold_graph=gold_graph,
+            judgments=gold,
+            shortlist_candidates=candidates,
+            decided_edges=decided_edges,
+        )
+        node_scores.append(n_score)
+
+    agg = aggregate_scores(node_scores)
+
+    evaluation = {
+        "accuracy_3way_standard": round(accuracy_standard, 4),
+        "accuracy_3way_sensitivity_missing_as_none": round(accuracy_sensitivity, 4),
+        "node_insertion_scoring": {
+            "micro": {
+                "precision": round(agg.precision_micro, 4),
+                "recall": round(agg.recall_micro, 4),
+                "f1": round(agg.f1_micro, 4),
+                "shortlist_recall": round(agg.shortlist_recall_micro, 4),
+            },
+            "macro": {
+                "precision": round(agg.precision_macro, 4),
+                "recall": round(agg.recall_macro, 4),
+                "f1": round(agg.f1_macro, 4),
+                "shortlist_recall": round(agg.shortlist_recall_macro, 4),
+                "n_precision_defined": agg.n_precision_defined,
+                "n_recall_defined": agg.n_recall_defined,
+                "n_f1_defined": agg.n_f1_defined,
+                "n_shortlist_recall_defined": agg.n_shortlist_recall_defined,
+            },
+            "sensitivity": {
+                "precision_micro": round(agg.precision_micro_sensitivity, 4),
+                "recall_micro": round(agg.recall_micro_sensitivity, 4),
+                "f1_micro": round(agg.f1_micro_sensitivity, 4),
+                "precision_macro": round(agg.precision_macro_sensitivity, 4),
+                "recall_macro": round(agg.recall_macro_sensitivity, 4),
+                "f1_macro": round(agg.f1_macro_sensitivity, 4),
+                "n_precision_sensitivity_defined": agg.n_precision_sensitivity_defined,
+                "n_recall_sensitivity_defined": agg.n_recall_sensitivity_defined,
+                "n_f1_sensitivity_defined": agg.n_f1_sensitivity_defined,
+            },
+            "totals": {
+                "tp": agg.tp_total,
+                "fp": agg.fp_total,
+                "fn": agg.fn_total,
+                "fp_sensitivity": agg.fp_total_sensitivity,
+                "unjudged_predictions": agg.excluded_total,
+            },
+        },
+        "direction_flips": direction_flips,
+        "swap_consistency": {
+            "consistent_pairs": swap_consistent_pairs,
+            "total_unordered_pairs": total_unordered,
+            "swap_consistency_rate": round(swap_consistency_rate, 4),
+        },
+        "confusion_matrix_standard": conf_matrix,
+        "confusion_matrix_sensitivity": conf_matrix_sensitivity,
+    }
+
+    return {
+        "evaluation": evaluation,
+        "node_scores": [asdict(s) for s in node_scores],
+        "aggregate": asdict(agg),
+    }
+
+
+def print_pilot_summary(summary: dict[str, Any]) -> None:
+    """Print readable summary to stdout."""
+    ev = summary.get("evaluation", {})
+    nis = ev.get("node_insertion_scoring", {})
+    micro = nis.get("micro", {})
+    macro = nis.get("macro", {})
+    totals = nis.get("totals", {})
+    swap = ev.get("swap_consistency", {})
+
+    print("\n--- PILOT SUMMARY ---")
+    print(f"3-Way Accuracy (Standard): {ev.get('accuracy_3way_standard', 0.0):.2%}")
+    print(f"3-Way Accuracy (Sensitivity: Missing as NONE): {ev.get('accuracy_3way_sensitivity_missing_as_none', 0.0):.2%}")
+    print(
+        f"Node Insertion Micro: Precision={micro.get('precision', 0.0):.2%}, "
+        f"Recall={micro.get('recall', 0.0):.2%}, F1={micro.get('f1', 0.0):.2%}"
+    )
+    print(
+        f"Node Insertion Macro: Precision={macro.get('precision', 0.0):.2%}, "
+        f"Recall={macro.get('recall', 0.0):.2%}, F1={macro.get('f1', 0.0):.2%}"
+    )
+    print(
+        f"Totals: TP={totals.get('tp', 0)}, FP={totals.get('fp', 0)}, FN={totals.get('fn', 0)}, "
+        f"Unjudged Predictions={totals.get('unjudged_predictions', 0)}"
+    )
+    print(f"Direction Flips: {ev.get('direction_flips', 0)}")
+    print(
+        f"Swap Consistency Rate: {swap.get('swap_consistency_rate', 0.0):.2%} "
+        f"({swap.get('consistent_pairs', 0)}/{swap.get('total_unordered_pairs', 0)})"
+    )
+
+    retries = summary.get("retries_and_errors", {})
+    if "parse_failures" in retries:
+        print(f"Parse Failures: {retries.get('parse_failures')} ({retries.get('parse_failure_rate', 0.0):.2%})")
+    timing = summary.get("timing_s", {})
+    if "median_latency" in timing:
+        print(f"Latency: Median={timing.get('median_latency', 0.0):.3f}s, P95={timing.get('p95_latency', 0.0):.3f}s")
+    usage = summary.get("token_usage", {})
+    if "input_tokens" in usage:
+        print(
+            f"Tokens: In={usage.get('input_tokens')}, Out={usage.get('output_tokens')}, "
+            f"Reasoning={usage.get('reasoning_tokens')}, CacheHit={usage.get('cache_hit_tokens')}"
+        )
+        print(f"Estimated Cost: ${usage.get('estimated_cost_usd', 0.0):.4f}")
+
+
 def run_pilot(
     *,
     client: LLMClient,
@@ -136,10 +399,8 @@ def run_pilot(
     raw_calls_file = output_dir / "raw_calls.jsonl"
 
     call_records: list[dict[str, Any]] = []
-    # Store call results by (new_name, cand)
-    call_results: dict[tuple[str, str], dict[str, Any]] = {}
-
     call_index = 0
+
     with raw_calls_file.open("w", encoding="utf-8") as f_raw:
         for new_node in nodes:
             # Leave-one-out candidates: all nodes except new_node
@@ -148,7 +409,15 @@ def run_pilot(
                 call_index += 1
                 user_prompt = decision_step.build_user_prompt(new_node, cand, domain_context)
                 resp = meter.complete(system=SYSTEM_PROMPT, user=user_prompt)
-                raw_token = resp.text.strip().upper()
+
+                parsed = parse_token(resp.text)
+                if parsed is None:
+                    meter.record_parse_failure(resp.text)
+                    if strict_parse:
+                        raise DecisionParseError(
+                            f"Unparseable response for pair ({new_node!r}, {cand!r}): {resp.text!r}"
+                        )
+                raw_token = parsed if parsed is not None else "PARSE_FAILURE"
 
                 rec = {
                     "call_index": call_index,
@@ -168,140 +437,12 @@ def run_pilot(
                     "retry_wait_s": resp.retry_wait_s,
                 }
                 call_records.append(rec)
-                call_results[(new_node, cand)] = rec
                 f_raw.write(json.dumps(rec) + "\n")
 
     print(f"Completed {call_index} calls. Computing evaluation metrics...")
 
-    # 2. Evaluation across unordered pairs
-    unordered_pairs = []
-    for i in range(len(nodes)):
-        for j in range(i + 1, len(nodes)):
-            unordered_pairs.append((nodes[i], nodes[j]))
-
-    # Stats counters
-    total_unordered = len(unordered_pairs)  # 29 * 28 / 2 = 406
-    swap_consistent_pairs = 0
-    excluded_unordered = 0
-
-    # 3-way evaluation on calls (excluding vs sensitivity including)
-    classes = ["X_PREREQ_Y", "Y_PREREQ_X", "NONE"]
-    # Confusion matrix for non-excluded calls: gold_idx x pred_idx
-    # Pred classes: X_PREREQ_Y, Y_PREREQ_X, NONE, PARSE_FAILURE
-    pred_col_names = ["X_PREREQ_Y", "Y_PREREQ_X", "NONE", "PARSE_FAILURE"]
-    conf_matrix = {g: {p: 0 for p in pred_col_names} for g in classes}
-    conf_matrix_sensitivity = {g: {p: 0 for p in classes} for g in classes}
-    for g in conf_matrix_sensitivity:
-        conf_matrix_sensitivity[g] = {p: 0 for p in pred_col_names}
-
-    correct_calls_standard = 0
-    total_calls_standard = 0
-
-    correct_calls_sensitivity = 0
-    total_calls_sensitivity = 0
-
-    direction_flips = 0
-
-    # Directed edge metrics: TP, FP, FN
-    # Ground truth edges (prereq -> dependent)
-    tp = 0
-    fp = 0
-    fn = 0
-
-    # Check each call
-    for (new_name, cand), rec in call_results.items():
-        # Gold for this directed pair (new_name is prereq of cand?)
-        is_prereq_gold = gold.judgment_for_edge(new_name, cand)
-        # Gold for reverse directed pair (cand is prereq of new_name?)
-        is_reverse_gold = gold.judgment_for_edge(cand, new_name)
-
-        pred_token = rec["raw_token"] if rec["raw_token"] in classes else "PARSE_FAILURE"
-
-        # Determine gold token for call where X=new_name, Y=cand
-        gold_token_standard: Optional[str] = None
-        gold_token_sens: str
-
-        if is_prereq_gold is None or is_reverse_gold is None:
-            # Missing in gold
-            gold_token_standard = None
-            gold_token_sens = "NONE"
-        elif is_prereq_gold is True and is_reverse_gold is False:
-            gold_token_standard = "X_PREREQ_Y"
-            gold_token_sens = "X_PREREQ_Y"
-        elif is_reverse_gold is True and is_prereq_gold is False:
-            gold_token_standard = "Y_PREREQ_X"
-            gold_token_sens = "Y_PREREQ_X"
-        elif is_prereq_gold is False and is_reverse_gold is False:
-            gold_token_standard = "NONE"
-            gold_token_sens = "NONE"
-        else:
-            # Anomaly / both true
-            gold_token_standard = "ANOMALY"
-            gold_token_sens = "ANOMALY"
-
-        # Standard accounting
-        if gold_token_standard in classes:
-            total_calls_standard += 1
-            conf_matrix[gold_token_standard][pred_token] += 1
-            if pred_token == gold_token_standard:
-                correct_calls_standard += 1
-            # Direction flip check
-            if (gold_token_standard == "X_PREREQ_Y" and pred_token == "Y_PREREQ_X") or (
-                gold_token_standard == "Y_PREREQ_X" and pred_token == "X_PREREQ_Y"
-            ):
-                direction_flips += 1
-
-        # Sensitivity accounting (missing pair counted as NONE)
-        if gold_token_sens in classes:
-            total_calls_sensitivity += 1
-            conf_matrix_sensitivity[gold_token_sens][pred_token] += 1
-            if pred_token == gold_token_sens:
-                correct_calls_sensitivity += 1
-
-        # Directed edge precision/recall
-        # Model predicted (new_name -> cand) if pred_token == "X_PREREQ_Y"
-        # Model predicted (cand -> new_name) if pred_token == "Y_PREREQ_X"
-        if is_prereq_gold is not None:
-            if pred_token == "X_PREREQ_Y":
-                if is_prereq_gold is True:
-                    tp += 1
-                else:
-                    fp += 1
-            else:
-                if is_prereq_gold is True:
-                    fn += 1
-
-    # Swap consistency across unordered pairs {a, b}
-    for a, b in unordered_pairs:
-        rec_ab = call_results[(a, b)]
-        rec_ba = call_results[(b, a)]
-
-        rel_ab = map_token_to_unordered_relation(rec_ab["raw_token"], a, b, a, b)
-        rel_ba = map_token_to_unordered_relation(rec_ba["raw_token"], b, a, a, b)
-
-        gold_label, is_unjudged = compute_gold_unordered_label(gold, a, b)
-        if is_unjudged:
-            excluded_unordered += 1
-
-        if rel_ab == rel_ba and rel_ab != "PARSE_FAILURE":
-            swap_consistent_pairs += 1
-
-    accuracy_standard = (
-        correct_calls_standard / total_calls_standard if total_calls_standard > 0 else 0.0
-    )
-    accuracy_sensitivity = (
-        correct_calls_sensitivity / total_calls_sensitivity
-        if total_calls_sensitivity > 0
-        else 0.0
-    )
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-    swap_consistency_rate = (
-        swap_consistent_pairs / total_unordered if total_unordered > 0 else 0.0
-    )
+    # 2. Pure scoring function execution
+    scored = score_pilot(call_records, gold, graph)
 
     # Latency percentiles
     latencies = [r["latency_s"] for r in call_records]
@@ -346,42 +487,14 @@ def run_pilot(
             "parse_failures": snap.parse_failures,
             "parse_failure_rate": round(snap.parse_failures / call_index, 4) if call_index else 0.0,
         },
-        "evaluation": {
-            "accuracy_3way_standard": round(accuracy_standard, 4),
-            "accuracy_3way_sensitivity_missing_as_none": round(accuracy_sensitivity, 4),
-            "directed_edge_metrics": {
-                "tp": tp,
-                "fp": fp,
-                "fn": fn,
-                "precision": round(precision, 4),
-                "recall": round(recall, 4),
-                "f1": round(f1, 4),
-            },
-            "direction_flips": direction_flips,
-            "swap_consistency": {
-                "consistent_pairs": swap_consistent_pairs,
-                "total_unordered_pairs": total_unordered,
-                "swap_consistency_rate": round(swap_consistency_rate, 4),
-            },
-            "confusion_matrix_standard": conf_matrix,
-            "confusion_matrix_sensitivity": conf_matrix_sensitivity,
-        },
+        "evaluation": scored["evaluation"],
     }
 
     summary_file = output_dir / "summary.json"
     with summary_file.open("w", encoding="utf-8") as f_sum:
         json.dump(summary, f_sum, indent=2)
 
-    print("\n--- PILOT SUMMARY ---")
-    print(f"3-Way Accuracy (Standard): {accuracy_standard:.2%}")
-    print(f"3-Way Accuracy (Sensitivity: Missing as NONE): {accuracy_sensitivity:.2%}")
-    print(f"Directed Edge: Precision={precision:.2%}, Recall={recall:.2%}, F1={f1:.2%}")
-    print(f"Direction Flips: {direction_flips}")
-    print(f"Swap Consistency Rate: {swap_consistency_rate:.2%} ({swap_consistent_pairs}/{total_unordered})")
-    print(f"Parse Failures: {snap.parse_failures} ({summary['retries_and_errors']['parse_failure_rate']:.2%})")
-    print(f"Latency: Median={median_latency:.3f}s, P95={p95_latency:.3f}s")
-    print(f"Tokens: In={snap.input_tokens}, Out={snap.output_tokens}, Reasoning={snap.reasoning_tokens}, CacheHit={snap.cache_hit_tokens}")
-    print(f"Estimated Cost: ${total_cost:.4f}")
+    print_pilot_summary(summary)
     print(f"Saved artifacts to {output_dir}")
 
     return summary
@@ -421,7 +534,9 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store pilot output artifacts (default: results/pilot/<UTC_TIMESTAMP>/).",
     )
     parser.add_argument(
+        "--offline-fake",
         "--dry-run",
+        dest="offline_fake",
         action="store_true",
         help="Execute offline simulation using FakeLLMClient without calling external APIs.",
     )
@@ -436,11 +551,53 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fail fast on unparseable responses (default: record failure and treat as NONE).",
     )
+    parser.add_argument(
+        "--rescore",
+        type=str,
+        default=None,
+        help="Recompute evaluation summary from an existing raw_calls.jsonl file without making API calls.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    # Re-scoring existing raw_calls.jsonl
+    if args.rescore:
+        rescore_path = Path(args.rescore)
+        if not rescore_path.exists():
+            print(f"ERROR: {rescore_path} does not exist.", file=sys.stderr)
+            sys.exit(1)
+
+        records: list[dict[str, Any]] = []
+        with rescore_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+
+        corpus = load_corpus("DSA_gold_standard_MEKG")
+        scored = score_pilot(records, corpus.judgments, corpus.graph)
+
+        output_dir = rescore_path.parent
+        summary_file = output_dir / "summary.json"
+        summary: dict[str, Any] = {}
+        if summary_file.exists():
+            try:
+                with summary_file.open("r", encoding="utf-8") as f:
+                    summary = json.load(f)
+            except Exception:
+                pass
+
+        summary["evaluation"] = scored["evaluation"]
+        summary["re-scored_at_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with summary_file.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+        print(f"Successfully re-scored {len(records)} calls from {rescore_path}")
+        print_pilot_summary(summary)
+        return
 
     # Safety confirmation guard
     planned_calls = 29 * 28  # 812
@@ -452,7 +609,7 @@ def main() -> None:
         print("Example live run:")
         print("  python scripts/pilot_dsa_zero_shot.py --confirm --price-in 0.14 --price-out 0.28")
         print("Example offline test run:")
-        print("  python scripts/pilot_dsa_zero_shot.py --confirm --dry-run")
+        print("  python scripts/pilot_dsa_zero_shot.py --confirm --offline-fake")
         print("=" * 60)
         sys.exit(0)
 
@@ -470,8 +627,8 @@ def main() -> None:
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         output_dir = REPO_ROOT / "results" / "pilot" / now_str
 
-    if args.dry_run:
-        print("[DRY-RUN MODE] Initializing FakeLLMClient...")
+    if args.offline_fake:
+        print("[OFFLINE-FAKE MODE] Initializing FakeLLMClient...")
         client = FakeLLMClient(
             responses=lambda s, u: "NONE",
             latency_s=0.005,

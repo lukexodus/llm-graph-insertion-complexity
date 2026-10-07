@@ -11,5 +11,6 @@ diff.txt
 __pycache__/ 
 
 *.patch
+patch/
 *.egg-info/
 .env

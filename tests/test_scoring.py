@@ -195,3 +195,43 @@ class TestScoreAggregation:
         # R_macro = (1.0 + 0.0) / 2 = 0.5
         assert agg.recall_macro == 0.5
         assert agg.f1_macro == 0.5
+
+    def test_aggregate_scores_undefined_exclusion(self, fixture_graph_and_gold):
+        graph, judgments = fixture_graph_and_gold
+
+        # Node 1: Perfect (P=1.0, R=1.0, F1=1.0, shortlist_recall=1.0)
+        s1 = score_node_insertion(
+            node="h",
+            gold_graph=graph,
+            judgments=judgments,
+            shortlist_candidates=("a", "b", "c"),
+            decided_edges=(("a", "h"), ("h", "b"), ("h", "c")),
+        )
+
+        # Node 2: No predictions made (decided_edges=())
+        # TP=0, FP=0, FN=1 -> precision=None, recall=0.0, F1=None
+        judgments.record("d", "a", 0)
+        judgments.record("a", "d", 0)
+        s2 = score_node_insertion(
+            node="a",
+            gold_graph=graph,
+            judgments=judgments,
+            shortlist_candidates=("d",),
+            decided_edges=(),
+        )
+        assert s2.precision is None
+        assert s2.recall == 0.0
+        assert s2.f1 is None
+
+        agg = aggregate_scores([s1, s2])
+        # Only s1 has defined precision and f1; both have defined recall
+        assert agg.n_precision_defined == 1
+        assert agg.n_recall_defined == 2
+        assert agg.n_f1_defined == 1
+        # Macro precision: mean of defined only = 1.0 / 1 = 1.0
+        assert agg.precision_macro == 1.0
+        # Macro recall: mean of defined = (1.0 + 0.0) / 2 = 0.5
+        assert agg.recall_macro == 0.5
+        # Macro f1: mean of defined only = 1.0 / 1 = 1.0
+        assert agg.f1_macro == 1.0
+
