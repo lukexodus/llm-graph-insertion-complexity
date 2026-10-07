@@ -141,8 +141,8 @@ class TestEvaluateAcceptance:
             "total_calls": 812,
             "transport_failure_count": 0,
             "parse_failure_count": 2,
-            "configured_model": "deepseek-v4-flash",
-            "observed_model_ids": ["deepseek-v4-flash"],
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-flash"],
             "prompt_version": "v2",
             "token_usage": {"reasoning_tokens": 0},
             "retried_call_count": 4,
@@ -156,6 +156,8 @@ class TestEvaluateAcceptance:
         }
         res = evaluate_acceptance(summary)
         assert res["g1_validity"]["verdict"] == "PASS"
+        assert res["g1_validity"]["model_identity"]["passed"] is True
+        assert res["g1_validity"]["model_identity"]["configured_equals_observed"] is True
         assert res["g2_usefulness"]["verdict"] == "PASS"
         assert res["overall_verdict"] == "PASS"
 
@@ -164,8 +166,8 @@ class TestEvaluateAcceptance:
             "total_calls": 812,
             "transport_failure_count": 0,
             "parse_failure_count": 0,
-            "configured_model": "deepseek-v4-flash",
-            "observed_model_ids": ["deepseek-v4-flash"],
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-flash"],
             "prompt_version": "v2",
             "token_usage": {"reasoning_tokens": 0},
             "retried_call_count": 0,
@@ -187,8 +189,8 @@ class TestEvaluateAcceptance:
             "total_calls": 812,
             "transport_failure_count": 0,
             "parse_failure_count": 0,
-            "configured_model": "deepseek-v4-flash",
-            "observed_model_ids": ["deepseek-v4-flash"],
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-flash"],
             "prompt_version": "v2",
             "token_usage": {"reasoning_tokens": 0},
             "retried_call_count": 0,
@@ -210,8 +212,8 @@ class TestEvaluateAcceptance:
             "total_calls": 812,
             "transport_failure_count": 1,  # triggers G1 invalidity
             "parse_failure_count": 0,
-            "configured_model": "deepseek-v4-flash",
-            "observed_model_ids": ["deepseek-v4-flash"],
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-flash"],
             "prompt_version": "v2",
             "token_usage": {"reasoning_tokens": 0},
             "retried_call_count": 0,
@@ -226,4 +228,123 @@ class TestEvaluateAcceptance:
         res = evaluate_acceptance(summary)
         assert res["g1_validity"]["verdict"] == "FAIL"
         assert res["overall_verdict"] == "INVALID"
+
+    def test_evaluate_acceptance_empty_observed_model_fails_g1(self):
+        summary = {
+            "total_calls": 812,
+            "transport_failure_count": 0,
+            "parse_failure_count": 0,
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": [],  # empty list
+            "prompt_version": "v2",
+            "token_usage": {"reasoning_tokens": 0},
+            "retried_call_count": 0,
+            "evaluation": {
+                "node_insertion_scoring": {"micro": {"recall": 0.80, "f1": 0.60}},
+                "direction_flips": 0,
+                "calls_with_gold_and_pred_edge": 10,
+            },
+        }
+        res = evaluate_acceptance(summary)
+        assert res["g1_validity"]["model_identity"]["passed"] is False
+        assert res["g1_validity"]["model_identity"]["configured_equals_observed"] is False
+        assert res["g1_validity"]["verdict"] == "FAIL"
+        assert res["overall_verdict"] == "INVALID"
+
+    def test_evaluate_acceptance_multiple_distinct_observed_models_fails_g1(self):
+        summary = {
+            "total_calls": 812,
+            "transport_failure_count": 0,
+            "parse_failure_count": 0,
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-flash", "deepseek-chat"],  # 2 distinct IDs
+            "prompt_version": "v2",
+            "token_usage": {"reasoning_tokens": 0},
+            "retried_call_count": 0,
+            "evaluation": {
+                "node_insertion_scoring": {"micro": {"recall": 0.80, "f1": 0.60}},
+                "direction_flips": 0,
+                "calls_with_gold_and_pred_edge": 10,
+            },
+        }
+        res = evaluate_acceptance(summary)
+        assert res["g1_validity"]["model_identity"]["passed"] is False
+        assert res["g1_validity"]["model_identity"]["configured_equals_observed"] is False
+        assert res["g1_validity"]["verdict"] == "FAIL"
+        assert res["overall_verdict"] == "INVALID"
+
+    def test_evaluate_acceptance_unmatched_single_model_passes_g1_with_unmatched_flag(self):
+        summary = {
+            "total_calls": 812,
+            "transport_failure_count": 0,
+            "parse_failure_count": 0,
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-chat"],  # single distinct ID, different from configured
+            "prompt_version": "v2",
+            "token_usage": {"reasoning_tokens": 0},
+            "retried_call_count": 0,
+            "evaluation": {
+                "node_insertion_scoring": {"micro": {"recall": 0.80, "f1": 0.60}},
+                "direction_flips": 0,
+                "calls_with_gold_and_pred_edge": 10,
+            },
+        }
+        res = evaluate_acceptance(summary)
+        assert res["g1_validity"]["model_identity"]["passed"] is True
+        assert res["g1_validity"]["model_identity"]["configured_equals_observed"] is False
+        assert res["g1_validity"]["verdict"] == "PASS"
+        assert res["overall_verdict"] == "PASS"
+
+
+class TestG2AcceptanceBoundaries:
+    """Test exact threshold boundary values for G2 usefulness criteria ([D-34])."""
+
+    def _make_summary(self, recall: float, f1: float, flips: int, calls_with_edge: int) -> dict[str, Any]:
+        return {
+            "total_calls": 812,
+            "transport_failure_count": 0,
+            "parse_failure_count": 0,
+            "configured_model": "deepseek-flash",
+            "observed_model_ids": ["deepseek-flash"],
+            "prompt_version": "v2",
+            "token_usage": {"reasoning_tokens": 0},
+            "retried_call_count": 0,
+            "evaluation": {
+                "node_insertion_scoring": {
+                    "micro": {"recall": recall, "f1": f1},
+                },
+                "direction_flips": flips,
+                "calls_with_gold_and_pred_edge": calls_with_edge,
+            },
+        }
+
+    def test_boundary_exact_pass(self):
+        # recall 0.70 + F1 0.50 + flip rate 0.15 => PASS
+        s = self._make_summary(recall=0.70, f1=0.50, flips=15, calls_with_edge=100)
+        res = evaluate_acceptance(s)
+        assert res["g2_usefulness"]["verdict"] == "PASS"
+
+    def test_boundary_f1_35_recall_50_is_conditional(self):
+        # F1 0.35 + recall 0.50 => CONDITIONAL
+        s = self._make_summary(recall=0.50, f1=0.35, flips=0, calls_with_edge=100)
+        res = evaluate_acceptance(s)
+        assert res["g2_usefulness"]["verdict"] == "CONDITIONAL"
+
+    def test_boundary_f1_just_below_35_is_fail(self):
+        # F1 0.3499 => FAIL
+        s = self._make_summary(recall=0.50, f1=0.3499, flips=0, calls_with_edge=100)
+        res = evaluate_acceptance(s)
+        assert res["g2_usefulness"]["verdict"] == "FAIL"
+
+    def test_boundary_recall_just_below_50_is_fail(self):
+        # recall 0.4999 => FAIL
+        s = self._make_summary(recall=0.4999, f1=0.50, flips=0, calls_with_edge=100)
+        res = evaluate_acceptance(s)
+        assert res["g2_usefulness"]["verdict"] == "FAIL"
+
+    def test_boundary_flip_rate_just_above_15_is_conditional(self):
+        # flip rate 0.1501 with passing recall/F1 => CONDITIONAL
+        s = self._make_summary(recall=0.70, f1=0.50, flips=1501, calls_with_edge=10000)
+        res = evaluate_acceptance(s)
+        assert res["g2_usefulness"]["verdict"] == "CONDITIONAL"
 

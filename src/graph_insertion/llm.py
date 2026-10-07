@@ -250,7 +250,7 @@ class DeepSeekClient:
     """
 
     DEFAULT_BASE_URL: str = "https://api.deepseek.com"
-    DEFAULT_MODEL: str = "deepseek-v4-flash"
+    DEFAULT_MODEL: str = "deepseek-flash"
 
     def __init__(
         self,
@@ -355,7 +355,7 @@ class DeepSeekClient:
                             cache_miss_tokens = usage.get("prompt_cache_miss_tokens", 0) or max(
                                 0, input_tokens - cache_hit_tokens
                             )
-                            model_id = data.get("model", self.model)
+                            model_id = data.get("model") or ""
 
                             return LLMResponse(
                                 text=content,
@@ -426,7 +426,7 @@ class FakeLLMClient:
         reasoning_tokens: int = 0,
         cache_hit_tokens: int = 0,
         cache_miss_tokens: int = 15,
-        model_id: str = "fake-deepseek-v4-flash",
+        model_id: str = "fake-deepseek-flash",
     ) -> None:
         self.responses = responses
         self.latency_s = latency_s
@@ -440,7 +440,7 @@ class FakeLLMClient:
         self.model = model_id
         self.base_url = "fake://localhost"
         self.temperature = 0.0
-        self.max_tokens = output_tokens
+        self.max_tokens = 16
         self.thinking = {"type": "disabled"}
         self.thinking_mode = "disabled"
         self.call_history: list[dict[str, Any]] = []

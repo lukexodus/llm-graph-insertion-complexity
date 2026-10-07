@@ -267,7 +267,7 @@ def _extract_model_and_prompt_info(decision_step: Any) -> dict[str, Any]:
         for c in (inner_client, client):
             if hasattr(c, "thinking"):
                 t_obj = getattr(c, "thinking")
-                thinking_mode = t_obj.get("type", "disabled") if isinstance(t_obj, dict) else str(t_obj)
+                thinking_mode = t_obj.get("type", None) if isinstance(t_obj, dict) else (str(t_obj) if t_obj is not None else None)
                 break
             elif hasattr(c, "thinking_mode"):
                 thinking_mode = str(getattr(c, "thinking_mode"))
@@ -290,9 +290,9 @@ def _extract_model_and_prompt_info(decision_step: Any) -> dict[str, Any]:
         "observed_model_ids": observed_model_ids,
         "base_url": base_url,
         "prompt_version": prompt_version,
-        "temperature": temperature if temperature is not None else 0.0,
-        "thinking_mode": thinking_mode if thinking_mode is not None else "disabled",
-        "max_tokens": max_tokens if max_tokens is not None else 16,
+        "temperature": temperature,
+        "thinking_mode": thinking_mode,
+        "max_tokens": max_tokens,
     }
 
 

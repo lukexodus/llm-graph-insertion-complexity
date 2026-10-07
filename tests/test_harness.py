@@ -617,7 +617,7 @@ class TestHarnessHardeningAndEnrichment:
         class DummyStep:
             PROMPT_VERSION = "v1"
             class InnerClient:
-                model = "deepseek-v4-flash"
+                model = "deepseek-flash"
                 base_url = "https://api.deepseek.com"
             llm_client = InnerClient()
 
@@ -630,12 +630,46 @@ class TestHarnessHardeningAndEnrichment:
         )
 
         manifest = json.loads((run_dir / "manifest.json").read_text())
-        assert manifest["configured_model"] == "deepseek-v4-flash"
+        assert manifest["configured_model"] == "deepseek-flash"
+        assert manifest["base_url"] == "https://api.deepseek.com"
+        assert manifest["temperature"] is None
+        assert manifest["thinking_mode"] is None
+        assert manifest["max_tokens"] is None
+        assert manifest["prompt_version"] == "v1"
+
+    def test_manifest_client_parameters_recorded_when_exposed(self, tmp_path, mini_corpus):
+        run_dir = tmp_path / "manifest_params_run"
+        config = HarnessConfig(
+            mode="accuracy",
+            output_dir=run_dir,
+            dry_run=True,
+        )
+
+        class DummyStepWithParams:
+            PROMPT_VERSION = "v2"
+            class InnerClient:
+                model = "deepseek-flash"
+                base_url = "https://api.deepseek.com"
+                temperature = 0.0
+                thinking = {"type": "disabled"}
+                max_tokens = 16
+            llm_client = InnerClient()
+
+        run_accuracy_experiment(
+            config=config,
+            strategy_factory=lambda: SpyStrategy(),
+            decision_step=DummyStepWithParams(),
+            embedder_factory=lambda: FakeEmbedder(dim=8),
+            corpora={"mini_corpus": mini_corpus},
+        )
+
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        assert manifest["configured_model"] == "deepseek-flash"
         assert manifest["base_url"] == "https://api.deepseek.com"
         assert manifest["temperature"] == 0.0
         assert manifest["thinking_mode"] == "disabled"
         assert manifest["max_tokens"] == 16  # NOT redacted!
-        assert manifest["prompt_version"] == "v1"
+        assert manifest["prompt_version"] == "v2"
 
     def test_trial_key_has_strategy_name_and_summary_deduplicates(self, tmp_path, mini_corpus):
         run_dir = tmp_path / "dedupe_run"

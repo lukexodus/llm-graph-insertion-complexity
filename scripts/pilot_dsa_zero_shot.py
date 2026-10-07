@@ -357,7 +357,9 @@ def evaluate_acceptance(summary: dict[str, Any]) -> dict[str, Any]:
     g1_tf_pass = (tf == 0)
     g1_pf_pass = (pf <= 8) and (pf_rate <= 0.01)
     g1_rt_pass = (rt == 0)
-    g1_model_pass = (len(obs_m) == 1 and obs_m[0] == conf_m)
+    obs_set = set(obs_m)
+    g1_model_pass = (len(obs_set) == 1)
+    configured_equals_observed = bool(obs_set) and (obs_set == {conf_m})
     g1_pv_pass = (pv == "v2")
     g1_retries_pass = (retry_rate <= 0.02)
 
@@ -406,6 +408,7 @@ def evaluate_acceptance(summary: dict[str, Any]) -> dict[str, Any]:
             "model_identity": {
                 "configured": conf_m,
                 "observed": obs_m,
+                "configured_equals_observed": configured_equals_observed,
                 "passed": g1_model_pass,
             },
             "prompt_version": {"value": pv, "passed": g1_pv_pass},
@@ -579,16 +582,14 @@ def run_pilot(
     # Client parameters extraction
     inner_client = getattr(client, "client", client)
     base_url = getattr(inner_client, "base_url", getattr(client, "base_url", None))
-    temperature = getattr(inner_client, "temperature", getattr(client, "temperature", 0.0))
-    t_obj = getattr(inner_client, "thinking", getattr(client, "thinking", {"type": "disabled"}))
-    thinking_mode = t_obj.get("type", "disabled") if isinstance(t_obj, dict) else str(t_obj)
-    max_tokens = getattr(inner_client, "max_tokens", getattr(client, "max_tokens", 16))
+    temperature = getattr(inner_client, "temperature", getattr(client, "temperature", None))
+    t_obj = getattr(inner_client, "thinking", getattr(client, "thinking", None))
+    thinking_mode = t_obj.get("type", None) if isinstance(t_obj, dict) else (str(t_obj) if t_obj is not None else None)
+    max_tokens = getattr(inner_client, "max_tokens", getattr(client, "max_tokens", None))
 
     observed_model_ids = sorted(list(set(r.get("model", "") for r in call_records if r.get("model"))))
     if not observed_model_ids and hasattr(client, "model_ids_seen"):
         observed_model_ids = sorted(list(client.model_ids_seen))
-    if not observed_model_ids:
-        observed_model_ids = [model_name]
 
     summary: dict[str, Any] = {
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -690,7 +691,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default=None,
-        help="DeepSeek model identifier (default from env DEEPSEEK_MODEL or 'deepseek-v4-flash').",
+        help="DeepSeek model identifier (default from env DEEPSEEK_MODEL or 'deepseek-flash').",
     )
     parser.add_argument(
         "--strict",
@@ -779,9 +780,9 @@ def main() -> None:
         client = FakeLLMClient(
             responses=lambda s, u: "NONE",
             latency_s=0.005,
-            model_id="fake-deepseek-v4-flash",
+            model_id="fake-deepseek-flash",
         )
-        model_name = "fake-deepseek-v4-flash"
+        model_name = "fake-deepseek-flash"
     else:
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if not api_key:

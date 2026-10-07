@@ -33,7 +33,7 @@ class TestLLMDataStructures:
             cache_hit_tokens=5,
             cache_miss_tokens=5,
             latency_s=0.05,
-            model_id="deepseek-v4-flash",
+            model_id="deepseek-flash",
             attempts=1,
             retry_wait_s=0.0,
         )
@@ -139,6 +139,12 @@ class TestMeteredLLMClient:
         assert meter.failed_parses == []
         assert meter.cumulative_latency_s == 0.0
 
+    def test_fake_llm_client_properties_and_max_tokens_constant(self):
+        fake = FakeLLMClient(output_tokens=3)
+        assert fake.max_tokens == 16
+        assert fake.model_id == "fake-deepseek-flash"
+        assert fake.model == "fake-deepseek-flash"
+
 
 class TestDeepSeekClient:
     """Test DeepSeekClient with mocked transport for retries, timing, and errors."""
@@ -148,13 +154,20 @@ class TestDeepSeekClient:
         with pytest.raises(ValueError, match="DEEPSEEK_API_KEY is required"):
             DeepSeekClient(api_key=None)
 
+    def test_default_model_is_deepseek_flash(self):
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"choices": [{"message": {"content": "NONE"}}]}))
+        http_client = httpx.Client(transport=transport)
+        client = DeepSeekClient(api_key="test-key", client=http_client)
+        assert client.DEFAULT_MODEL == "deepseek-flash"
+        assert client.model == "deepseek-flash"
+
     def test_client_payload_and_headers(self):
         captured_requests = []
 
         def mock_handler(request: httpx.Request) -> httpx.Response:
             captured_requests.append(request)
             data = {
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "choices": [{"message": {"content": "X_PREREQ_Y"}}],
                 "usage": {
                     "prompt_tokens": 25,
@@ -172,7 +185,7 @@ class TestDeepSeekClient:
         client = DeepSeekClient(
             api_key="test-secret-key",
             base_url="https://api.deepseek.com/v1/",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             client=http_client,
         )
 
@@ -191,7 +204,7 @@ class TestDeepSeekClient:
         assert req.url == "https://api.deepseek.com/v1/chat/completions"
         assert req.headers["Authorization"] == "Bearer test-secret-key"
         body = json.loads(req.content)
-        assert body["model"] == "deepseek-v4-flash"
+        assert body["model"] == "deepseek-flash"
         assert body["temperature"] == 0.0
         assert body["max_tokens"] == 16
         assert body["thinking"] == {"type": "disabled"}
@@ -199,6 +212,27 @@ class TestDeepSeekClient:
             {"role": "system", "content": "System instruction"},
             {"role": "user", "content": "User query"},
         ]
+
+    def test_response_missing_model_yields_empty_model_id(self):
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            data = {
+                # "model" field is intentionally omitted from API response
+                "choices": [{"message": {"content": "NONE"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+            }
+            return httpx.Response(200, json=data)
+
+        transport = httpx.MockTransport(mock_handler)
+        http_client = httpx.Client(transport=transport)
+
+        client = DeepSeekClient(
+            api_key="test-secret-key",
+            model="deepseek-flash",
+            client=http_client,
+        )
+
+        resp = client.complete("sys", "usr")
+        assert resp.model_id == ""
 
     def test_retry_on_429_and_500_excludes_wait_from_latency(self):
         attempt_counter = [0]
@@ -212,7 +246,7 @@ class TestDeepSeekClient:
             return httpx.Response(
                 200,
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-flash",
                     "choices": [{"message": {"content": "NONE"}}],
                     "usage": {"prompt_tokens": 12, "completion_tokens": 1},
                 },
