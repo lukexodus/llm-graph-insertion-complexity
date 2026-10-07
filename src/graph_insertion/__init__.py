@@ -72,13 +72,23 @@ __all__ = [
     "DeepSeekClient",
     "FakeLLMClient",
     "LLMTransportError",
+    "resolve_model_alias",
     "PairwiseDecisionStep",
     "DecisionParseError",
     "PROMPT_VERSION",
     "SYSTEM_PROMPT",
     "CALLS_PER_CANDIDATE",
+    # Harness Helpers
+    "sweep_trial_key",
+    "accuracy_trial_key",
+    "sample_heldout_nodes",
 ]
 
+from graph_insertion.harness import (
+    accuracy_trial_key,
+    sample_heldout_nodes,
+    sweep_trial_key,
+)
 from graph_insertion.llm import (
     DeepSeekClient,
     FakeLLMClient,
@@ -87,6 +97,7 @@ from graph_insertion.llm import (
     LLMSnapshot,
     LLMTransportError,
     MeteredLLMClient,
+    resolve_model_alias,
 )
 from graph_insertion.decision import (
     CALLS_PER_CANDIDATE,

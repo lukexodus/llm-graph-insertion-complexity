@@ -320,10 +320,40 @@ def load_existing_results(jsonl_path: Path) -> dict[str, dict[str, Any]]:
     return results
 
 
+def sweep_trial_key(strategy_name: str, n: int, trial_idx: int) -> str:
+    """Generate unique canonical trial key for sweep experiment."""
+    return f"sweep:{strategy_name}:{n}:t{trial_idx}"
+
+
+def accuracy_trial_key(strategy_name: str, corpus_name: str, node: str, rep: int) -> str:
+    """Generate unique canonical trial key for accuracy experiment."""
+    return f"accuracy:{strategy_name}:{corpus_name}:{node}:r{rep}"
+
+
+def sample_heldout_nodes(
+    graph: Any,
+    corpus_name: str,
+    seed: int,
+    metacademy_sample_size: int = 30,
+) -> list[str]:
+    """Select held-out evaluation nodes for a corpus.
+
+    For Metacademy corpora, draws a deterministic sample of size
+    min(metacademy_sample_size, len(nodes)) seeded by seed.
+    For all other corpora, evaluates all nodes in sorted order.
+    """
+    all_nodes = sorted(graph.nodes()) if hasattr(graph, "nodes") else sorted(graph)
+    if "metacademy" in corpus_name.lower():
+        rng = random.Random(seed)
+        sample_k = min(metacademy_sample_size, len(all_nodes))
+        return sorted(rng.sample(all_nodes, sample_k))
+    return all_nodes
+
+
 def _load_existing_keys(raw_jsonl_path: Path, retry_failed: bool = False) -> set[str]:
     """Load trial keys from raw.jsonl that should be skipped on resume.
 
-    A trial is skipped if status is 'success', or if status is 'failed' and retry_failed is False.
+    A trial is skipped if status is 'success', or if status is 'failed'/'error' and retry_failed is False.
     """
     existing_results = load_existing_results(raw_jsonl_path)
     skipped_keys: set[str] = set()
@@ -331,9 +361,10 @@ def _load_existing_keys(raw_jsonl_path: Path, retry_failed: bool = False) -> set
         status = rec.get("status")
         if status == "success":
             skipped_keys.add(key)
-        elif status == "failed" and not retry_failed:
+        elif status in ("failed", "error") and not retry_failed:
             skipped_keys.add(key)
     return skipped_keys
+
 
 
 def compute_metric_stats(values: Sequence[float]) -> dict[str, float]:
@@ -708,15 +739,18 @@ def run_accuracy_experiment(
         warmup_fn()
 
     # Resume handling
-    existing_results = load_existing_results(raw_jsonl_path) if config.resume else {}
+    skipped_keys = _load_existing_keys(raw_jsonl_path, retry_failed=config.retry_failed) if config.resume else set()
 
     llm_meter = _extract_metered_llm(decision_step)
     cumulative_llm_calls = 0
 
-    total_trials = sum(
-        (min(config.metacademy_sample_size, len(loaded_corpus.graph.nodes())) if "metacademy" in cname.lower() else len(loaded_corpus.graph.nodes())) * config.repeats
+    all_planned_keys = [
+        accuracy_trial_key(strategy_name, cname, h, rep)
         for cname, loaded_corpus in corpora.items()
-    )
+        for h in sample_heldout_nodes(loaded_corpus.graph, cname, config.seed, config.metacademy_sample_size)
+        for rep in range(config.repeats)
+    ]
+    total_trials = sum(1 for k in all_planned_keys if k not in skipped_keys)
     trials_completed = 0
 
     # Open raw.jsonl in append mode for immediate streaming flush
@@ -724,27 +758,15 @@ def run_accuracy_experiment(
         for corpus_name, loaded_corpus in corpora.items():
             gold_graph = loaded_corpus.graph
             judgments = loaded_corpus.judgments
-            all_nodes = sorted(gold_graph.nodes())
-
-            # Node selection: all 29 nodes for DSA; seeded sample of 30 nodes for Metacademy
-            if "metacademy" in corpus_name.lower():
-                rng = random.Random(config.seed)
-                sample_k = min(config.metacademy_sample_size, len(all_nodes))
-                sampled_nodes = sorted(rng.sample(all_nodes, sample_k))
-            else:
-                sampled_nodes = all_nodes
+            sampled_nodes = sample_heldout_nodes(gold_graph, corpus_name, config.seed, config.metacademy_sample_size)
 
             for rep in range(config.repeats):
                 for h in sampled_nodes:
-                    trial_key = f"accuracy:{strategy_name}:{corpus_name}:{h}:r{rep}"
+                    trial_key = accuracy_trial_key(strategy_name, corpus_name, h, rep)
 
                     # Resume check
-                    if trial_key in existing_results:
-                        prior = existing_results[trial_key]
-                        if prior.get("status") == "success":
-                            continue
-                        if prior.get("status") == "failed" and not config.retry_failed:
-                            continue
+                    if trial_key in skipped_keys:
+                        continue
 
                     # LLM call limit safety check
                     # Note: counts successful insertions only, can overshoot by one trial, does not carry across --resume
@@ -947,12 +969,17 @@ def run_sweep_experiment(
     if warmup_fn is not None:
         warmup_fn()
 
-    existing_results = load_existing_results(raw_jsonl_path) if config.resume else {}
+    skipped_keys = _load_existing_keys(raw_jsonl_path, retry_failed=config.retry_failed) if config.resume else set()
 
     llm_meter = _extract_metered_llm(decision_step)
     cumulative_llm_calls = 0
 
-    total_trials = len(config.sweep_sizes) * config.sweep_trials_per_size
+    all_planned_keys = [
+        sweep_trial_key(strategy_name, n, trial_idx)
+        for n in config.sweep_sizes
+        for trial_idx in range(config.sweep_trials_per_size)
+    ]
+    total_trials = sum(1 for k in all_planned_keys if k not in skipped_keys)
     trials_completed = 0
 
     pool_names = list(name_source.names)
@@ -966,14 +993,10 @@ def run_sweep_experiment(
                 )
 
             for trial_idx in range(config.sweep_trials_per_size):
-                trial_key = f"sweep:{strategy_name}:{n}:t{trial_idx}"
+                trial_key = sweep_trial_key(strategy_name, n, trial_idx)
 
-                if trial_key in existing_results:
-                    prior = existing_results[trial_key]
-                    if prior.get("status") == "success":
-                        continue
-                    if prior.get("status") == "failed" and not config.retry_failed:
-                        continue
+                if trial_key in skipped_keys:
+                    continue
 
                 # LLM call limit safety check
                 # Note: counts successful insertions only, can overshoot by one trial, does not carry across --resume

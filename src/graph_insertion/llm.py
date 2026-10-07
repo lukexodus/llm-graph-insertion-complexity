@@ -270,6 +270,17 @@ class MeteredLLMClient:
 # DeepSeek API Client
 # ---------------------------------------------------------------------------
 
+def resolve_model_alias(model: Optional[str] = None) -> str:
+    """Resolve DeepSeek model alias according to configured precedence.
+
+    Precedence order:
+      1. Explicit *model* argument (if provided and non-empty)
+      2. DEEPSEEK_MODEL environment variable (if set and non-empty)
+      3. Default fallback: 'deepseek-flash'
+    """
+    return model or os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash"
+
+
 class DeepSeekClient:
     """Official DeepSeek API client via OpenAI-compatible HTTP endpoints.
 
@@ -297,7 +308,7 @@ class DeepSeekClient:
             )
         self.api_key = key
         self.base_url = (base_url or os.environ.get("DEEPSEEK_BASE_URL") or self.DEFAULT_BASE_URL).rstrip("/")
-        self.model = model or os.environ.get("DEEPSEEK_MODEL") or self.DEFAULT_MODEL
+        self.model = resolve_model_alias(model)
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_delays = tuple(backoff_delays)

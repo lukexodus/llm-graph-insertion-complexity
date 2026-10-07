@@ -45,8 +45,12 @@ from graph_insertion.harness import (
     HarnessConfig,
     SyntheticNameSource,
     _load_existing_keys,
+    accuracy_trial_key,
     run_experiment,
+    sample_heldout_nodes,
+    sweep_trial_key,
 )
+from graph_insertion.llm import resolve_model_alias
 from graph_insertion.loader import LoadedCorpus, discover_corpora, load_corpus
 from graph_insertion.schedule import format_peak_status, window_intersects_peak
 from graph_insertion.strategies.null import NullStrategy
@@ -262,11 +266,21 @@ class PlannedCallsBound(int):
 
     full_plan_bound: int
     remaining_bound: int
+    full_plan_trials: int
+    remaining_trials: int
 
-    def __new__(cls, remaining_bound: int, full_plan_bound: int) -> PlannedCallsBound:
+    def __new__(
+        cls,
+        remaining_bound: int,
+        full_plan_bound: int,
+        remaining_trials: int = 0,
+        full_plan_trials: int = 0,
+    ) -> PlannedCallsBound:
         obj = super().__new__(cls, remaining_bound)
         obj.remaining_bound = remaining_bound
         obj.full_plan_bound = full_plan_bound
+        obj.remaining_trials = remaining_trials
+        obj.full_plan_trials = full_plan_trials
         return obj
 
 
@@ -291,43 +305,47 @@ def compute_planned_calls_upper_bound(
 
     full_plan_bound = 0
     remaining_bound = 0
+    full_plan_trials = 0
+    remaining_trials = 0
 
     if config.mode == "sweep":
         for n in config.sweep_sizes:
             trial_bound = CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n)
             for trial_idx in range(config.sweep_trials_per_size):
-                trial_key = f"sweep:{strategy_name}:{n}:t{trial_idx}"
+                trial_key = sweep_trial_key(strategy_name, n, trial_idx)
                 full_plan_bound += trial_bound
+                full_plan_trials += 1
                 if trial_key in skipped_keys:
                     continue
                 remaining_bound += trial_bound
+                remaining_trials += 1
 
     elif config.mode == "accuracy":
         if corpora:
             for corpus_name, lc in corpora.items():
-                all_nodes = sorted(lc.graph.nodes())
-                if "metacademy" in corpus_name.lower():
-                    rng = random.Random(config.seed)
-                    sample_k = min(config.metacademy_sample_size, len(all_nodes))
-                    sampled_nodes = sorted(rng.sample(all_nodes, sample_k))
-                else:
-                    sampled_nodes = all_nodes
-
-                n_existing = max(0, len(all_nodes) - 1)
+                sampled_nodes = sample_heldout_nodes(
+                    lc.graph,
+                    corpus_name,
+                    config.seed,
+                    config.metacademy_sample_size,
+                )
+                n_existing = max(0, len(lc.graph.nodes()) - 1)
                 trial_bound = CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n_existing)
 
                 for rep in range(config.repeats):
                     for h in sampled_nodes:
-                        trial_key = f"accuracy:{strategy_name}:{corpus_name}:{h}:r{rep}"
+                        trial_key = accuracy_trial_key(strategy_name, corpus_name, h, rep)
                         full_plan_bound += trial_bound
+                        full_plan_trials += 1
                         if trial_key in skipped_keys:
                             continue
                         remaining_bound += trial_bound
+                        remaining_trials += 1
 
     if config.max_llm_calls is not None:
         remaining_bound = min(remaining_bound, config.max_llm_calls)
 
-    return PlannedCallsBound(remaining_bound, full_plan_bound)
+    return PlannedCallsBound(remaining_bound, full_plan_bound, remaining_trials, full_plan_trials)
 
 
 def compute_preflight_estimate(
@@ -681,15 +699,8 @@ def main() -> int:
     planned_calls_upper_bound = planned_calls_bound.remaining_bound
     full_plan_bound = planned_calls_bound.full_plan_bound
 
-    # Estimate total trials
-    if config.mode == "accuracy":
-        total_planned_trials = 0
-        if corpora:
-            for cname, lc in corpora.items():
-                k_sample = min(config.metacademy_sample_size, len(lc.graph.nodes())) if "metacademy" in cname.lower() else len(lc.graph.nodes())
-                total_planned_trials += k_sample * config.repeats
-    else:
-        total_planned_trials = len(config.sweep_sizes) * config.sweep_trials_per_size
+    # Estimate total trials (remaining trials to execute on --resume)
+    total_planned_trials = planned_calls_bound.remaining_trials
 
     # Decision step wiring & live peak check (FIX-008, FIX-009)
     decision_step: DecisionStep
@@ -699,6 +710,7 @@ def main() -> int:
         from graph_insertion.llm import MeteredLLMClient
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+        resolved_model = resolve_model_alias(args.model)
         est = compute_preflight_estimate(
             planned_calls_upper_bound,
             args.est_seconds_per_call,
@@ -708,6 +720,7 @@ def main() -> int:
 
         print("=" * 65)
         print("LIVE EXPERIMENT PRE-FLIGHT ESTIMATE")
+        print(f"Model alias:                   {resolved_model}")
         print(f"Full-plan calls (upper bound): {full_plan_bound}")
         print(f"Remaining calls (upper bound): {est['planned_calls']}")
         print(f"Estimated duration:            {est['estimated_seconds']:.1f}s ({est['estimated_seconds']/60:.1f} min) (assuming {args.est_seconds_per_call:.1f}s/call)")
@@ -746,7 +759,11 @@ def main() -> int:
             )
             return 1
 
-        raw_client = build_live_client(model=args.model)
+        try:
+            raw_client = build_live_client(model=args.model)
+        except ValueError as err:
+            print(f"ERROR: {err}", file=sys.stderr)
+            return 1
         metered_client = MeteredLLMClient(raw_client)
         decision_step = PairwiseDecisionStep(metered_client)
     else:
@@ -778,7 +795,7 @@ def main() -> int:
     progress_reporter = ProgressReporter(
         total_calls=planned_calls_upper_bound,
         total_trials=total_planned_trials,
-        strategy_name=args.strategy,
+        strategy_name=getattr(uninitialized_strategy, "name", args.strategy),
         size=config.sweep_sizes[0] if config.sweep_sizes else None,
         interval_s=30.0,
     )
