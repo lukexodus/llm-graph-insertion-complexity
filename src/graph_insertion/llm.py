@@ -300,6 +300,8 @@ class DeepSeekClient:
         max_retries: int = 3,
         backoff_delays: Sequence[float] = (1.0, 2.0, 4.0),
         client: Optional[httpx.Client] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 16,
     ) -> None:
         key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         if not key:
@@ -314,8 +316,8 @@ class DeepSeekClient:
         self.backoff_delays = tuple(backoff_delays)
         self._external_client = client is not None
         self._client = client or httpx.Client(timeout=self.timeout)
-        self.temperature: float = 0.0
-        self.max_tokens: int = 16
+        self.temperature: float = temperature
+        self.max_tokens: int = max_tokens
         self.thinking: dict[str, Any] = {"type": "disabled"}
         self.thinking_mode: str = "disabled"
 

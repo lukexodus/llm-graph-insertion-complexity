@@ -1,0 +1,502 @@
+"""tests/test_generate_name_pool.py — Unit and integration tests for DATA-004.
+
+Tests verify:
+  1. DeepSeekClient defaults (temperature 0.0, max_tokens 16) and custom parameter assignment.
+  2. Offline-fake end-to-end generation produces a pool passing load_and_validate_names_file.
+  3. All candidate drop reasons fire and track drop counts by reason.
+  4. Resuming from cache makes zero new generator calls.
+  5. Deterministic pool building (identical names and sha256 hashes given the same cache).
+  6. --verify detects tampered names, tampered cache, and unallowed fake generator.
+  7. Live mode gates refuse execution without --confirm and without DEEPSEEK_API_KEY.
+  8. Offline-fake mode refuses to write the default tracked output path.
+  9. --max-calls cap cleanly halts the generation loop.
+ 10. --build-only rebuilds and asserts load_and_validate_names_file UNCHANGED.
+ 11. --dry-run prints plan without creating files or making calls.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+
+import pytest
+
+from graph_insertion.graph_representation import embed_text
+from graph_insertion.llm import DeepSeekClient
+from scripts.generate_name_pool import (
+    CacheEntry,
+    DEFAULT_TRACKED_OUTPUT,
+    MIN_REQUIRED_NAMES_FOR_VALIDATION,
+    SUBFIELDS,
+    build_pool_from_cache,
+    build_user_prompt,
+    load_completed_cache,
+    main as cli_main,
+    parse_json_array_response,
+    run_generation_loop,
+    validate_and_dedupe_candidates,
+    verify_pool,
+)
+from scripts.run_experiment import load_and_validate_names_file
+
+
+# ---------------------------------------------------------------------------
+# 1. DeepSeekClient Defaults & Parameter Extension
+# ---------------------------------------------------------------------------
+
+def test_deepseek_client_defaults_and_custom_parameters() -> None:
+    """Verify DeepSeekClient defaults (temp 0.0, max_tokens 16) and custom kwargs."""
+    # Defaults
+    c_default = DeepSeekClient(api_key="fake-key-for-test")
+    assert c_default.temperature == 0.0
+    assert c_default.max_tokens == 16
+    assert c_default.thinking == {"type": "disabled"}
+
+    # Custom kwargs for name generation
+    c_custom = DeepSeekClient(
+        api_key="fake-key-for-test",
+        temperature=0.7,
+        max_tokens=1500,
+    )
+    assert c_custom.temperature == 0.7
+    assert c_custom.max_tokens == 1500
+
+
+# ---------------------------------------------------------------------------
+# 2. Prompt Construction & Parsing
+# ---------------------------------------------------------------------------
+
+def test_build_user_prompt_round1_and_round2() -> None:
+    """Verify user prompt generation for round 1 and round 2 with collected names cap."""
+    p1 = build_user_prompt("data_structures", 1, [])
+    assert "data structures" in p1
+    assert "40 distinct" in p1
+    assert "Do NOT repeat" not in p1
+
+    prev = [f"concept_{i}" for i in range(120)]
+    p2 = build_user_prompt("data_structures", 2, prev)
+    assert "Do NOT repeat any of the following 100 concepts" in p2
+    assert "concept_119" in p2
+    # Ensure capped to last 100 names
+    assert "concept_0" not in p2
+
+
+def test_parse_json_array_response() -> None:
+    """Verify response parsing with and without markdown code fences."""
+    raw_plain = json.dumps(["b_tree", "avl_tree"])
+    assert parse_json_array_response(raw_plain) == ["b_tree", "avl_tree"]
+
+    raw_fenced = "```json\n" + json.dumps(["b_tree", "avl_tree"]) + "\n```"
+    assert parse_json_array_response(raw_fenced) == ["b_tree", "avl_tree"]
+
+    with pytest.raises(ValueError, match="Expected JSON array"):
+        parse_json_array_response(json.dumps({"concepts": ["b_tree"]}))
+
+    with pytest.raises(ValueError, match="Failed to parse response as JSON"):
+        parse_json_array_response("invalid non json text")
+
+
+# ---------------------------------------------------------------------------
+# 3. Candidate Validation & Drop Reasons
+# ---------------------------------------------------------------------------
+
+def test_drop_reasons_fire() -> None:
+    """Verify that every drop reason fires and increments drop_counts accurately."""
+    corpus_nodes = {"binary_search_tree", "sorting_algorithm"}
+    corpus_embeds = {embed_text("binary_search_tree"), embed_text("sorting_algorithm")}
+
+    candidates = [
+        "graph_theory.txt",                 # ends_with_txt
+        "InvalidCase",                      # invalid_snake_case
+        "ab",                               # invalid_length (< 3)
+        "a" * 55,                           # invalid_length (> 50)
+        "one_two_three_four_five_six",      # invalid_word_count (> 5 words)
+        "binary_search_tree",               # corpus_overlap_exact
+        "sorting_algorithm",                # corpus_overlap_exact
+        "accepted_concept_one",             # valid 1
+        "accepted_concept_one",             # duplicate_exact
+        "accepted_concept_two",             # valid 2
+        "decision_tree",                    # valid 3
+        "decision_trees",                   # plural_pair (with decision_tree)
+        "process",                          # valid 4
+        "processes",                        # plural_pair (with process)
+    ]
+
+    fake_entry = CacheEntry(
+        round=1,
+        subfield="test_field",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(candidates),
+        model_id="test-model",
+        token_usage={},
+        timestamp_utc="2026-10-07T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=candidates,
+    )
+
+    # Also test embed_text overlap via candidate whose embed matches corpus
+    # e.g., if corpus has "sorting_algorithm", its embed_text is "sorting algorithm".
+    # A candidate matching that embed_text is filtered.
+    filtered, n_raw, drop_counts = validate_and_dedupe_candidates(
+        [fake_entry], corpus_nodes, corpus_embeds
+    )
+
+    assert n_raw == len(candidates)
+    assert drop_counts["ends_with_txt"] == 1
+    assert drop_counts["invalid_snake_case"] == 1
+    assert drop_counts["invalid_length"] == 2
+    assert drop_counts["invalid_word_count"] == 1
+    assert drop_counts["corpus_overlap_exact"] == 2
+    assert drop_counts["duplicate_exact"] == 1
+    assert drop_counts["plural_pair"] == 2
+
+    # Verify surviving valid concepts
+    assert "accepted_concept_one" in filtered
+    assert "accepted_concept_two" in filtered
+    assert "decision_tree" in filtered
+    assert "decision_trees" not in filtered
+    assert "process" in filtered
+    assert "processes" not in filtered
+
+
+def test_corpus_overlap_embed_drop_reason() -> None:
+    """Verify candidate dropping when embed_text form matches a corpus node."""
+    # Suppose corpus has an unusual node
+    corpus_nodes: set[str] = set()
+    corpus_embeds = {"custom concept payload"}
+
+    # Candidate has same embed_text form
+    candidate = "custom_concept_payload"
+    assert embed_text(candidate) == "custom concept payload"
+
+    fake_entry = CacheEntry(
+        round=1,
+        subfield="test_field",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps([candidate]),
+        model_id="test-model",
+        token_usage={},
+        timestamp_utc="2026-10-07T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=[candidate],
+    )
+
+    filtered, n_raw, drop_counts = validate_and_dedupe_candidates(
+        [fake_entry], corpus_nodes, corpus_embeds
+    )
+    assert drop_counts["corpus_overlap_embed"] == 1
+    assert len(filtered) == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. Offline-Fake End-to-End & Load Validation
+# ---------------------------------------------------------------------------
+
+def test_offline_fake_e2e_passes_load_and_validate_names_file(tmp_path: Path) -> None:
+    """End-to-end test: offline-fake generates pool passing load_and_validate_names_file."""
+    pool_path = tmp_path / "synthetic_pool.json"
+    cache_path = tmp_path / "raw_responses.jsonl"
+
+    ret = run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="test_e2e_run",
+        target_names=2600,
+        max_calls=400,
+    )
+    assert ret == 0
+    assert pool_path.exists()
+    assert cache_path.exists()
+
+    # Must pass load_and_validate_names_file unchanged
+    loaded = load_and_validate_names_file(pool_path, min_required_names=2001)
+    assert len(loaded) >= 2600
+
+    # Verify JSON structure and metadata
+    with open(pool_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    meta = data["meta"]
+    assert meta["schema_version"] == "1.0"
+    assert meta["domain"] == "computer science"
+    assert meta["generator"] == "offline-fake"
+    assert meta["prompt_version"] == "np1"
+    assert meta["seed"] == 42
+    assert meta["n_valid"] == len(loaded)
+    assert len(meta["corpora_checked"]) == 12
+
+
+# ---------------------------------------------------------------------------
+# 5. Cache Resumption & Determinism
+# ---------------------------------------------------------------------------
+
+def test_resume_from_cache_makes_zero_new_calls(tmp_path: Path) -> None:
+    """Verify that re-running with an existing cache makes 0 new generator calls."""
+    pool_path = tmp_path / "pool.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    # First run creates cache
+    ret1 = run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="run_1",
+        target_names=2600,
+        max_calls=400,
+    )
+    assert ret1 == 0
+
+    cache1 = load_completed_cache(cache_path)
+    entries_count1 = len(cache1)
+
+    # Second run with same cache
+    pool_path2 = tmp_path / "pool2.json"
+    ret2 = run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path2,
+        cache_path=cache_path,
+        run_id="run_1",
+        target_names=2600,
+        max_calls=400,
+    )
+    assert ret2 == 0
+
+    cache2 = load_completed_cache(cache_path)
+    assert len(cache2) == entries_count1
+
+
+def test_deterministic_output_from_cache(tmp_path: Path) -> None:
+    """Verify identical pool content and hashes when built from the same cache."""
+    cache_path = tmp_path / "raw.jsonl"
+    out1 = tmp_path / "pool1.json"
+    out2 = tmp_path / "pool2.json"
+
+    run_generation_loop(
+        mode="offline-fake",
+        output_path=out1,
+        cache_path=cache_path,
+        run_id="det_run",
+        target_names=2600,
+        max_calls=400,
+    )
+
+    build_pool_from_cache(
+        cache_path=cache_path,
+        output_path=out2,
+        generator_kind="offline-fake",
+        configured_model="deepseek-flash",
+        seed=42,
+        run_ids=["det_run"],
+        allow_fake=True,
+    )
+
+    with open(out1, "r", encoding="utf-8") as f:
+        d1 = json.load(f)
+    with open(out2, "r", encoding="utf-8") as f:
+        d2 = json.load(f)
+
+    assert d1["names"] == d2["names"]
+    assert d1["meta"]["sha256_names"] == d2["meta"]["sha256_names"]
+    assert d1["meta"]["sha256_raw_responses"] == d2["meta"]["sha256_raw_responses"]
+
+
+# ---------------------------------------------------------------------------
+# 6. Verification Mode & Tamper Detection
+# ---------------------------------------------------------------------------
+
+def test_verify_detects_tampered_name(tmp_path: Path) -> None:
+    """Verify that --verify detects a tampered name string."""
+    pool_path = tmp_path / "pool.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="verify_test",
+        target_names=2600,
+        max_calls=400,
+    )
+
+    # Valid check passes with allow_fake
+    verify_pool(pool_path, cache_path, allow_fake=True)
+
+    # Tamper with a name
+    with open(pool_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["names"][0] = "tampered_concept_name"
+    with open(pool_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    with pytest.raises(SystemExit) as exc:
+        verify_pool(pool_path, cache_path, allow_fake=True)
+    assert exc.value.code == 1
+
+
+def test_verify_detects_tampered_cache(tmp_path: Path) -> None:
+    """Verify that --verify detects cache tampering via SHA256 mismatch."""
+    pool_path = tmp_path / "pool.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="verify_test",
+        target_names=2600,
+        max_calls=400,
+    )
+
+    # Tamper with raw cache file
+    with open(cache_path, "a", encoding="utf-8") as f:
+        f.write('{"tampered": true}\n')
+
+    with pytest.raises(SystemExit) as exc:
+        verify_pool(pool_path, cache_path, allow_fake=True)
+    assert exc.value.code == 1
+
+
+def test_verify_detects_offline_fake_without_allow_fake(tmp_path: Path) -> None:
+    """Verify that --verify rejects offline-fake generated pools unless --allow-fake is passed."""
+    pool_path = tmp_path / "pool.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="verify_test",
+        target_names=2600,
+        max_calls=400,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        verify_pool(pool_path, cache_path, allow_fake=False)
+    assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. Live Mode Gates & Safety Limits
+# ---------------------------------------------------------------------------
+
+def test_live_mode_refuses_without_confirm_and_without_key(tmp_path: Path) -> None:
+    """Verify live mode refusal without --confirm and without DEEPSEEK_API_KEY."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+
+    # Without --confirm
+    res1 = subprocess.run(
+        [sys.executable, script, "--live"],
+        capture_output=True,
+        text=True,
+    )
+    assert res1.returncode == 1
+    assert "confirm" in res1.stderr
+
+    # With --confirm but missing API key
+    env = dict(os.environ)
+    env.pop("DEEPSEEK_API_KEY", None)
+    res2 = subprocess.run(
+        [sys.executable, script, "--live", "--confirm", "--allow-peak"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert res2.returncode == 1
+    assert "DEEPSEEK_API_KEY" in res2.stderr
+    assert "Traceback" not in res2.stderr
+
+
+def test_offline_fake_refuses_default_output_path() -> None:
+    """Verify offline-fake refuses to overwrite default tracked path data/synthetic/cs_concept_names.json."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+
+    res = subprocess.run(
+        [sys.executable, script, "--offline-fake"],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 1
+    assert "default tracked path" in res.stderr
+
+
+def test_max_calls_stops_loop(tmp_path: Path) -> None:
+    """Verify that --max-calls cleanly stops the generation loop."""
+    pool_path = tmp_path / "pool.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    ret = run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="cap_test",
+        target_names=5000,
+        max_calls=5,
+    )
+    assert ret == 0
+    cache = load_completed_cache(cache_path)
+    assert len(cache) == 5
+
+
+# ---------------------------------------------------------------------------
+# 8. Build-Only and Dry-Run CLI Subcommands
+# ---------------------------------------------------------------------------
+
+def test_build_only_cli_execution(tmp_path: Path) -> None:
+    """Verify --build-only subcommand loads cache and validates output UNCHANGED."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+    pool_path = tmp_path / "pool.json"
+    rebuilt_path = tmp_path / "rebuilt.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    # Generate initial cache
+    run_generation_loop(
+        mode="offline-fake",
+        output_path=pool_path,
+        cache_path=cache_path,
+        run_id="bo_test",
+        target_names=2600,
+        max_calls=400,
+    )
+
+    # Rebuild
+    res = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--build-only",
+            "--cache-file",
+            str(cache_path),
+            "--output",
+            str(rebuilt_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0
+    assert "verified UNCHANGED" in res.stdout
+    assert rebuilt_path.exists()
+
+
+def test_dry_run_cli_execution() -> None:
+    """Verify --dry-run prints plan and cost estimate without creating files."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+
+    res = subprocess.run(
+        [sys.executable, script, "--dry-run"],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0
+    assert "Dry run complete" in res.stdout
+    assert "Estimated round 1 cost" in res.stdout
