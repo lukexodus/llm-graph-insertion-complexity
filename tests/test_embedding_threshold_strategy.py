@@ -856,6 +856,123 @@ class TestValidationAndContracts:
         assert strat2._mat.shape[0] == 64, "Should have doubled to 64"
 
 
+    def test_setup_clears_cache_across_setups(self):
+        """Test V-E: clearing cache across setups kills _cached_new_name / _cached_new_vec mutants."""
+        embedder = ControllableEmbedder(dim=8, seed=42)
+        strat = EmbeddingThresholdStrategy(theta=0.6)
+        
+        # Setup on graph 1
+        graph1 = ConceptGraph(domain_context="cs")
+        graph1.add_node("node_a")
+        strat.setup(graph1, embedder)
+        
+        # Shortlist caches a new vector
+        strat.shortlist("probe")
+        
+        # Second setup on graph 2
+        graph2 = ConceptGraph(domain_context="cs")
+        graph2.add_node("node_b")
+        strat.setup(graph2, embedder)
+        
+        # Calling on_inserted for "probe" should raise RuntimeError because the cache was cleared
+        with pytest.raises(RuntimeError, match="without matching prior shortlist"):
+            strat.on_inserted("probe", ())
+
+    def test_diagnostics_right_after_second_setup(self):
+        """Test V-E: checking diagnostics after setup kills _shortlist_called / _last_* mutants."""
+        embedder = ControllableEmbedder(dim=8, seed=42)
+        strat = EmbeddingThresholdStrategy(theta=0.6)
+        
+        graph1 = ConceptGraph(domain_context="cs")
+        graph1.add_node("node_a")
+        strat.setup(graph1, embedder)
+        
+        strat.shortlist("probe")
+        
+        graph2 = ConceptGraph(domain_context="cs")
+        graph2.add_node("node_b")
+        graph2.add_node("node_c")
+        strat.setup(graph2, embedder)
+        
+        d = strat.diagnostics()
+        assert d["cosine_comparisons"] == 0
+        assert d["shortlist_size"] == 0
+        assert d["max_cosine"] is None
+        assert d["index_size"] == 2
+
+    def test_dimension_reset(self):
+        """Test V-E: dimension reset across setups kills _dim mutant."""
+        strat = EmbeddingThresholdStrategy(theta=0.6)
+        
+        graph16 = ConceptGraph(domain_context="cs")
+        graph16.add_node("node_a")
+        strat.setup(graph16, ControllableEmbedder(dim=16, seed=42))
+        
+        graph_empty = ConceptGraph(domain_context="cs")
+        strat.setup(graph_empty, ControllableEmbedder(dim=32, seed=42))
+        
+        # Shortlist with 32-dim embedder works and sets _dim = 32
+        strat.shortlist("probe")
+        assert strat._dim == 32
+
+    def test_name_index_reset(self):
+        """Test V-E: name and index reset across setups kills _names / _name_to_idx mutants."""
+        strat = EmbeddingThresholdStrategy(theta=0.6)
+        
+        graph1 = ConceptGraph(domain_context="cs")
+        graph1.add_node("node_a")
+        strat.setup(graph1, ControllableEmbedder(dim=8, seed=42))
+        
+        graph_empty = ConceptGraph(domain_context="cs")
+        strat.setup(graph_empty, ControllableEmbedder(dim=8, seed=42))
+        
+        strat.shortlist("node_a")
+        # should succeed without Duplicate name error
+        strat.on_inserted("node_a", ())
+        assert "node_a" in strat._name_to_idx
+
+    def test_third_setup_recovery(self):
+        """Test V-E: successful setup, failed setup, successful third setup works correctly."""
+        embedder_good = ControllableEmbedder(dim=8, seed=42)
+        
+        class BadEmbedder(ControllableEmbedder):
+            def embed_many(self, texts):
+                raise ValueError("Simulated failure")
+                
+        strat = EmbeddingThresholdStrategy(theta=0.6)
+        
+        # 1. Successful setup
+        graph1 = ConceptGraph(domain_context="cs")
+        graph1.add_node("node_1a")
+        graph1.add_node("node_1b")
+        strat.setup(graph1, embedder_good)
+        
+        # 2. Failed setup
+        graph2 = ConceptGraph(domain_context="cs")
+        graph2.add_node("node_2")
+        with pytest.raises(ValueError, match="Simulated failure"):
+            strat.setup(graph2, BadEmbedder(dim=8, seed=42))
+            
+        # 3. Successful third setup
+        graph3 = ConceptGraph(domain_context="cs")
+        graph3.add_node("node_3a")
+        graph3.add_node("node_3b")
+        graph3.add_node("node_3c")
+        strat.setup(graph3, embedder_good)
+        
+        # Verify shortlist candidates come only from graph 3
+        res = strat.shortlist("probe")
+        assert all(c.startswith("node_3") for c in res.candidates)
+        
+        # Verify index size and on_inserted
+        d = strat.diagnostics()
+        assert d["index_size"] == 3
+        
+        strat.on_inserted("probe", ())
+        d2 = strat.diagnostics()
+        assert d2["index_size"] == 4
+
+
 # ===========================================================================
 # 6. Harness Smoke Test
 # ===========================================================================
