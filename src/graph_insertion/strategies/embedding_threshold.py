@@ -31,8 +31,12 @@ Key semantics & design choices:
   - Vectorised computation: Uses a single matrix-vector product (mat[:n] @ q)
     rather than a Python loop over n, keeping shortlist computation fast.
   - Amortised O(d) insertion update: Internal matrix buffer grows via capacity
-    doubling, avoiding O(n * d) vstack copies on every insertion which would
-    pollute the update_s timing curve (D-25).
+    doubling, starting with capacity `max(16, 2n)` after `setup()` on a graph of
+    n nodes. This ensures the first timed `on_inserted()` call (in the sweep
+    harness, which performs exactly one insertion per trial after setup) never
+    reallocates, and subsequent insertions trigger O(n·d) reallocation only at
+    powers of two, achieving amortised O(d) cost per insertion without polluting
+    the timed `update_s` metric (D-25).
   - Ordering: Candidates sorted by (-score, name) descending by cosine, ties
     broken by concept name ascending.
   - Zero-candidate shortlists: Expected when no concept exceeds theta (e.g. with
@@ -103,6 +107,7 @@ class EmbeddingThresholdStrategy:
         """Initialise strategy state and index initial graph nodes.
 
         Untimed preparation per [D-25]. Calling setup() twice resets all state.
+        A failed setup() leaves the strategy in the not-set-up state.
 
         Parameters
         ----------
@@ -111,8 +116,9 @@ class EmbeddingThresholdStrategy:
         embedder:
             Injected Embedder instance. Retained by identity as self._embedder.
         """
-        self._embedder = embedder
-        self._setup_called = True
+        # Clear state immediately (all-or-nothing semantics per F-3)
+        self._setup_called = False
+        self._embedder = None
         self._shortlist_called = False
 
         self._cached_new_name = None
@@ -121,15 +127,19 @@ class EmbeddingThresholdStrategy:
         self._last_shortlist_size = 0
         self._last_max_cosine = None
 
+        self._dim = None
+        self._mat = None
+        self._names = []
+        self._name_to_idx = {}
+        self._n = 0
+
         nodes = sorted(graph.nodes())
         n = len(nodes)
 
         if n == 0:
-            self._dim = None
-            self._mat = None
-            self._names = []
-            self._name_to_idx = {}
-            self._n = 0
+            # Set success flags only after validation passes
+            self._embedder = embedder
+            self._setup_called = True
             return
 
         texts = [embed_text(node) for node in nodes]
@@ -152,17 +162,26 @@ class EmbeddingThresholdStrategy:
 
         normed_mat = (raw_mat / norms[:, np.newaxis]).astype(np.float32)
 
-        capacity = max(16, n)
+        capacity = max(16, 2 * n)
         self._mat = np.zeros((capacity, dim), dtype=np.float32)
         self._mat[:n] = normed_mat
         self._names = list(nodes)
         self._name_to_idx = {name: i for i, name in enumerate(nodes)}
         self._n = n
 
+        # Set success flags only after all validation and setup has passed
+        self._embedder = embedder
+        self._setup_called = True
+
     def shortlist(self, new_name: str) -> Shortlist:
         """Produce a shortlist of candidate concepts whose cosine similarity exceeds theta.
 
         Always embeds new_name exactly once, normalises it, and caches it for on_inserted().
+        
+        Note: `max_cosine` in `diagnostics()` is the maximum over the whole index,
+        including new_name's own row if new_name is already indexed. This is unreachable
+        through `insert_node` (which rejects existing names as precondition) but is
+        documented for completeness.
 
         Parameters
         ----------
@@ -221,8 +240,8 @@ class EmbeddingThresholdStrategy:
         self._last_max_cosine = max_cos
         self._last_comparisons = self._n
 
-        # Strict thresholding: score > theta
-        mask = scores > self.theta
+        # Strict thresholding in float64: score > theta
+        mask = scores.astype(np.float64) > self.theta
         qualifying_indices = np.where(mask)[0]
 
         candidates_with_scores: list[tuple[float, str]] = []
@@ -290,6 +309,10 @@ class EmbeddingThresholdStrategy:
         """Return operational diagnostics for the most recent insertion trial.
 
         All values use plain Python types (int, float, None) to guarantee JSON serializability.
+        
+        Note: `max_cosine` is the maximum over the whole index, including new_name's
+        own row if new_name is already indexed (would be 1.0 in such cases). This is
+        unreachable through `insert_node` but documented for completeness.
         """
         return {
             "cosine_comparisons": int(self._last_comparisons),
