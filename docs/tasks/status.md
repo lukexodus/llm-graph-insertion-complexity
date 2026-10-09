@@ -45,7 +45,7 @@ Status: **open** (unblocked following Phase 1 completion; four parallel tracks r
 | ID        | Task                                       | Status | Notes                                                                          |
 | --------- | ------------------------------------------ | ------ | ------------------------------------------------------------------------------ |
 | STRAT-001 | Implement Strategy 1 (brute-force)         | **needs-review** | Implemented by Gemini; reviewer to be assigned by APC. See report [`docs/reports/STRAT-001-gemini-brute-force.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/STRAT-001-gemini-brute-force.md). |
-| STRAT-002 | Implement Strategy 2 (embedding-threshold) | open   | —                                                                              |
+| STRAT-002 | Implement Strategy 2 (embedding-threshold) | **needs-review** | Implemented by Gemini; reviewer to be assigned by APC; adds shared tests/controllable_embedder.py. See report [`docs/reports/STRAT-002-gemini-embedding-threshold.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/STRAT-002-gemini-embedding-threshold.md). |
 | STRAT-003 | Implement Strategy 3 (ANN retrieval)       | open   | —                                                                              |
 | STRAT-004 | Implement Strategy 4 (bounded-bucket)      | open   | Most conceptually involved — recommend close review per `high-level-tasks.md`. |
 
