@@ -72,6 +72,7 @@ mostly-unchanged text.
 
 ## Before starting any task
 
+0. If you will run alongside another task, follow 'Parallel work and worktrees' first.
 1. Read `docs/context/complete-context.md` if you haven't already this
    session.
 2. Check `docs/tasks/status.md` for the current state of all tasks — don't
@@ -87,6 +88,21 @@ mostly-unchanged text.
    cover (e.g., picking a graph library, picking a threshold value), make
    the choice, then add an entry to the decision log yourself before you
    finish — don't leave it for someone else to infer from your code.
+5. Use `scripts/apc-bundle.sh --discover` if you need to find which files
+   define core symbols (`Shortlist`, `ConceptGraph`, `MeteredEmbedder`,
+   etc.). See `scripts/README.md` for bundle profiles and usage.
+
+## Parallel work and worktrees
+
+1. **Check status:** Run `git worktree list` and `git status --short`. If another task is in progress in this checkout, or the working tree is dirty with files you did not create, do not start in the main checkout.
+2. **Dedicated task worktrees:** Any task that runs at the same time as another task must use its own worktree: `git worktree add ../<repo-name>-<TASK-ID> -b task/<TASK-ID>` from the main checkout. Use the task ID exactly as in `docs/tasks/status.md`. Do not reuse a worktree across tasks.
+3. **Shared doc editing:** Only one agent may edit a given shared doc (`docs/tasks/status.md`, `docs/decisions/decision-log.md`, `AGENTS.md`, `docs/context/*.md`) at a time. In a worktree, edit only your own rows and your own appended decision entries, and re-read the file immediately before writing (see "Before editing a shared doc").
+4. **Reserved decision IDs:** Decision IDs are reserved per task by the APC, not chosen by the agent. If a reserved ID is already used in the file, stop and report the conflict; do not renumber.
+5. **Verbatim diffs:** Diffs pasted into a report must come from `git diff` run in the worktree that made the change, and must include the index lines. Never retype a diff (see "Reporting changes efficiently").
+6. **Handoff upon completion:** When the task is finished: do not merge, rebase, or delete the worktree yourself. Leave the branch and worktree for Luke, and state the branch name and the worktree path in the report.
+7. **Protected operations:** Never run `git worktree remove`, `git clean`, `git reset --hard`, `git checkout --` or `git stash` in a worktree you did not create in this session, or in the main checkout without Luke's instruction.
+8. **Shared `.git` safety:** Worktrees share the `.git` directory. Never commit a file that exists only in a worktree's untracked state without listing it in the report.
+9. **Clean live runs:** Before any live API run, check `git worktree list` and confirm that the run uses a clean worktree at the commit the report names.
 
 ## While working
 
