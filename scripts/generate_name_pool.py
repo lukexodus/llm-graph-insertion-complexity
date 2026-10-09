@@ -20,8 +20,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -63,6 +65,7 @@ DEFAULT_SEED = 42
 TARGET_NAMES_DEFAULT = 2600
 MIN_REQUIRED_NAMES_FOR_VALIDATION = 2001
 MAX_CALLS_DEFAULT = 400
+COMMAND_BACKEND_SECONDS_PER_CALL = 40.0
 
 # Estimated token consumption per generation call
 EST_INPUT_TOKENS_PER_CALL = 250
@@ -167,6 +170,110 @@ SYSTEM_PROMPT = (
     "5. Do NOT include file extensions (never end in '.txt').\n"
     "6. Focus on distinct, canonical foundational concepts."
 )
+
+
+# ===========================================================================
+# Sharding and Locking Helpers
+# ===========================================================================
+
+def parse_shard_arg(shard_str: Optional[str]) -> tuple[int, int]:
+    """Parse and validate '--shard I/N' string into 1-based (I, N).
+
+    Defaults to (1, 1) if shard_str is None or empty.
+    Raises ValueError if format is invalid or out of range (1 <= I <= N, N >= 1).
+    """
+    if not shard_str:
+        return (1, 1)
+    m = re.match(r"^(\d+)/(\d+)$", shard_str.strip())
+    if not m:
+        raise ValueError(f"Invalid --shard argument '{shard_str}'. Expected format 'I/N' (e.g. '1/3').")
+    i = int(m.group(1))
+    n = int(m.group(2))
+    if n < 1:
+        raise ValueError(f"Invalid shard count N={n}. Must satisfy N >= 1.")
+    if not (1 <= i <= n):
+        raise ValueError(f"Invalid shard index I={i} for N={n}. Must satisfy 1 <= I <= N.")
+    return (i, n)
+
+
+def get_shard_subfields(i: int, n: int) -> list[tuple[int, str]]:
+    """Return list of (global_index, subfield_name) owned by shard I/N.
+
+    The shard owns subfields whose global index in SUBFIELDS satisfies index % N == I - 1.
+    """
+    return [(idx, sf) for idx, sf in enumerate(SUBFIELDS) if idx % n == (i - 1)]
+
+
+def slugify_profile(profile: str) -> str:
+    """Derive a filesystem-safe lock slug from a profile string."""
+    s = re.sub(r"[^a-zA-Z0-9_\-]+", "_", profile.strip()).strip("_").lower()
+    return s or "default"
+
+
+class ShardLockManager:
+    """Manages exclusive non-blocking file locks for a generation session.
+
+    Holds exclusive non-blocking locks on:
+      1. results/datagen/<run_id>/.lock
+      2. results/datagen/.locks/<profile-slug>.lock (if adapter_profile is given)
+    Exits with code 1 and a clear error message (no traceback) if either lock is held.
+    """
+
+    def __init__(self, run_id: str, adapter_profile: Optional[str] = None) -> None:
+        self.run_id = run_id
+        self.adapter_profile = adapter_profile
+        self._lock_fds: list[tuple[Path, int]] = []
+
+    def __enter__(self) -> ShardLockManager:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+    def _lock_file(self, lock_path: Path, label: str) -> None:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o664)
+        except OSError as exc:
+            print(f"ERROR: Failed to open lock file {lock_path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            print(
+                f"ERROR: Could not acquire exclusive lock on {lock_path} ({label} is locked by another process).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        self._lock_fds.append((lock_path, fd))
+
+    def acquire(self) -> None:
+        run_lock = Path(f"results/datagen/{self.run_id}/.lock")
+        self._lock_file(run_lock, f"run_id '{self.run_id}'")
+
+        if self.adapter_profile:
+            slug = slugify_profile(self.adapter_profile)
+            prof_lock = Path(f"results/datagen/.locks/{slug}.lock")
+            self._lock_file(prof_lock, f"profile '{self.adapter_profile}'")
+
+    def release(self) -> None:
+        for path, fd in reversed(self._lock_fds):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._lock_fds.clear()
 
 
 # ===========================================================================
@@ -282,6 +389,7 @@ class CacheEntry:
     backend: str = "deepseek"
     prompt_version: str = "np1"
     backend_meta: Optional[dict[str, Any]] = None
+    shard: Optional[str] = None
 
 
 def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
@@ -358,6 +466,7 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
                 backend=backend_val,
                 prompt_version=prompt_version_val,
                 backend_meta=record.get("backend_meta"),
+                shard=record.get("shard"),
             )
             completed[(int(r), str(sf))] = entry
     return completed
@@ -383,6 +492,8 @@ def append_cache_record(cache_path: Path, entry: CacheEntry) -> None:
     }
     if entry.backend_meta is not None:
         record["backend_meta"] = entry.backend_meta
+    if entry.shard is not None:
+        record["shard"] = entry.shard
     with open(cache_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -527,7 +638,7 @@ def validate_and_dedupe_candidates(
 # ===========================================================================
 
 def build_pool_from_cache(
-    cache_path: Path,
+    cache_path: Path | Sequence[Path],
     output_path: Path,
     *,
     generator_kind: str,
@@ -535,8 +646,201 @@ def build_pool_from_cache(
     seed: int = DEFAULT_SEED,
     run_ids: Optional[list[str]] = None,
     allow_fake: bool = False,
+    is_merged: bool = False,
+    min_required_names: int = MIN_REQUIRED_NAMES_FOR_VALIDATION,
 ) -> dict[str, Any]:
-    """Build the final name pool deterministically from raw_responses.jsonl cache."""
+    """Build the final name pool deterministically from raw_responses.jsonl cache(s)."""
+    if is_merged or isinstance(cache_path, (list, tuple)):
+        cache_paths = [cache_path] if isinstance(cache_path, Path) else list(cache_path)
+        all_rids = list(run_ids or [p.parent.name for p in cache_paths])
+
+        # 1. Duplicate check across multiple caches (Addendum item 1)
+        pair_to_run_ids: dict[tuple[int, str], list[str]] = {}
+        for p, rid in zip(cache_paths, all_rids):
+            if not p.exists():
+                raise FileNotFoundError(f"Cache file not found: {p}")
+            cdict = load_completed_cache(p)
+            for pair in cdict.keys():
+                pair_to_run_ids.setdefault(pair, []).append(rid)
+
+        duplicate_pairs = {pair: rids for pair, rids in pair_to_run_ids.items() if len(rids) > 1}
+        if duplicate_pairs:
+            dup_details = []
+            all_involved_rids: set[str] = set()
+            for (r, sf), rids in sorted(duplicate_pairs.items()):
+                dup_details.append(f"(round {r}, subfield '{sf}'): in runs {rids}")
+                all_involved_rids.update(rids)
+            print(
+                f"ERROR: Duplicate parseable responses found across merged caches:\n  "
+                + "\n  ".join(dup_details)
+                + f"\nInvolved run IDs: {sorted(all_involved_rids)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # 2. Consistency check across shards (mixed backends / prompt versions)
+        first_backend: Optional[str] = None
+        first_prompt_version: Optional[str] = None
+        all_entries: list[CacheEntry] = []
+        shard_infos: list[dict[str, Any]] = []
+
+        for p, rid in zip(cache_paths, all_rids):
+            cdict = load_completed_cache(p)
+            if not cdict:
+                raise ValueError(f"No valid parsed responses found in cache: {p}")
+            for entry in cdict.values():
+                if first_backend is None:
+                    first_backend = entry.backend
+                    first_prompt_version = entry.prompt_version
+                else:
+                    if entry.backend != first_backend:
+                        raise ValueError(
+                            f"Cache {p} contains mixed backends: found '{entry.backend}' "
+                            f"and '{first_backend}' in earlier shard."
+                        )
+                    if entry.prompt_version != first_prompt_version:
+                        raise ValueError(
+                            f"Cache {p} contains mixed prompt versions: found '{entry.prompt_version}' "
+                            f"and '{first_prompt_version}' in earlier shard."
+                        )
+                all_entries.append(entry)
+
+            entries = list(cdict.values())
+            call_count = len(entries)
+            shard_label = entries[0].shard if entries and entries[0].shard else f"shard-{rid}"
+            prof = None
+            obs_counts: dict[str, int] = {}
+            t_counts: dict[str, int] = {}
+            ad_vers: set[str] = set()
+
+            for e in entries:
+                if e.backend_meta:
+                    bm = e.backend_meta
+                    if prof is None and "profile_used" in bm:
+                        prof = str(bm["profile_used"])
+                    obs = bm.get("model_observed") or e.model_id
+                    if obs:
+                        obs_counts[str(obs)] = obs_counts.get(str(obs), 0) + 1
+                    if bm.get("tier") is not None:
+                        t_str = str(bm["tier"])
+                        t_counts[t_str] = t_counts.get(t_str, 0) + 1
+                    ad = bm.get("adapter")
+                    if isinstance(ad, dict) and "version" in ad:
+                        ad_vers.add(str(ad["version"]))
+                elif e.model_id:
+                    obs_counts[e.model_id] = obs_counts.get(e.model_id, 0) + 1
+
+            p_sha = hashlib.sha256(p.read_bytes()).hexdigest()
+            shard_infos.append({
+                "run_id": rid,
+                "shard": shard_label,
+                "profile": prof,
+                "call_count": call_count,
+                "observed_models": obs_counts,
+                "tier_histogram": t_counts,
+                "adapter_versions": sorted(ad_vers),
+                "sha256_raw_responses": p_sha,
+            })
+
+        # Order shards deterministically by (shard label, run_id)
+        shard_infos.sort(key=lambda s: (s["shard"], s["run_id"]))
+
+        corpus_nodes, corpus_embeds, corpora_names = load_benchmark_corpus_concepts()
+        # validate_and_dedupe_candidates sorts entries by (round, subfield_idx)
+        valid_names, n_raw, drop_counts = validate_and_dedupe_candidates(
+            all_entries, corpus_nodes, corpus_embeds
+        )
+
+        # Shortfall check: If merged valid count is below min_required_names, exit non-zero
+        if len(valid_names) < min_required_names:
+            print(
+                f"ERROR: Merged pool contains {len(valid_names)} valid names, which is below --min-required-names "
+                f"({min_required_names}). Rerun shards with a higher --target-names (caches resume).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        shuffled_names = list(valid_names)
+        rng = random.Random(seed)
+        rng.shuffle(shuffled_names)
+
+        sha256_names = hashlib.sha256("\n".join(shuffled_names).encode("utf-8")).hexdigest()
+
+        timestamps = [e.timestamp_utc for e in all_entries if e.timestamp_utc]
+        first_ts = min(timestamps) if timestamps else datetime.now(timezone.utc).isoformat()
+        last_ts = max(timestamps) if timestamps else datetime.now(timezone.utc).isoformat()
+
+        all_observed_models: set[str] = set()
+        for s in shard_infos:
+            all_observed_models.update(s["observed_models"].keys())
+
+        # If more than one distinct model_observed label appears across all calls, print WARNING
+        if len(all_observed_models) > 1:
+            print(
+                f"WARNING: Multiple distinct model_observed labels observed across calls: {sorted(all_observed_models)}",
+                file=sys.stderr,
+            )
+
+        agg_observed: dict[str, int] = {}
+        agg_tiers: dict[str, int] = {}
+        agg_adapter_vers: set[str] = set()
+        for s in shard_infos:
+            for k, v in s["observed_models"].items():
+                agg_observed[k] = agg_observed.get(k, 0) + v
+            for k, v in s["tier_histogram"].items():
+                agg_tiers[k] = agg_tiers.get(k, 0) + v
+            agg_adapter_vers.update(s["adapter_versions"])
+
+        is_command_backend = (first_backend == "command") or (generator_kind == "claude-web-ui-via-prompt-adapter")
+        profiles_used = sorted({s["profile"] for s in shard_infos if s["profile"]})
+        sha256_raw_dict = {s["run_id"]: s["sha256_raw_responses"] for s in shard_infos}
+
+        meta = {
+            "schema_version": SCHEMA_VERSION,
+            "domain": DOMAIN,
+            "generator": "claude-web-ui-via-prompt-adapter" if is_command_backend else (
+                "offline-fake" if allow_fake else generator_kind
+            ),
+            "prompt_version": first_prompt_version or (NAME_POOL_PROMPT_VERSION_COMMAND if is_command_backend else NAME_POOL_PROMPT_VERSION),
+            "requested_model": configured_model,
+            "requested_effort": "low",
+            "requested_memory": False,
+            "requested_web_search": False,
+            "observed_models": agg_observed,
+            "tier_histogram": agg_tiers,
+            "adapter_versions": sorted(agg_adapter_vers),
+            "temperature": None if is_command_backend else 0.7,
+            "max_tokens": None if is_command_backend else 1500,
+            "parameter_note": "Web UI does not expose temperature or max_tokens controls" if is_command_backend else None,
+            "run_ids": sorted(all_rids),
+            "shards": shard_infos,
+            "profiles_used": profiles_used,
+            "first_utc_timestamp": first_ts,
+            "last_utc_timestamp": last_ts,
+            "n_raw": n_raw,
+            "n_valid": len(shuffled_names),
+            "drop_counts": drop_counts,
+            "seed": seed,
+            "sha256_names": sha256_names,
+            "sha256_raw_responses": sha256_raw_dict,
+            "corpora_checked": corpora_names,
+        }
+        if len(all_observed_models) > 1:
+            meta["observed_models_warning"] = True
+            meta["observed_models_set"] = sorted(all_observed_models)
+
+        result = {
+            "meta": meta,
+            "names": shuffled_names,
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return result
+
+    # --- Single-run path (backwards compatible) ---
+    assert isinstance(cache_path, Path)
     if not cache_path.exists():
         raise FileNotFoundError(f"Cache file not found: {cache_path}")
 
@@ -607,7 +911,7 @@ def build_pool_from_cache(
                 if isinstance(ad, dict) and "version" in ad:
                     adapter_vers.add(str(ad["version"]))
 
-        meta: dict[str, Any] = {
+        meta = {
             "schema_version": SCHEMA_VERSION,
             "domain": DOMAIN,
             "generator": "claude-web-ui-via-prompt-adapter",
@@ -654,6 +958,9 @@ def build_pool_from_cache(
             "sha256_raw_responses": sha256_raw,
             "corpora_checked": corpora_names,
         }
+
+    if sample_entry.shard is not None:
+        meta["shard"] = sample_entry.shard
 
     result = {
         "meta": meta,
@@ -998,12 +1305,37 @@ class CommandGenerationBackend(GenerationBackend):
 
             try:
                 proc.wait(timeout=self.sigterm_wait_s)
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+            # Always send a final SIGKILL to the process group (ignore ProcessLookupError)
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+
+            try:
+                proc.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+            # Drain and close the pipes
+            if proc.stdout:
                 try:
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
+                    proc.stdout.read()
+                except Exception:
                     pass
-                proc.wait()
+            if proc.stderr:
+                try:
+                    proc.stderr.read()
+                except Exception:
+                    pass
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
 
             return GenerationResult(
                 text="",
@@ -1120,29 +1452,298 @@ def run_generation_loop(
     adapter_effort: Optional[str] = "low",
     adapter_timeout: int = 300,
     pause_s: float = 3.0,
+    shard: Optional[str] = None,
+    stagger_s: float = 20.0,
 ) -> int:
     """Execute iterative generation across subfields until target_names is reached."""
-    configured_model = resolve_model_alias(model) if backend != "command" else adapter_model
+    # Enforce non-blocking exclusive flocks for the duration of the run
+    with ShardLockManager(run_id=run_id, adapter_profile=adapter_profile):
+        configured_model = resolve_model_alias(model) if backend != "command" else adapter_model
 
-    # Check offline-fake output path restriction
-    if mode == "offline-fake":
-        if output_path.resolve() == DEFAULT_TRACKED_OUTPUT.resolve():
-            print(
-                f"ERROR: --offline-fake cannot write to default tracked path '{DEFAULT_TRACKED_OUTPUT}'. "
-                "Specify an explicit alternate path via --output.",
-                file=sys.stderr,
+        # Check offline-fake output path restriction
+        if mode == "offline-fake":
+            if output_path.resolve() == DEFAULT_TRACKED_OUTPUT.resolve():
+                print(
+                    f"ERROR: --offline-fake cannot write to default tracked path '{DEFAULT_TRACKED_OUTPUT}'. "
+                    "Specify an explicit alternate path via --output.",
+                    file=sys.stderr,
+                )
+                return 1
+
+        shard_i, shard_n = parse_shard_arg(shard)
+        effective_target = math.ceil(target_names / shard_n) if shard_n > 1 else target_names
+        owned_subfields = get_shard_subfields(shard_i, shard_n)
+
+        cache = load_completed_cache(cache_path)
+        corpus_nodes, corpus_embeds, _ = load_benchmark_corpus_concepts()
+
+        # Pre-flight check on existing cache
+        valid_names, _, _ = validate_and_dedupe_candidates(
+            list(cache.values()), corpus_nodes, corpus_embeds
+        )
+        if len(valid_names) >= effective_target:
+            print(f"Cache already contains {len(valid_names)} valid names (target: {effective_target}). Building pool.")
+            gen_kind = (
+                "offline-fake"
+                if mode == "offline-fake"
+                else ("claude-web-ui-via-prompt-adapter" if backend == "command" else "deepseek")
             )
-            return 1
+            build_pool_from_cache(
+                cache_path=cache_path,
+                output_path=output_path,
+                generator_kind=gen_kind,
+                configured_model=configured_model,
+                seed=DEFAULT_SEED,
+                run_ids=[run_id],
+                allow_fake=(mode == "offline-fake"),
+            )
+            return 0
 
-    cache = load_completed_cache(cache_path)
-    corpus_nodes, corpus_embeds, _ = load_benchmark_corpus_concepts()
+        # Backend initialization
+        gen_backend: Optional[GenerationBackend] = None
+        if mode == "live":
+            if backend == "deepseek":
+                api_key = os.environ.get("DEEPSEEK_API_KEY")
+                if not api_key:
+                    print("ERROR: DEEPSEEK_API_KEY environment variable is required for live generation.", file=sys.stderr)
+                    return 1
+                raw_client = DeepSeekClient(
+                    api_key=api_key,
+                    model=configured_model,
+                    temperature=0.7,
+                    max_tokens=1500,
+                )
+                gen_backend = DeepSeekGenerationBackend(MeteredLLMClient(raw_client))
+            elif backend == "command":
+                if not command:
+                    print("ERROR: --command is required for command backend live generation.", file=sys.stderr)
+                    return 1
+                if not adapter_profile:
+                    print("ERROR: --adapter-profile is required for command backend live generation.", file=sys.stderr)
+                    return 1
+                gen_backend = CommandGenerationBackend(
+                    command=command,
+                    profile=adapter_profile,
+                    model=adapter_model,
+                    effort=adapter_effort,
+                    timeout_s=adapter_timeout,
+                )
 
-    # Pre-flight check on existing cache
-    valid_names, _, _ = validate_and_dedupe_candidates(
-        list(cache.values()), corpus_nodes, corpus_embeds
-    )
-    if len(valid_names) >= target_names:
-        print(f"Cache already contains {len(valid_names)} valid names (target: {target_names}). Building pool.")
+        calls_made = 0
+        round_num = 1
+        consecutive_failures = 0
+        system_prompt = build_system_prompt()
+        stagger_delay = (shard_i - 1) * stagger_s if (shard_i > 1 and stagger_s > 0) else 0.0
+        stagger_done = False
+
+        # Track collected names per subfield to pass to round 2+ prompts
+        subfield_collected: dict[str, list[str]] = {sf: [] for sf in SUBFIELDS}
+        for entry in cache.values():
+            subfield_collected[entry.subfield].extend(entry.parsed_names)
+
+        while calls_made < max_calls:
+            # Check planned calls for this round among owned subfields
+            needed_in_round: list[tuple[int, str]] = []
+            for sf_idx, sf in owned_subfields:
+                if (round_num, sf) not in cache:
+                    needed_in_round.append((sf_idx, sf))
+
+            if not needed_in_round:
+                round_num += 1
+                continue
+
+            planned_calls_this_round = min(len(needed_in_round), max_calls - calls_made)
+            now_utc = datetime.now(timezone.utc)
+
+            if backend == "command" and mode == "live":
+                serial_calls = min(len(SUBFIELDS), max_calls)
+                serial_duration = serial_calls * COMMAND_BACKEND_SECONDS_PER_CALL
+                print(f"\n--- Round {round_num} Pre-Flight (Command Backend) ---")
+                print(f"Planned calls:         {planned_calls_this_round}")
+                print(f"Serial duration:       {serial_duration:.1f} s (@ {COMMAND_BACKEND_SECONDS_PER_CALL:.1f}s/call)")
+                if shard is not None:
+                    shard_duration = planned_calls_this_round * COMMAND_BACKEND_SECONDS_PER_CALL
+                    print(f"Per-shard duration:    {shard_duration:.1f} s ({planned_calls_this_round} calls)")
+                print("Reminder:              'Generate memory from chats' must be OFF on target Claude account.")
+            else:
+                est_seconds = planned_calls_this_round * est_seconds_per_call
+                est_cost = (
+                    planned_calls_this_round
+                    * (EST_INPUT_TOKENS_PER_CALL * price_in + EST_OUTPUT_TOKENS_PER_CALL * price_out)
+                    / 1_000_000
+                )
+                peak_status_str = format_peak_status(now_utc)
+                print(f"\n--- Round {round_num} Pre-Flight ---")
+                print(f"Planned calls:         {planned_calls_this_round}")
+                print(f"Estimated duration:    {est_seconds:.1f} s")
+                print(f"Estimated cost:        ${est_cost:.4f} USD")
+                print(f"Peak status:           {peak_status_str}")
+
+                if mode == "live" and backend == "deepseek":
+                    intersects = window_intersects_peak(now_utc, est_seconds)
+                    if intersects and not allow_peak:
+                        print(
+                            "ERROR: Execution window intersects DeepSeek peak pricing hours. "
+                            "Schedule during off-peak window or pass '--allow-peak'.",
+                            file=sys.stderr,
+                        )
+                        return 1
+
+            for sf_idx, sf in needed_in_round:
+                if calls_made >= max_calls:
+                    print(f"Reached --max-calls limit ({max_calls}). Stopping generation.")
+                    break
+
+                # Stagger sleep before first adapter call
+                if not stagger_done:
+                    if stagger_delay > 0:
+                        print(f"Staggering shard {shard_i}/{shard_n}: sleeping {stagger_delay:.1f} s before first call...")
+                        time.sleep(stagger_delay)
+                    stagger_done = True
+
+                user_prompt = build_user_prompt(sf, round_num, subfield_collected[sf])
+
+                if mode == "live":
+                    assert gen_backend is not None
+                    if backend == "command":
+                        res = gen_backend.complete(
+                            subfield=sf,
+                            round_num=round_num,
+                            previous_names=subfield_collected[sf],
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                        )
+                        calls_made += 1
+                        if not res.ok:
+                            if res.error_code == 10:
+                                print(f"Rate limit reached (error 10): {res.error_message}", file=sys.stderr)
+                                if res.reset_time:
+                                    print(f"Reset time: {res.reset_time}", file=sys.stderr)
+                                return 3
+                            elif res.error_code == 11:
+                                print(f"Login/challenge required (error 11): {res.error_message}", file=sys.stderr)
+                                print(
+                                    f"Please log in or clear the challenge in profile '{adapter_profile}' and rerun.",
+                                    file=sys.stderr,
+                                )
+                                return 4
+                            elif res.error_code == 14:
+                                print(f"Model mismatch (error 14): {res.error_message}", file=sys.stderr)
+                                return 5
+                            elif res.error_code == 2:
+                                print(f"Bad request (error 2): {res.error_message}", file=sys.stderr)
+                                return 1
+                            else:
+                                # Error codes 12, 13, 1
+                                print(
+                                    f"Warning: Adapter call failed for ({round_num}, {sf}) [error {res.error_code}]: {res.error_message}",
+                                    file=sys.stderr,
+                                )
+                                consecutive_failures += 1
+                                if consecutive_failures >= 3:
+                                    print("ERROR: 3 consecutive failures encountered. Stopping generation.", file=sys.stderr)
+                                    return 6
+                                if pause_s > 0:
+                                    time.sleep(pause_s)
+                                continue
+                    else:
+                        try:
+                            res = gen_backend.complete(
+                                subfield=sf,
+                                round_num=round_num,
+                                previous_names=subfield_collected[sf],
+                                system_prompt=system_prompt,
+                                user_prompt=user_prompt,
+                            )
+                        except Exception as exc:
+                            print(f"Warning: LLM call failed for ({round_num}, {sf}): {exc}", file=sys.stderr)
+                            calls_made += 1
+                            continue
+                        calls_made += 1
+                else:
+                    resp_text, fake_resp = generate_offline_fake_response(sf, round_num)
+                    calls_made += 1
+                    res = GenerationResult(
+                        text=resp_text,
+                        model_id=fake_resp.model_id,
+                        token_usage={
+                            "input_tokens": fake_resp.input_tokens,
+                            "output_tokens": fake_resp.output_tokens,
+                            "reasoning_tokens": fake_resp.reasoning_tokens,
+                            "cache_hit_tokens": fake_resp.cache_hit_tokens,
+                            "cache_miss_tokens": fake_resp.cache_miss_tokens,
+                        },
+                        latency_s=fake_resp.latency_s,
+                        retries=fake_resp.attempts - 1,
+                        ok=True,
+                    )
+
+                try:
+                    parsed = parse_json_array_response(res.text)
+                except ValueError as err:
+                    print(f"Warning: Failed to parse JSON array from ({round_num}, {sf}): {err}", file=sys.stderr)
+                    parsed = []
+                    if backend == "command" and mode == "live":
+                        consecutive_failures += 1
+                        if consecutive_failures >= 3:
+                            print("ERROR: 3 consecutive failures encountered. Stopping generation.", file=sys.stderr)
+                            return 6
+
+                if parsed:
+                    consecutive_failures = 0
+
+                rec_backend = "deepseek" if mode == "offline-fake" else backend
+                rec_prompt_version = (
+                    NAME_POOL_PROMPT_VERSION_COMMAND if rec_backend == "command" else NAME_POOL_PROMPT_VERSION
+                )
+                shard_label = f"{shard_i}/{shard_n}" if shard is not None else None
+
+                entry = CacheEntry(
+                    round=round_num,
+                    subfield=sf,
+                    subfield_idx=sf_idx,
+                    request_system=system_prompt if rec_backend != "command" else "",
+                    request_user=user_prompt
+                    if rec_backend != "command"
+                    else build_command_prompt(sf, round_num, subfield_collected[sf]),
+                    response_text=res.text,
+                    model_id=res.model_id,
+                    token_usage=res.token_usage,
+                    timestamp_utc=datetime.now(timezone.utc).isoformat(),
+                    retries=res.retries,
+                    latency_s=res.latency_s,
+                    parsed_names=parsed,
+                    backend=rec_backend,
+                    prompt_version=rec_prompt_version,
+                    backend_meta=res.backend_meta,
+                    shard=shard_label,
+                )
+
+                append_cache_record(cache_path, entry)
+                if parsed:
+                    cache[(round_num, sf)] = entry
+                    subfield_collected[sf].extend(parsed)
+
+                # Check valid names accumulated against effective_target
+                valid_names, _, _ = validate_and_dedupe_candidates(
+                    list(cache.values()), corpus_nodes, corpus_embeds
+                )
+                if len(valid_names) >= effective_target:
+                    print(f"Reached target {effective_target} valid names ({len(valid_names)} collected).")
+                    break
+
+                if backend == "command" and mode == "live" and pause_s > 0:
+                    time.sleep(pause_s)
+
+            # Check stopping condition after round
+            valid_names, _, _ = validate_and_dedupe_candidates(
+                list(cache.values()), corpus_nodes, corpus_embeds
+            )
+            if len(valid_names) >= effective_target:
+                break
+            round_num += 1
+
+        print(f"\nGeneration complete. Building final pool into {output_path}...")
         gen_kind = (
             "offline-fake"
             if mode == "offline-fake"
@@ -1158,252 +1759,6 @@ def run_generation_loop(
             allow_fake=(mode == "offline-fake"),
         )
         return 0
-
-    # Backend initialization
-    gen_backend: Optional[GenerationBackend] = None
-    if mode == "live":
-        if backend == "deepseek":
-            api_key = os.environ.get("DEEPSEEK_API_KEY")
-            if not api_key:
-                print("ERROR: DEEPSEEK_API_KEY environment variable is required for live generation.", file=sys.stderr)
-                return 1
-            raw_client = DeepSeekClient(
-                api_key=api_key,
-                model=configured_model,
-                temperature=0.7,
-                max_tokens=1500,
-            )
-            gen_backend = DeepSeekGenerationBackend(MeteredLLMClient(raw_client))
-        elif backend == "command":
-            if not command:
-                print("ERROR: --command is required for command backend live generation.", file=sys.stderr)
-                return 1
-            if not adapter_profile:
-                print("ERROR: --adapter-profile is required for command backend live generation.", file=sys.stderr)
-                return 1
-            gen_backend = CommandGenerationBackend(
-                command=command,
-                profile=adapter_profile,
-                model=adapter_model,
-                effort=adapter_effort,
-                timeout_s=adapter_timeout,
-            )
-
-    calls_made = 0
-    round_num = 1
-    consecutive_failures = 0
-    system_prompt = build_system_prompt()
-
-    # Track collected names per subfield to pass to round 2+ prompts
-    subfield_collected: dict[str, list[str]] = {sf: [] for sf in SUBFIELDS}
-    for entry in cache.values():
-        subfield_collected[entry.subfield].extend(entry.parsed_names)
-
-    while calls_made < max_calls:
-        # Check planned calls for this round
-        needed_in_round: list[tuple[int, str]] = []
-        for sf_idx, sf in enumerate(SUBFIELDS):
-            if (round_num, sf) not in cache:
-                needed_in_round.append((sf_idx, sf))
-
-        if not needed_in_round:
-            round_num += 1
-            continue
-
-        planned_calls_this_round = min(len(needed_in_round), max_calls - calls_made)
-        now_utc = datetime.now(timezone.utc)
-
-        if backend == "command" and mode == "live":
-            est_seconds = planned_calls_this_round * 20.0
-            print(f"\n--- Round {round_num} Pre-Flight (Command Backend) ---")
-            print(f"Planned calls:         {planned_calls_this_round}")
-            print(f"Estimated duration:    {est_seconds:.1f} s (@ 20s/call)")
-            print("Reminder:              'Generate memory from chats' must be OFF on target Claude account.")
-        else:
-            est_seconds = planned_calls_this_round * est_seconds_per_call
-            est_cost = (
-                planned_calls_this_round
-                * (EST_INPUT_TOKENS_PER_CALL * price_in + EST_OUTPUT_TOKENS_PER_CALL * price_out)
-                / 1_000_000
-            )
-            peak_status_str = format_peak_status(now_utc)
-            print(f"\n--- Round {round_num} Pre-Flight ---")
-            print(f"Planned calls:         {planned_calls_this_round}")
-            print(f"Estimated duration:    {est_seconds:.1f} s")
-            print(f"Estimated cost:        ${est_cost:.4f} USD")
-            print(f"Peak status:           {peak_status_str}")
-
-            if mode == "live" and backend == "deepseek":
-                intersects = window_intersects_peak(now_utc, est_seconds)
-                if intersects and not allow_peak:
-                    print(
-                        "ERROR: Execution window intersects DeepSeek peak pricing hours. "
-                        "Schedule during off-peak window or pass '--allow-peak'.",
-                        file=sys.stderr,
-                    )
-                    return 1
-
-        for sf_idx, sf in needed_in_round:
-            if calls_made >= max_calls:
-                print(f"Reached --max-calls limit ({max_calls}). Stopping generation.")
-                break
-
-            user_prompt = build_user_prompt(sf, round_num, subfield_collected[sf])
-
-            if mode == "live":
-                assert gen_backend is not None
-                if backend == "command":
-                    res = gen_backend.complete(
-                        subfield=sf,
-                        round_num=round_num,
-                        previous_names=subfield_collected[sf],
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                    )
-                    calls_made += 1
-                    if not res.ok:
-                        if res.error_code == 10:
-                            print(f"Rate limit reached (error 10): {res.error_message}", file=sys.stderr)
-                            if res.reset_time:
-                                print(f"Reset time: {res.reset_time}", file=sys.stderr)
-                            return 3
-                        elif res.error_code == 11:
-                            print(f"Login/challenge required (error 11): {res.error_message}", file=sys.stderr)
-                            print(
-                                f"Please log in or clear the challenge in profile '{adapter_profile}' and rerun.",
-                                file=sys.stderr,
-                            )
-                            return 4
-                        elif res.error_code == 14:
-                            print(f"Model mismatch (error 14): {res.error_message}", file=sys.stderr)
-                            return 5
-                        elif res.error_code == 2:
-                            print(f"Bad request (error 2): {res.error_message}", file=sys.stderr)
-                            return 1
-                        else:
-                            # Error codes 12, 13, 1
-                            print(
-                                f"Warning: Adapter call failed for ({round_num}, {sf}) [error {res.error_code}]: {res.error_message}",
-                                file=sys.stderr,
-                            )
-                            consecutive_failures += 1
-                            if consecutive_failures >= 3:
-                                print("ERROR: 3 consecutive failures encountered. Stopping generation.", file=sys.stderr)
-                                return 6
-                            if pause_s > 0:
-                                time.sleep(pause_s)
-                            continue
-                else:
-                    try:
-                        res = gen_backend.complete(
-                            subfield=sf,
-                            round_num=round_num,
-                            previous_names=subfield_collected[sf],
-                            system_prompt=system_prompt,
-                            user_prompt=user_prompt,
-                        )
-                    except Exception as exc:
-                        print(f"Warning: LLM call failed for ({round_num}, {sf}): {exc}", file=sys.stderr)
-                        calls_made += 1
-                        continue
-                    calls_made += 1
-            else:
-                resp_text, fake_resp = generate_offline_fake_response(sf, round_num)
-                calls_made += 1
-                res = GenerationResult(
-                    text=resp_text,
-                    model_id=fake_resp.model_id,
-                    token_usage={
-                        "input_tokens": fake_resp.input_tokens,
-                        "output_tokens": fake_resp.output_tokens,
-                        "reasoning_tokens": fake_resp.reasoning_tokens,
-                        "cache_hit_tokens": fake_resp.cache_hit_tokens,
-                        "cache_miss_tokens": fake_resp.cache_miss_tokens,
-                    },
-                    latency_s=fake_resp.latency_s,
-                    retries=fake_resp.attempts - 1,
-                    ok=True,
-                )
-
-            try:
-                parsed = parse_json_array_response(res.text)
-            except ValueError as err:
-                print(f"Warning: Failed to parse JSON array from ({round_num}, {sf}): {err}", file=sys.stderr)
-                parsed = []
-                if backend == "command" and mode == "live":
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3:
-                        print("ERROR: 3 consecutive failures encountered. Stopping generation.", file=sys.stderr)
-                        return 6
-
-            if parsed:
-                consecutive_failures = 0
-
-            rec_backend = "deepseek" if mode == "offline-fake" else backend
-            rec_prompt_version = (
-                NAME_POOL_PROMPT_VERSION_COMMAND if rec_backend == "command" else NAME_POOL_PROMPT_VERSION
-            )
-
-            entry = CacheEntry(
-                round=round_num,
-                subfield=sf,
-                subfield_idx=sf_idx,
-                request_system=system_prompt if rec_backend != "command" else "",
-                request_user=user_prompt
-                if rec_backend != "command"
-                else build_command_prompt(sf, round_num, subfield_collected[sf]),
-                response_text=res.text,
-                model_id=res.model_id,
-                token_usage=res.token_usage,
-                timestamp_utc=datetime.now(timezone.utc).isoformat(),
-                retries=res.retries,
-                latency_s=res.latency_s,
-                parsed_names=parsed,
-                backend=rec_backend,
-                prompt_version=rec_prompt_version,
-                backend_meta=res.backend_meta,
-            )
-
-            append_cache_record(cache_path, entry)
-            if parsed:
-                cache[(round_num, sf)] = entry
-                subfield_collected[sf].extend(parsed)
-
-            # Check valid names accumulated
-            valid_names, _, _ = validate_and_dedupe_candidates(
-                list(cache.values()), corpus_nodes, corpus_embeds
-            )
-            if len(valid_names) >= target_names:
-                print(f"Reached target {target_names} valid names ({len(valid_names)} collected).")
-                break
-
-            if backend == "command" and mode == "live" and pause_s > 0:
-                time.sleep(pause_s)
-
-        # Check stopping condition after round
-        valid_names, _, _ = validate_and_dedupe_candidates(
-            list(cache.values()), corpus_nodes, corpus_embeds
-        )
-        if len(valid_names) >= target_names:
-            break
-        round_num += 1
-
-    print(f"\nGeneration complete. Building final pool into {output_path}...")
-    gen_kind = (
-        "offline-fake"
-        if mode == "offline-fake"
-        else ("claude-web-ui-via-prompt-adapter" if backend == "command" else "deepseek")
-    )
-    build_pool_from_cache(
-        cache_path=cache_path,
-        output_path=output_path,
-        generator_kind=gen_kind,
-        configured_model=configured_model,
-        seed=DEFAULT_SEED,
-        run_ids=[run_id],
-        allow_fake=(mode == "offline-fake"),
-    )
-    return 0
 
 
 # ===========================================================================
@@ -1553,6 +1908,53 @@ def build_parser() -> argparse.ArgumentParser:
         default=3.0,
         help="Pause in seconds between command backend calls (default: 3.0).",
     )
+    parser.add_argument(
+        "--shard",
+        type=str,
+        default=None,
+        help="Shard specification 'I/N' (1-based, 1<=I<=N).",
+    )
+    parser.add_argument(
+        "--stagger-s",
+        type=float,
+        default=20.0,
+        help="Seconds to stagger shard execution before first call (default: 20.0; 0 disables).",
+    )
+    parser.add_argument(
+        "--print-shard-commands",
+        action="store_true",
+        help="Print N ready-to-paste shard commands and exit.",
+    )
+    parser.add_argument(
+        "--shards",
+        type=int,
+        default=None,
+        help="Number of shards for --print-shard-commands.",
+    )
+    parser.add_argument(
+        "--profiles",
+        type=str,
+        default=None,
+        help="Comma-separated browser profiles for --print-shard-commands.",
+    )
+    parser.add_argument(
+        "--run-id-prefix",
+        type=str,
+        default=None,
+        help="Run ID prefix for --print-shard-commands.",
+    )
+    parser.add_argument(
+        "--merge-run-ids",
+        type=str,
+        default=None,
+        help="Comma-separated run IDs to merge in --build-only or --verify.",
+    )
+    parser.add_argument(
+        "--min-required-names",
+        type=int,
+        default=MIN_REQUIRED_NAMES_FOR_VALIDATION,
+        help=f"Minimum required valid names for validation (default: {MIN_REQUIRED_NAMES_FOR_VALIDATION}).",
+    )
     return parser
 
 
@@ -1560,61 +1962,156 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # 1. Print shard commands mode
+    if args.print_shard_commands:
+        if not args.shards or args.shards < 1:
+            print("ERROR: --print-shard-commands requires --shards N with N >= 1.", file=sys.stderr)
+            return 1
+        if not args.profiles:
+            print("ERROR: --print-shard-commands requires --profiles 'A,B,...'.", file=sys.stderr)
+            return 1
+        if not args.run_id_prefix:
+            print("ERROR: --print-shard-commands requires --run-id-prefix PFX.", file=sys.stderr)
+            return 1
+
+        profiles = [p.strip() for p in args.profiles.split(",") if p.strip()]
+        if len(profiles) != args.shards:
+            print(
+                f"ERROR: Profiles count ({len(profiles)}) must equal shards count ({args.shards}).",
+                file=sys.stderr,
+            )
+            return 1
+
+        for i in range(1, args.shards + 1):
+            prof = profiles[i - 1]
+            cmd_parts = [
+                "python3",
+                "scripts/generate_name_pool.py",
+                "--backend",
+                "command",
+            ]
+            if args.command:
+                cmd_parts.extend(["--command", shlex.quote(args.command)])
+            cmd_parts.extend(["--adapter-profile", shlex.quote(prof)])
+            cmd_parts.extend(["--adapter-model", shlex.quote(args.adapter_model)])
+            cmd_parts.extend(["--adapter-effort", shlex.quote(str(args.adapter_effort))])
+            if args.adapter_timeout != 300:
+                cmd_parts.extend(["--adapter-timeout", str(args.adapter_timeout)])
+            if args.pause_s != 3.0:
+                cmd_parts.extend(["--pause-s", str(args.pause_s)])
+            if args.stagger_s != 20.0:
+                cmd_parts.extend(["--stagger-s", str(args.stagger_s)])
+            if args.max_calls != MAX_CALLS_DEFAULT:
+                cmd_parts.extend(["--max-calls", str(args.max_calls)])
+            if args.target_names != TARGET_NAMES_DEFAULT:
+                cmd_parts.extend(["--target-names", str(args.target_names)])
+
+            cmd_parts.extend([
+                "--shard",
+                f"{i}/{args.shards}",
+                "--run-id",
+                f"{args.run_id_prefix}-s{i}of{args.shards}",
+                "--live",
+                "--confirm",
+            ])
+            print(" ".join(cmd_parts))
+        return 0
+
+    # Shard requires explicit run-id
+    if args.shard and not args.run_id:
+        print("ERROR: --shard requires an explicit --run-id.", file=sys.stderr)
+        return 1
+
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
     output_path = Path(args.output)
     cache_path = Path(args.cache_file) if args.cache_file else Path(f"results/datagen/{run_id}/raw_responses.jsonl")
 
     # Verification mode
     if args.verify:
+        merge_rids = [r.strip() for r in args.merge_run_ids.split(",") if r.strip()] if args.merge_run_ids else None
         verify_pool(
             pool_path=output_path,
             cache_path=cache_path if args.cache_file else None,
             allow_fake=args.allow_fake,
+            merge_run_ids=merge_rids,
         )
         return 0
 
     # Build-only mode
     if args.build_only:
-        cache = load_completed_cache(cache_path)
-        sample = next(iter(cache.values())) if cache else None
-        backend_kind = sample.backend if sample else args.backend
-        gen_kind = (
-            "claude-web-ui-via-prompt-adapter"
-            if backend_kind == "command"
-            else "deepseek"
-        )
-        configured_model = (
-            resolve_model_alias(args.model)
-            if backend_kind != "command"
-            else args.adapter_model
-        )
-        print(f"Rebuilding pool from cache: {cache_path} -> {output_path}")
-        built = build_pool_from_cache(
-            cache_path=cache_path,
-            output_path=output_path,
-            generator_kind=gen_kind,
-            configured_model=configured_model,
-            seed=DEFAULT_SEED,
-            run_ids=[run_id],
-            allow_fake=True,
-        )
-        from scripts.run_experiment import load_and_validate_names_file
+        if args.merge_run_ids:
+            merge_rids = [r.strip() for r in args.merge_run_ids.split(",") if r.strip()]
+            if not merge_rids:
+                print("ERROR: --merge-run-ids requires at least one run ID.", file=sys.stderr)
+                return 1
+            cache_paths = [Path(f"results/datagen/{rid}/raw_responses.jsonl") for rid in merge_rids]
+            for cp, rid in zip(cache_paths, merge_rids):
+                if not cp.exists():
+                    print(f"ERROR: Shard cache not found for run_id '{rid}': {cp}", file=sys.stderr)
+                    return 1
 
-        loaded = load_and_validate_names_file(
-            output_path, min_required_names=MIN_REQUIRED_NAMES_FOR_VALIDATION
-        )
-        assert loaded == built["names"], "Loaded names did not match built names UNCHANGED"
-        print(
-            f"Pool rebuilt successfully at {output_path} ({len(loaded)} valid names verified UNCHANGED)."
-        )
-        return 0
+            built = build_pool_from_cache(
+                cache_path=cache_paths,
+                output_path=output_path,
+                generator_kind=args.backend,
+                configured_model=args.adapter_model if args.backend == "command" else resolve_model_alias(args.model),
+                seed=DEFAULT_SEED,
+                run_ids=merge_rids,
+                allow_fake=True,
+                is_merged=True,
+                min_required_names=args.min_required_names,
+            )
+            from scripts.run_experiment import load_and_validate_names_file
+            loaded = load_and_validate_names_file(
+                output_path, min_required_names=args.min_required_names
+            )
+            assert loaded == built["names"], "Loaded names did not match built names UNCHANGED"
+            print(
+                f"Merged pool rebuilt successfully at {output_path} ({len(loaded)} valid names verified UNCHANGED)."
+            )
+            return 0
+        else:
+            cache = load_completed_cache(cache_path)
+            sample = next(iter(cache.values())) if cache else None
+            backend_kind = sample.backend if sample else args.backend
+            gen_kind = (
+                "claude-web-ui-via-prompt-adapter"
+                if backend_kind == "command"
+                else "deepseek"
+            )
+            configured_model = (
+                resolve_model_alias(args.model)
+                if backend_kind != "command"
+                else args.adapter_model
+            )
+            print(f"Rebuilding pool from cache: {cache_path} -> {output_path}")
+            built = build_pool_from_cache(
+                cache_path=cache_path,
+                output_path=output_path,
+                generator_kind=gen_kind,
+                configured_model=configured_model,
+                seed=DEFAULT_SEED,
+                run_ids=[run_id],
+                allow_fake=True,
+                min_required_names=args.min_required_names,
+            )
+            from scripts.run_experiment import load_and_validate_names_file
+
+            loaded = load_and_validate_names_file(
+                output_path, min_required_names=args.min_required_names
+            )
+            assert loaded == built["names"], "Loaded names did not match built names UNCHANGED"
+            print(
+                f"Pool rebuilt successfully at {output_path} ({len(loaded)} valid names verified UNCHANGED)."
+            )
+            return 0
 
     # Dry-run mode
     if args.dry_run:
         now_utc = datetime.now(timezone.utc)
         if args.backend == "command":
             planned = min(len(SUBFIELDS), args.max_calls)
-            est_duration = planned * 20.0
+            serial_duration = planned * COMMAND_BACKEND_SECONDS_PER_CALL
             print("=== DATA-005 Concept Name Pool Generator Plan (Dry Run - Command Backend) ===")
             print(f"Subfields count:       {len(SUBFIELDS)}")
             print(f"Target valid names:    {args.target_names}")
@@ -1625,7 +2122,13 @@ def main() -> int:
             print(f"Command string:        {args.command or '[not set]'}")
             print(f"Adapter profile:       {args.adapter_profile or '[not set]'}")
             print(f"Adapter model:         {args.adapter_model}")
-            print(f"Estimated duration:    {est_duration:.1f} s (@ 20s/call)")
+            print(f"Serial duration:       {serial_duration:.1f} s (@ {COMMAND_BACKEND_SECONDS_PER_CALL:.1f}s/call)")
+            if args.shard:
+                shard_i, shard_n = parse_shard_arg(args.shard)
+                shard_subfields_count = len(get_shard_subfields(shard_i, shard_n))
+                shard_calls = min(shard_subfields_count, args.max_calls)
+                shard_duration = shard_calls * COMMAND_BACKEND_SECONDS_PER_CALL
+                print(f"Per-shard duration:    {shard_duration:.1f} s ({shard_calls} calls)")
             print("Reminder:              'Generate memory from chats' must be OFF on target Claude account.")
         else:
             est_cost = (
@@ -1683,6 +2186,8 @@ def main() -> int:
         adapter_effort=args.adapter_effort,
         adapter_timeout=args.adapter_timeout,
         pause_s=args.pause_s,
+        shard=args.shard,
+        stagger_s=args.stagger_s,
     )
 
 

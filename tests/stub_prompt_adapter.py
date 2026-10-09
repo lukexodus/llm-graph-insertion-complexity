@@ -120,7 +120,7 @@ def main() -> int:
         out = {
             "ok": False,
             "error": "rate_limit",
-            "message": "You have reached your usage limit for Claude 3.5 Sonnet.",
+            "message": "You have reached your usage limit for Sonnet 5.5 Low.",
             "reset_time": "2026-10-07T23:00:00Z",
         }
         print(json.dumps(out))
@@ -140,7 +140,7 @@ def main() -> int:
         out = {
             "ok": False,
             "error": "model_mismatch",
-            "message": "Model mismatch: requested 'sonnet' but observed 'Claude 3 Haiku' in UI.",
+            "message": "Model mismatch: requested 'sonnet' but observed 'Sonnet 5.5 Low' in UI.",
             "reset_time": None,
         }
         print(json.dumps(out))
@@ -211,7 +211,7 @@ def main() -> int:
             "text": "I am sorry, but as an AI assistant I will explain concepts rather than listing JSON arrays.",
             "tier": 1,
             "model_requested": model_req,
-            "model_observed": "Claude 3.5 Sonnet",
+            "model_observed": "Sonnet 5.5 Low",
             "effort_requested": effort_req,
             "memory_requested": False,
             "web_search_requested": False,
@@ -234,7 +234,7 @@ def main() -> int:
             "text": text_payload,
             "tier": 1,
             "model_requested": model_req,
-            "model_observed": "Claude 3.5 Sonnet",
+            "model_observed": "Sonnet 5.5 Low",
             "effort_requested": effort_req,
             "memory_requested": False,
             "web_search_requested": False,
@@ -251,7 +251,7 @@ def main() -> int:
         "text": json.dumps(names),
         "tier": 1,
         "model_requested": model_req,
-        "model_observed": "Claude 3.5 Sonnet",
+        "model_observed": "Sonnet 5.5 Low",
         "effort_requested": effort_req,
         "memory_requested": False,
         "web_search_requested": False,

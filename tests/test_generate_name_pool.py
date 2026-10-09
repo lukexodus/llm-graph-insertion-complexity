@@ -608,7 +608,7 @@ def test_command_backend_dry_run() -> None:
     )
     assert res.returncode == 0
     assert "Command Backend" in res.stdout
-    assert "@ 20s/call" in res.stdout
+    assert "@ 40.0s/call" in res.stdout
     assert "Generate memory from chats" in res.stdout
 
 
@@ -660,7 +660,7 @@ def test_command_backend_success_e2e(tmp_path: Path) -> None:
     assert meta["requested_effort"] == "low"
     assert meta["requested_memory"] is False
     assert meta["requested_web_search"] is False
-    assert "Claude 3.5 Sonnet" in meta["observed_models"]
+    assert "Sonnet 5.5 Low" in meta["observed_models"]
     assert "1" in meta["tier_histogram"]
     assert "1.0.0" in meta["adapter_versions"]
     assert meta["temperature"] is None
@@ -1009,7 +1009,7 @@ def test_contract_doc_fixtures_subprocess_execution(tmp_path: Path) -> None:
                 user_prompt="",
             )
             assert res.ok is True
-            assert res.model_id == "Claude 3.5 Sonnet"
+            assert res.model_id == "Sonnet 5.5 Low"
             concepts = parse_json_array_response(res.text)
             assert len(concepts) == 4
             assert "binary_search" in concepts

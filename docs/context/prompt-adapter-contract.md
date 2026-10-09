@@ -48,6 +48,8 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 }
 ```
 
+Note: Unknown additive fields (e.g., `profile_used`) may be present in responses and must be tolerated by callers.
+
 #### Failure Response
 
 ```json
@@ -80,7 +82,7 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 
 ```json
 {
-  "prompt": "You are a computer science curriculum expert. List 40 distinct core concept names in algorithms as a JSON array of lowercase snake_case strings.",
+  "prompt": "You are a computer science curriculum expert. When prompted with a computer science subfield, generate a JSON array of core concept names taught in undergraduate and graduate courses in that subfield.\nRules:\n1. Return ONLY a valid JSON array of strings: [\"concept_one\", \"concept_two\", ...].\n2. No conversational text, no Markdown code fences, no descriptions, and no numbers.\n3. Each concept name must be lowercase snake_case (e.g. 'binary_search_tree', 'page_table').\n4. Each concept name must be 1 to 4 words long.\n5. Do NOT include file extensions (never end in '.txt').\n6. Focus on distinct, canonical foundational concepts.\n\nList 40 distinct, specific core concept names taught in a computer science curriculum for the subfield 'algorithms'.\nOutput must be a valid JSON array of 40 lowercase snake_case strings (1-4 words each, no file extensions, concept names only).",
   "profile": "research-profile",
   "model": "sonnet",
   "effort": "low",
@@ -99,17 +101,18 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 ```json
 {
   "ok": true,
-  "text": "[\"binary_search\", \"breadth_first_search\", \"depth_first_search\", \"dijkstra_algorithm\"]",
-  "tier": 1,
+  "text": "[\"binary_search\", \"merge_sort\", \"quick_sort\", \"heap_sort\"]",
+  "tier": 2,
   "model_requested": "sonnet",
-  "model_observed": "Claude 3.5 Sonnet",
+  "model_observed": "Sonnet 5.5 Low",
   "effort_requested": "low",
   "memory_requested": false,
   "web_search_requested": false,
-  "elapsed_s": 14.82,
+  "profile_used": "Profile 24",
+  "elapsed_s": 35.91,
   "adapter": {
     "name": "prompt-adapter",
-    "version": "1.0.0"
+    "version": "a4f117c-dirty"
   }
 }
 ```
@@ -120,7 +123,7 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 {
   "ok": false,
   "error": "rate_limit",
-  "message": "You have reached your usage limit for Claude 3.5 Sonnet.",
+  "message": "You have reached your usage limit for Sonnet 5.5 Low.",
   "reset_time": "2026-10-07T23:00:00Z"
 }
 ```
@@ -142,7 +145,7 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 {
   "ok": false,
   "error": "model_mismatch",
-  "message": "Model mismatch: requested 'sonnet' but observed 'Claude 3 Haiku' in UI.",
+  "message": "Model mismatch: requested 'sonnet' but observed 'Sonnet 5.5 Low' in UI.",
   "reset_time": null
 }
 ```

@@ -12,5 +12,8 @@ __pycache__/
 
 *.patch
 patch/
+*.tar.gz
 *.egg-info/
 .env
+
+results/datagen/
