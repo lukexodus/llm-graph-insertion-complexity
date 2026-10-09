@@ -11,6 +11,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import time
 
@@ -35,6 +36,23 @@ def main() -> int:
         default=2,
         help="Number of successful calls before triggering rate limit.",
     )
+    parser.add_argument(
+        "--child-pid-file",
+        type=str,
+        default=None,
+        help="Path to write child process PID to when testing process groups.",
+    )
+    parser.add_argument(
+        "--hang-seconds",
+        type=float,
+        default=15.0,
+        help="Seconds to sleep in hang scenario.",
+    )
+    parser.add_argument(
+        "--spawn-child",
+        action="store_true",
+        help="Spawn a child process that also hangs.",
+    )
     args = parser.parse_args()
 
     # Read stdin
@@ -44,7 +62,7 @@ def main() -> int:
     except Exception:
         out = {
             "ok": False,
-            "error": 2,
+            "error": "bad_request",
             "message": "Invalid JSON on stdin",
             "reset_time": None,
         }
@@ -64,13 +82,16 @@ def main() -> int:
         subfield = m.group(1).replace(" ", "_")
 
     if scenario == "hang":
-        # Sleep long enough to trigger timeout in test
-        time.sleep(15)
+        if args.spawn_child:
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            if args.child_pid_file:
+                Path(args.child_pid_file).write_text(str(child.pid), encoding="utf-8")
+        time.sleep(args.hang_seconds)
         return 0
 
     if scenario == "garbage":
         print("CRITICAL: [fatal] Process crashed! Non-JSON garbage on stdout.")
-        return 0
+        return 1
 
     if scenario == "rate_limit_after_n":
         state_file = Path(args.state_file) if args.state_file else Path("stub_state.json")
@@ -84,7 +105,7 @@ def main() -> int:
         if count >= args.limit_n:
             out = {
                 "ok": False,
-                "error": 10,
+                "error": "rate_limit",
                 "message": f"Rate limit reached after {count} calls",
                 "reset_time": "2026-10-07T23:59:59Z",
             }
@@ -98,9 +119,9 @@ def main() -> int:
     if scenario == "rate_limit":
         out = {
             "ok": False,
-            "error": 10,
-            "message": "Usage limit reached for Claude 3.5 Sonnet",
-            "reset_time": "2026-10-07T23:59:59Z",
+            "error": "rate_limit",
+            "message": "You have reached your usage limit for Claude 3.5 Sonnet.",
+            "reset_time": "2026-10-07T23:00:00Z",
         }
         print(json.dumps(out))
         return 10
@@ -108,8 +129,8 @@ def main() -> int:
     if scenario == "login_required":
         out = {
             "ok": False,
-            "error": 11,
-            "message": "Session expired or Cloudflare turnstile challenge",
+            "error": "login_required",
+            "message": "Login session expired or Cloudflare turnstile challenge presented.",
             "reset_time": None,
         }
         print(json.dumps(out))
@@ -118,8 +139,8 @@ def main() -> int:
     if scenario == "model_mismatch":
         out = {
             "ok": False,
-            "error": 14,
-            "message": "Observed model 'haiku' did not match requested 'sonnet'",
+            "error": "model_mismatch",
+            "message": "Model mismatch: requested 'sonnet' but observed 'Claude 3 Haiku' in UI.",
             "reset_time": None,
         }
         print(json.dumps(out))
@@ -128,8 +149,8 @@ def main() -> int:
     if scenario == "timeout":
         out = {
             "ok": False,
-            "error": 12,
-            "message": "Browser automation timed out after 300 seconds",
+            "error": "timeout",
+            "message": "Response generation timed out after 300 seconds.",
             "reset_time": None,
         }
         print(json.dumps(out))
@@ -138,8 +159,8 @@ def main() -> int:
     if scenario == "refusal":
         out = {
             "ok": False,
-            "error": 13,
-            "message": "Model refused to generate concept names",
+            "error": "refusal",
+            "message": "Model refused to answer the prompt.",
             "reset_time": None,
         }
         print(json.dumps(out))
@@ -148,8 +169,8 @@ def main() -> int:
     if scenario == "bad_request":
         out = {
             "ok": False,
-            "error": 2,
-            "message": "Missing required field 'prompt' in request",
+            "error": "bad_request",
+            "message": "Missing required field 'prompt' in stdin JSON.",
             "reset_time": None,
         }
         print(json.dumps(out))
@@ -158,8 +179,27 @@ def main() -> int:
     if scenario == "other":
         out = {
             "ok": False,
-            "error": 1,
-            "message": "Internal adapter crash or unknown failure",
+            "error": "other",
+            "message": "Browser process crashed unexpectedly.",
+            "reset_time": None,
+        }
+        print(json.dumps(out))
+        return 1
+
+    if scenario == "no_error_field":
+        out = {
+            "ok": False,
+            "message": "Error occurred but error key omitted",
+            "reset_time": None,
+        }
+        print(json.dumps(out))
+        return 10
+
+    if scenario == "unknown_error_code":
+        out = {
+            "ok": False,
+            "error": "custom_unrecognized_error",
+            "message": "Some custom error string",
             "reset_time": None,
         }
         print(json.dumps(out))

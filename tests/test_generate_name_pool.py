@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import time
 from typing import Any
 
 import pytest
@@ -958,3 +960,179 @@ def test_mixed_cache_refusal(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="mixed prompt versions"):
         load_completed_cache(cache_path)
+
+
+def test_contract_doc_fixtures_subprocess_execution(tmp_path: Path) -> None:
+    """Verify exact fixtures from prompt-adapter-contract.md use string codes and pass subprocess path."""
+    contract_path = Path("docs/context/prompt-adapter-contract.md")
+    assert contract_path.exists(), "Contract document missing"
+    content = contract_path.read_text(encoding="utf-8")
+
+    # Extract all json code blocks under Example Responses
+    example_section = content.split("### Example Responses (`stdout`)")[1]
+    json_blocks = re.findall(r"```json\n(.*?)\n```", example_section, re.DOTALL)
+    assert len(json_blocks) == 8, f"Expected 8 response fixtures, found {len(json_blocks)}"
+
+    expected_codes = {
+        "rate_limit": 10,
+        "login_required": 11,
+        "model_mismatch": 14,
+        "timeout": 12,
+        "refusal": 13,
+        "bad_request": 2,
+        "other": 1,
+    }
+
+    from scripts.generate_name_pool import CommandGenerationBackend, parse_json_array_response
+
+    for raw_json in json_blocks:
+        parsed = json.loads(raw_json)
+        is_success = parsed.get("ok") is True
+
+        if is_success:
+            exit_code = 0
+            # Test success fixture
+            runner_script = tmp_path / "runner_success.py"
+            runner_script.write_text(
+                f"import sys\nsys.stdout.write({json.dumps(raw_json)})\nsys.exit(0)\n",
+                encoding="utf-8",
+            )
+            backend = CommandGenerationBackend(
+                command=f"{sys.executable} {runner_script}",
+                profile="test_prof",
+            )
+            res = backend.complete(
+                subfield="algorithms",
+                round_num=1,
+                previous_names=[],
+                system_prompt="",
+                user_prompt="",
+            )
+            assert res.ok is True
+            assert res.model_id == "Claude 3.5 Sonnet"
+            concepts = parse_json_array_response(res.text)
+            assert len(concepts) == 4
+            assert "binary_search" in concepts
+        else:
+            err_str = parsed.get("error")
+            # Verify the contract doc's failure fixture strictly uses a string code
+            assert isinstance(err_str, str), f"Fixture error must be string, got {err_str!r}"
+            assert err_str in expected_codes, f"Unknown fixture error string: {err_str}"
+            exit_code = expected_codes[err_str]
+
+            runner_script = tmp_path / f"runner_{err_str}.py"
+            runner_script.write_text(
+                f"import sys\nsys.stdout.write({json.dumps(raw_json)})\nsys.exit({exit_code})\n",
+                encoding="utf-8",
+            )
+            backend = CommandGenerationBackend(
+                command=f"{sys.executable} {runner_script}",
+                profile="test_prof",
+            )
+            res = backend.complete(
+                subfield="algorithms",
+                round_num=1,
+                previous_names=[],
+                system_prompt="",
+                user_prompt="",
+            )
+            assert res.ok is False
+            assert res.error_code == exit_code
+            assert res.error_message == parsed.get("message")
+            if err_str == "rate_limit":
+                assert res.reset_time == "2026-10-07T23:00:00Z"
+
+    # Test exit code fallback when stdout has no usable error or is non-JSON
+    # 1. Stdout has {"ok": false, "message": "..."} without error field -> exit code fallback
+    no_err_script = tmp_path / "runner_no_err_key.py"
+    no_err_script.write_text(
+        "import sys, json\nprint(json.dumps({'ok': False, 'message': 'missing error key'}))\nsys.exit(10)\n",
+        encoding="utf-8",
+    )
+    b_no_err = CommandGenerationBackend(command=f"{sys.executable} {no_err_script}", profile="prof")
+    r_no_err = b_no_err.complete(subfield="a", round_num=1, previous_names=[], system_prompt="", user_prompt="")
+    assert r_no_err.ok is False
+    assert r_no_err.error_code == 10
+
+    # 2. Stdout is non-JSON garbage with exit code 11 -> exit code fallback
+    garbage_script = tmp_path / "runner_garbage.py"
+    garbage_script.write_text("import sys\nsys.stdout.write('Fatal crash\\n')\nsys.exit(11)\n", encoding="utf-8")
+    b_garbage = CommandGenerationBackend(command=f"{sys.executable} {garbage_script}", profile="prof")
+    r_garbage = b_garbage.complete(subfield="a", round_num=1, previous_names=[], system_prompt="", user_prompt="")
+    assert r_garbage.ok is False
+    assert r_garbage.error_code == 11
+
+    # 3. Stdout has unknown string error -> error_code 1
+    unknown_script = tmp_path / "runner_unknown.py"
+    unknown_script.write_text(
+        "import sys, json\nprint(json.dumps({'ok': False, 'error': 'custom_unrecognized_code'}))\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+    b_unknown = CommandGenerationBackend(command=f"{sys.executable} {unknown_script}", profile="prof")
+    r_unknown = b_unknown.complete(subfield="a", round_num=1, previous_names=[], system_prompt="", user_prompt="")
+    assert r_unknown.ok is False
+    assert r_unknown.error_code == 1
+
+
+def test_command_backend_process_group_timeout_kills_child(tmp_path: Path) -> None:
+    """Verify CommandBackend uses process group session to terminate hung process and its spawned children."""
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    child_pid_file = tmp_path / "child.pid"
+
+    from scripts.generate_name_pool import CommandGenerationBackend
+
+    # 1. Normal SIGTERM termination of process group
+    stub_cmd = (
+        f"{sys.executable} {stub} --scenario hang --spawn-child "
+        f"--child-pid-file {child_pid_file} --hang-seconds 30"
+    )
+    backend = CommandGenerationBackend(
+        command=stub_cmd,
+        profile="test_prof",
+        timeout_s=-59,  # timeout_s + 60 = 1.0 second timeout limit
+        sigterm_wait_s=5.0,
+    )
+    res = backend.complete(
+        subfield="algorithms",
+        round_num=1,
+        previous_names=[],
+        system_prompt="",
+        user_prompt="",
+    )
+    assert res.ok is False
+    assert res.error_code == 12
+    assert "timed out" in res.error_message
+
+    assert child_pid_file.exists(), "Child PID file was not created by stub"
+    child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+
+    time.sleep(0.1)
+    child_alive = True
+    try:
+        os.kill(child_pid, 0)
+    except ProcessLookupError:
+        child_alive = False
+    assert not child_alive, f"Child process {child_pid} was not terminated on process-group timeout!"
+
+    # 2. SIGKILL escalation when child ignores SIGTERM
+    ign_script = tmp_path / "ign_sigterm.py"
+    ign_script.write_text(
+        "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)\n",
+        encoding="utf-8",
+    )
+    backend_ign = CommandGenerationBackend(
+        command=f"{sys.executable} {ign_script}",
+        profile="test_prof",
+        timeout_s=-59,  # 1.0s timeout
+        sigterm_wait_s=0.2,  # brief wait before SIGKILL
+    )
+    res_ign = backend_ign.complete(
+        subfield="algorithms",
+        round_num=1,
+        previous_names=[],
+        system_prompt="",
+        user_prompt="",
+    )
+    assert res_ign.ok is False
+    assert res_ign.error_code == 12
+

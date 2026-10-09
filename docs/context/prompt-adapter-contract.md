@@ -53,7 +53,7 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 ```json
 {
   "ok": false,
-  "error": CODE,
+  "error": str,
   "message": str,
   "reset_time": str | null
 }
@@ -61,9 +61,9 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 
 ### Exit and Error Codes
 
-| Code | Name | Meaning |
+| Exit Code | Error String (`error`) | Meaning |
 | :--- | :--- | :--- |
-| `0` | `ok` | Successful execution |
+| `0` | (none / `ok`) | Successful execution |
 | `1` | `other` | Unclassified error / internal adapter failure |
 | `2` | `bad_request` | Invalid stdin JSON or missing required parameter |
 | `10` | `rate_limit` | Rate limit or usage quota reached on claude.ai |
@@ -114,78 +114,78 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
 }
 ```
 
-#### Failure: Rate Limit (Error Code 10, Exit Code 3 in caller)
+#### Failure: Rate Limit (Exit Code 10, Exit Code 3 in caller)
 
 ```json
 {
   "ok": false,
-  "error": 10,
+  "error": "rate_limit",
   "message": "You have reached your usage limit for Claude 3.5 Sonnet.",
   "reset_time": "2026-10-07T23:00:00Z"
 }
 ```
 
-#### Failure: Login Required (Error Code 11, Exit Code 4 in caller)
+#### Failure: Login Required (Exit Code 11, Exit Code 4 in caller)
 
 ```json
 {
   "ok": false,
-  "error": 11,
+  "error": "login_required",
   "message": "Login session expired or Cloudflare turnstile challenge presented.",
   "reset_time": null
 }
 ```
 
-#### Failure: Model Mismatch (Error Code 14, Exit Code 5 in caller)
+#### Failure: Model Mismatch (Exit Code 14, Exit Code 5 in caller)
 
 ```json
 {
   "ok": false,
-  "error": 14,
+  "error": "model_mismatch",
   "message": "Model mismatch: requested 'sonnet' but observed 'Claude 3 Haiku' in UI.",
   "reset_time": null
 }
 ```
 
-#### Failure: Timeout (Error Code 12, Exit Code 6 in caller if 3 consecutive)
+#### Failure: Timeout (Exit Code 12, Exit Code 6 in caller if 3 consecutive)
 
 ```json
 {
   "ok": false,
-  "error": 12,
+  "error": "timeout",
   "message": "Response generation timed out after 300 seconds.",
   "reset_time": null
 }
 ```
 
-#### Failure: Refusal (Error Code 13, Exit Code 6 in caller if 3 consecutive)
+#### Failure: Refusal (Exit Code 13, Exit Code 6 in caller if 3 consecutive)
 
 ```json
 {
   "ok": false,
-  "error": 13,
+  "error": "refusal",
   "message": "Model refused to answer the prompt.",
   "reset_time": null
 }
 ```
 
-#### Failure: Bad Request (Error Code 2, Exit Code 1 in caller)
+#### Failure: Bad Request (Exit Code 2, Exit Code 1 in caller)
 
 ```json
 {
   "ok": false,
-  "error": 2,
+  "error": "bad_request",
   "message": "Missing required field 'prompt' in stdin JSON.",
   "reset_time": null
 }
 ```
 
-#### Failure: Other (Error Code 1, Exit Code 6 in caller if 3 consecutive)
+#### Failure: Other (Exit Code 1, Exit Code 6 in caller if 3 consecutive)
 
 ```json
 {
   "ok": false,
-  "error": 1,
+  "error": "other",
   "message": "Browser process crashed unexpectedly.",
   "reset_time": null
 }

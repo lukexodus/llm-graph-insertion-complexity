@@ -27,6 +27,7 @@ from pathlib import Path
 import random
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -867,6 +868,52 @@ class DeepSeekGenerationBackend(GenerationBackend):
         )
 
 
+ADAPTER_ERROR_STRING_TO_CODE: dict[str, int] = {
+    "bad_request": 2,
+    "rate_limit": 10,
+    "login_required": 11,
+    "timeout": 12,
+    "refusal": 13,
+    "model_mismatch": 14,
+    "other": 1,
+}
+CONTRACT_ERROR_CODES: set[int] = {1, 2, 10, 11, 12, 13, 14}
+
+
+def parse_adapter_error(raw_err: Any, proc_returncode: int) -> int:
+    """Parse adapter error string or int into contract code, with process exit fallback.
+
+    bad_request -> 2
+    rate_limit -> 10
+    login_required -> 11
+    timeout -> 12
+    refusal -> 13
+    model_mismatch -> 14
+    other or unknown -> 1
+    If stdout has no usable "error", fall back to the process exit code when it is
+    one of the contract codes ({1, 2, 10, 11, 12, 13, 14}), else 1.
+    """
+    if isinstance(raw_err, str):
+        cleaned = raw_err.strip().lower()
+        if not cleaned:
+            if proc_returncode in CONTRACT_ERROR_CODES:
+                return proc_returncode
+            return 1
+        if cleaned in ADAPTER_ERROR_STRING_TO_CODE:
+            return ADAPTER_ERROR_STRING_TO_CODE[cleaned]
+        return 1
+
+    if isinstance(raw_err, (int, float)) and not isinstance(raw_err, bool):
+        val = int(raw_err)
+        if val in CONTRACT_ERROR_CODES:
+            return val
+        return 1
+
+    if proc_returncode in CONTRACT_ERROR_CODES:
+        return proc_returncode
+    return 1
+
+
 class CommandGenerationBackend(GenerationBackend):
     def __init__(
         self,
@@ -876,12 +923,14 @@ class CommandGenerationBackend(GenerationBackend):
         model: str = "sonnet",
         effort: Optional[str] = "low",
         timeout_s: int = 300,
+        sigterm_wait_s: float = 10.0,
     ) -> None:
         self.command = command
         self.profile = profile
         self.model = model
         self.effort = effort
         self.timeout_s = timeout_s
+        self.sigterm_wait_s = sigterm_wait_s
 
     def complete(
         self,
@@ -906,31 +955,15 @@ class CommandGenerationBackend(GenerationBackend):
         }
         cmd_args = shlex.split(self.command)
         timeout_limit = self.timeout_s + 60
+
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd_args,
-                input=json.dumps(payload),
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_limit,
-            )
-        except subprocess.TimeoutExpired:
-            return GenerationResult(
-                text="",
-                model_id=self.model,
-                token_usage={
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cache_hit_tokens": 0,
-                    "cache_miss_tokens": 0,
-                },
-                latency_s=float(timeout_limit),
-                retries=0,
-                ok=False,
-                error_code=12,
-                error_message=f"Subprocess timed out after {timeout_limit} seconds",
-                reset_time=None,
+                start_new_session=True,
             )
         except Exception as exc:
             return GenerationResult(
@@ -951,12 +984,52 @@ class CommandGenerationBackend(GenerationBackend):
                 reset_time=None,
             )
 
-        stdout_text = proc.stdout.strip()
+        try:
+            stdout_text, stderr_text = proc.communicate(
+                input=json.dumps(payload),
+                timeout=timeout_limit,
+            )
+        except subprocess.TimeoutExpired:
+            pgid = proc.pid
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+
+            try:
+                proc.wait(timeout=self.sigterm_wait_s)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+                proc.wait()
+
+            return GenerationResult(
+                text="",
+                model_id=self.model,
+                token_usage={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                },
+                latency_s=float(timeout_limit),
+                retries=0,
+                ok=False,
+                error_code=12,
+                error_message=f"Subprocess timed out after {timeout_limit} seconds",
+                reset_time=None,
+            )
+
+        stdout_text = stdout_text.strip()
         try:
             resp_json = json.loads(stdout_text)
             if not isinstance(resp_json, dict):
                 raise ValueError("Output is not a JSON object")
         except Exception as exc:
+            err_code = parse_adapter_error(None, proc.returncode)
             return GenerationResult(
                 text="",
                 model_id=self.model,
@@ -970,12 +1043,12 @@ class CommandGenerationBackend(GenerationBackend):
                 latency_s=0.0,
                 retries=0,
                 ok=False,
-                error_code=1,
+                error_code=err_code,
                 error_message=f"Invalid adapter stdout (not a valid JSON object): {exc}",
                 reset_time=None,
             )
 
-        is_ok = bool(resp_json.get("ok"))
+        is_ok = bool(resp_json.get("ok")) and (proc.returncode == 0)
         if is_ok:
             model_obs = resp_json.get("model_observed")
             model_req = resp_json.get("model_requested", self.model)
@@ -999,8 +1072,7 @@ class CommandGenerationBackend(GenerationBackend):
             )
         else:
             raw_err = resp_json.get("error")
-            valid_error_codes = {1, 2, 10, 11, 12, 13, 14}
-            err_code = int(raw_err) if isinstance(raw_err, (int, float)) and int(raw_err) in valid_error_codes else 1
+            err_code = parse_adapter_error(raw_err, proc.returncode)
             err_msg = str(resp_json.get("message", "Adapter reported error"))
             reset_time = resp_json.get("reset_time")
             if reset_time is not None:
