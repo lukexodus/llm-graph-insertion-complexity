@@ -26,7 +26,10 @@ import os
 from pathlib import Path
 import random
 import re
+import shlex
+import subprocess
 import sys
+import time
 from typing import Any, Optional, Sequence
 
 # Ensure src/ and repo root are on path
@@ -52,6 +55,7 @@ from graph_insertion.schedule import format_peak_status, window_intersects_peak
 
 DEFAULT_TRACKED_OUTPUT = Path("data/synthetic/cs_concept_names.json")
 NAME_POOL_PROMPT_VERSION = "np1"
+NAME_POOL_PROMPT_VERSION_COMMAND = "np1w"
 SCHEMA_VERSION = "1.0"
 DOMAIN = "computer science"
 DEFAULT_SEED = 42
@@ -197,6 +201,15 @@ def build_user_prompt(subfield: str, round_num: int, previous_names: list[str]) 
     )
 
 
+def build_command_prompt(subfield: str, round_num: int, previous_names: list[str]) -> str:
+    """Build single combined prompt for command backend (np1w).
+
+    Combines SYSTEM_PROMPT and user prompt with exactly two newlines.
+    """
+    user_prompt = build_user_prompt(subfield, round_num, previous_names)
+    return f"{SYSTEM_PROMPT}\n\n{user_prompt}"
+
+
 # ===========================================================================
 # Response Parsing & JSON Array Extraction
 # ===========================================================================
@@ -204,6 +217,8 @@ def build_user_prompt(subfield: str, round_num: int, previous_names: list[str]) 
 def parse_json_array_response(raw_text: str) -> list[str]:
     """Parse raw LLM response text into a list of concept name strings.
 
+    Tries strict parsing first. If strict parsing fails with a JSON decode error,
+    falls back to extracting the outermost [...] array from the surrounding prose.
     Raises ValueError if response does not parse as a JSON array.
     """
     text = raw_text.strip()
@@ -218,7 +233,20 @@ def parse_json_array_response(raw_text: str) -> list[str]:
     try:
         data = json.loads(text)
     except Exception as exc:
-        raise ValueError(f"Failed to parse response as JSON: {exc}") from exc
+        # Fallback: extract outermost [...] if prose surrounds the array
+        start = raw_text.find("[")
+        end = raw_text.rfind("]")
+        if start != -1 and end != -1 and start < end:
+            try:
+                candidate = json.loads(raw_text[start : end + 1])
+                if isinstance(candidate, list):
+                    data = candidate
+                else:
+                    raise ValueError(f"Failed to parse response as JSON: {exc}") from exc
+            except Exception:
+                raise ValueError(f"Failed to parse response as JSON: {exc}") from exc
+        else:
+            raise ValueError(f"Failed to parse response as JSON: {exc}") from exc
 
     if not isinstance(data, list):
         raise ValueError(f"Expected JSON array, got {type(data).__name__}")
@@ -250,10 +278,17 @@ class CacheEntry:
     retries: int
     latency_s: float
     parsed_names: list[str]
+    backend: str = "deepseek"
+    prompt_version: str = "np1"
+    backend_meta: Optional[dict[str, Any]] = None
 
 
 def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
     """Load cached responses from raw_responses.jsonl.
+
+    Tolerates old records without 'backend' or 'prompt_version' by defaulting
+    them to 'deepseek' and 'np1'.
+    REFUSES a cache mixing backends or prompt versions by raising ValueError.
 
     A (round, subfield) is complete once a cached response parses as a JSON array;
     otherwise it is skipped and re-requested on rerun.
@@ -261,6 +296,9 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
     completed: dict[tuple[int, str], CacheEntry] = {}
     if not cache_path.exists():
         return completed
+
+    first_backend: Optional[str] = None
+    first_prompt_version: Optional[str] = None
 
     with open(cache_path, "r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -277,6 +315,25 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
             resp_text = record.get("response_text", "")
             if r is None or sf is None:
                 continue
+
+            backend_val = str(record.get("backend") or "deepseek")
+            prompt_version_val = str(record.get("prompt_version") or "np1")
+
+            # Validate cache consistency across all records
+            if first_backend is None:
+                first_backend = backend_val
+                first_prompt_version = prompt_version_val
+            else:
+                if backend_val != first_backend:
+                    raise ValueError(
+                        f"Cache {cache_path} contains mixed backends: found '{backend_val}' "
+                        f"and '{first_backend}' (line {line_no})."
+                    )
+                if prompt_version_val != first_prompt_version:
+                    raise ValueError(
+                        f"Cache {cache_path} contains mixed prompt versions: found '{prompt_version_val}' "
+                        f"and '{first_prompt_version}' (line {line_no})."
+                    )
 
             try:
                 parsed = parse_json_array_response(resp_text)
@@ -297,6 +354,9 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
                 retries=int(record.get("retries", 0)),
                 latency_s=float(record.get("latency_s", 0.0)),
                 parsed_names=parsed,
+                backend=backend_val,
+                prompt_version=prompt_version_val,
+                backend_meta=record.get("backend_meta"),
             )
             completed[(int(r), str(sf))] = entry
     return completed
@@ -305,7 +365,7 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
 def append_cache_record(cache_path: Path, entry: CacheEntry) -> None:
     """Append a raw generation response record to raw_responses.jsonl."""
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
+    record: dict[str, Any] = {
         "round": entry.round,
         "subfield": entry.subfield,
         "subfield_idx": entry.subfield_idx,
@@ -317,7 +377,11 @@ def append_cache_record(cache_path: Path, entry: CacheEntry) -> None:
         "timestamp_utc": entry.timestamp_utc,
         "retries": entry.retries,
         "latency_s": entry.latency_s,
+        "backend": entry.backend,
+        "prompt_version": entry.prompt_version,
     }
+    if entry.backend_meta is not None:
+        record["backend_meta"] = entry.backend_meta
     with open(cache_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -502,26 +566,93 @@ def build_pool_from_cache(
 
     all_run_ids = list(run_ids or [cache_path.parent.name])
 
-    meta: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "domain": DOMAIN,
-        "generator": generator_kind,
-        "configured_model_alias": configured_model,
-        "response_reported_model_ids": model_ids_seen,
-        "temperature": 0.7,
-        "max_tokens": 1500,
-        "prompt_version": NAME_POOL_PROMPT_VERSION,
-        "run_ids": all_run_ids,
-        "first_utc_timestamp": first_ts,
-        "last_utc_timestamp": last_ts,
-        "n_raw": n_raw,
-        "n_valid": len(shuffled_names),
-        "drop_counts": drop_counts,
-        "seed": seed,
-        "sha256_names": sha256_names,
-        "sha256_raw_responses": sha256_raw,
-        "corpora_checked": corpora_names,
-    }
+    sample_entry = next(iter(cache.values()))
+    is_command_backend = (sample_entry.backend == "command") or (
+        generator_kind == "claude-web-ui-via-prompt-adapter"
+    )
+
+    if is_command_backend:
+        observed_counts: dict[str, int] = {}
+        tier_counts: dict[str, int] = {}
+        adapter_vers: set[str] = set()
+
+        req_model: Optional[str] = None
+        req_effort: Optional[str] = None
+        req_memory = False
+        req_web_search = False
+
+        for e in cache.values():
+            if e.backend_meta:
+                bm = e.backend_meta
+                if req_model is None and "model_requested" in bm:
+                    req_model = str(bm["model_requested"])
+                if req_effort is None and "effort_requested" in bm:
+                    req_effort = str(bm["effort_requested"])
+                if "memory_requested" in bm:
+                    req_memory = bool(bm["memory_requested"])
+                if "web_search_requested" in bm:
+                    req_web_search = bool(bm["web_search_requested"])
+
+                obs = bm.get("model_observed") or e.model_id
+                if obs:
+                    observed_counts[str(obs)] = observed_counts.get(str(obs), 0) + 1
+
+                tier = bm.get("tier")
+                if tier is not None:
+                    t_str = str(tier)
+                    tier_counts[t_str] = tier_counts.get(t_str, 0) + 1
+
+                ad = bm.get("adapter")
+                if isinstance(ad, dict) and "version" in ad:
+                    adapter_vers.add(str(ad["version"]))
+
+        meta: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "domain": DOMAIN,
+            "generator": "claude-web-ui-via-prompt-adapter",
+            "prompt_version": NAME_POOL_PROMPT_VERSION_COMMAND,
+            "requested_model": req_model or configured_model,
+            "requested_effort": req_effort or "low",
+            "requested_memory": req_memory,
+            "requested_web_search": req_web_search,
+            "observed_models": observed_counts,
+            "tier_histogram": tier_counts,
+            "adapter_versions": sorted(adapter_vers),
+            "temperature": None,
+            "max_tokens": None,
+            "parameter_note": "Web UI does not expose temperature or max_tokens controls",
+            "run_ids": all_run_ids,
+            "first_utc_timestamp": first_ts,
+            "last_utc_timestamp": last_ts,
+            "n_raw": n_raw,
+            "n_valid": len(shuffled_names),
+            "drop_counts": drop_counts,
+            "seed": seed,
+            "sha256_names": sha256_names,
+            "sha256_raw_responses": sha256_raw,
+            "corpora_checked": corpora_names,
+        }
+    else:
+        meta = {
+            "schema_version": SCHEMA_VERSION,
+            "domain": DOMAIN,
+            "generator": generator_kind,
+            "configured_model_alias": configured_model,
+            "response_reported_model_ids": model_ids_seen,
+            "temperature": 0.7,
+            "max_tokens": 1500,
+            "prompt_version": NAME_POOL_PROMPT_VERSION,
+            "run_ids": all_run_ids,
+            "first_utc_timestamp": first_ts,
+            "last_utc_timestamp": last_ts,
+            "n_raw": n_raw,
+            "n_valid": len(shuffled_names),
+            "drop_counts": drop_counts,
+            "seed": seed,
+            "sha256_names": sha256_names,
+            "sha256_raw_responses": sha256_raw,
+            "corpora_checked": corpora_names,
+        }
 
     result = {
         "meta": meta,
@@ -676,12 +807,231 @@ def verify_pool(
 
 
 # ===========================================================================
+# Backend Seam Abstraction
+# ===========================================================================
+
+@dataclass
+class GenerationResult:
+    text: str
+    model_id: str
+    token_usage: dict[str, int]
+    latency_s: float
+    retries: int
+    backend_meta: Optional[dict[str, Any]] = None
+    ok: bool = True
+    error_code: int = 0
+    error_message: str = ""
+    reset_time: Optional[str] = None
+
+
+class GenerationBackend:
+    def complete(
+        self,
+        *,
+        subfield: str,
+        round_num: int,
+        previous_names: list[str],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> GenerationResult:
+        raise NotImplementedError
+
+
+class DeepSeekGenerationBackend(GenerationBackend):
+    def __init__(self, metered_client: MeteredLLMClient) -> None:
+        self.metered_client = metered_client
+
+    def complete(
+        self,
+        *,
+        subfield: str,
+        round_num: int,
+        previous_names: list[str],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> GenerationResult:
+        resp = self.metered_client.complete(system=system_prompt, user=user_prompt)
+        return GenerationResult(
+            text=resp.text,
+            model_id=resp.model_id,
+            token_usage={
+                "input_tokens": resp.input_tokens,
+                "output_tokens": resp.output_tokens,
+                "reasoning_tokens": resp.reasoning_tokens,
+                "cache_hit_tokens": resp.cache_hit_tokens,
+                "cache_miss_tokens": resp.cache_miss_tokens,
+            },
+            latency_s=resp.latency_s,
+            retries=resp.attempts - 1,
+            ok=True,
+        )
+
+
+class CommandGenerationBackend(GenerationBackend):
+    def __init__(
+        self,
+        *,
+        command: str,
+        profile: str,
+        model: str = "sonnet",
+        effort: Optional[str] = "low",
+        timeout_s: int = 300,
+    ) -> None:
+        self.command = command
+        self.profile = profile
+        self.model = model
+        self.effort = effort
+        self.timeout_s = timeout_s
+
+    def complete(
+        self,
+        *,
+        subfield: str,
+        round_num: int,
+        previous_names: list[str],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> GenerationResult:
+        prompt_text = build_command_prompt(subfield, round_num, previous_names)
+        payload = {
+            "prompt": prompt_text,
+            "profile": self.profile,
+            "model": self.model,
+            "effort": self.effort,
+            "thinking": None,
+            "web_search": False,
+            "memory": False,
+            "headless": False,
+            "timeout_s": self.timeout_s,
+        }
+        cmd_args = shlex.split(self.command)
+        timeout_limit = self.timeout_s + 60
+        try:
+            proc = subprocess.run(
+                cmd_args,
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=timeout_limit,
+            )
+        except subprocess.TimeoutExpired:
+            return GenerationResult(
+                text="",
+                model_id=self.model,
+                token_usage={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                },
+                latency_s=float(timeout_limit),
+                retries=0,
+                ok=False,
+                error_code=12,
+                error_message=f"Subprocess timed out after {timeout_limit} seconds",
+                reset_time=None,
+            )
+        except Exception as exc:
+            return GenerationResult(
+                text="",
+                model_id=self.model,
+                token_usage={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                },
+                latency_s=0.0,
+                retries=0,
+                ok=False,
+                error_code=1,
+                error_message=f"Failed to execute command: {exc}",
+                reset_time=None,
+            )
+
+        stdout_text = proc.stdout.strip()
+        try:
+            resp_json = json.loads(stdout_text)
+            if not isinstance(resp_json, dict):
+                raise ValueError("Output is not a JSON object")
+        except Exception as exc:
+            return GenerationResult(
+                text="",
+                model_id=self.model,
+                token_usage={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                },
+                latency_s=0.0,
+                retries=0,
+                ok=False,
+                error_code=1,
+                error_message=f"Invalid adapter stdout (not a valid JSON object): {exc}",
+                reset_time=None,
+            )
+
+        is_ok = bool(resp_json.get("ok"))
+        if is_ok:
+            model_obs = resp_json.get("model_observed")
+            model_req = resp_json.get("model_requested", self.model)
+            model_id = str(model_obs or model_req or self.model)
+            elapsed = float(resp_json.get("elapsed_s", 0.0))
+            backend_meta = {k: v for k, v in resp_json.items() if k != "text"}
+            return GenerationResult(
+                text=str(resp_json.get("text", "")),
+                model_id=model_id,
+                token_usage={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                },
+                latency_s=elapsed,
+                retries=0,
+                backend_meta=backend_meta,
+                ok=True,
+            )
+        else:
+            raw_err = resp_json.get("error")
+            valid_error_codes = {1, 2, 10, 11, 12, 13, 14}
+            err_code = int(raw_err) if isinstance(raw_err, (int, float)) and int(raw_err) in valid_error_codes else 1
+            err_msg = str(resp_json.get("message", "Adapter reported error"))
+            reset_time = resp_json.get("reset_time")
+            if reset_time is not None:
+                reset_time = str(reset_time)
+            return GenerationResult(
+                text="",
+                model_id=self.model,
+                token_usage={
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                },
+                latency_s=float(resp_json.get("elapsed_s", 0.0)),
+                retries=0,
+                ok=False,
+                error_code=err_code,
+                error_message=err_msg,
+                reset_time=reset_time,
+            )
+
+
+# ===========================================================================
 # Generation Loop
 # ===========================================================================
 
 def run_generation_loop(
     *,
     mode: str,  # "live" or "offline-fake"
+    backend: str = "deepseek",  # "deepseek" or "command"
     output_path: Path,
     cache_path: Path,
     run_id: str,
@@ -692,9 +1042,15 @@ def run_generation_loop(
     est_seconds_per_call: float = 1.0,
     allow_peak: bool = False,
     model: Optional[str] = None,
+    command: Optional[str] = None,
+    adapter_profile: Optional[str] = None,
+    adapter_model: str = "sonnet",
+    adapter_effort: Optional[str] = "low",
+    adapter_timeout: int = 300,
+    pause_s: float = 3.0,
 ) -> int:
     """Execute iterative generation across subfields until target_names is reached."""
-    configured_model = resolve_model_alias(model)
+    configured_model = resolve_model_alias(model) if backend != "command" else adapter_model
 
     # Check offline-fake output path restriction
     if mode == "offline-fake":
@@ -715,10 +1071,15 @@ def run_generation_loop(
     )
     if len(valid_names) >= target_names:
         print(f"Cache already contains {len(valid_names)} valid names (target: {target_names}). Building pool.")
+        gen_kind = (
+            "offline-fake"
+            if mode == "offline-fake"
+            else ("claude-web-ui-via-prompt-adapter" if backend == "command" else "deepseek")
+        )
         build_pool_from_cache(
             cache_path=cache_path,
             output_path=output_path,
-            generator_kind=mode,
+            generator_kind=gen_kind,
             configured_model=configured_model,
             seed=DEFAULT_SEED,
             run_ids=[run_id],
@@ -726,23 +1087,39 @@ def run_generation_loop(
         )
         return 0
 
-    # Live client initialization
-    metered_client: Optional[MeteredLLMClient] = None
+    # Backend initialization
+    gen_backend: Optional[GenerationBackend] = None
     if mode == "live":
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if not api_key:
-            print("ERROR: DEEPSEEK_API_KEY environment variable is required for live generation.", file=sys.stderr)
-            return 1
-        raw_client = DeepSeekClient(
-            api_key=api_key,
-            model=configured_model,
-            temperature=0.7,
-            max_tokens=1500,
-        )
-        metered_client = MeteredLLMClient(raw_client)
+        if backend == "deepseek":
+            api_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
+                print("ERROR: DEEPSEEK_API_KEY environment variable is required for live generation.", file=sys.stderr)
+                return 1
+            raw_client = DeepSeekClient(
+                api_key=api_key,
+                model=configured_model,
+                temperature=0.7,
+                max_tokens=1500,
+            )
+            gen_backend = DeepSeekGenerationBackend(MeteredLLMClient(raw_client))
+        elif backend == "command":
+            if not command:
+                print("ERROR: --command is required for command backend live generation.", file=sys.stderr)
+                return 1
+            if not adapter_profile:
+                print("ERROR: --adapter-profile is required for command backend live generation.", file=sys.stderr)
+                return 1
+            gen_backend = CommandGenerationBackend(
+                command=command,
+                profile=adapter_profile,
+                model=adapter_model,
+                effort=adapter_effort,
+                timeout_s=adapter_timeout,
+            )
 
     calls_made = 0
     round_num = 1
+    consecutive_failures = 0
     system_prompt = build_system_prompt()
 
     # Track collected names per subfield to pass to round 2+ prompts
@@ -762,30 +1139,37 @@ def run_generation_loop(
             continue
 
         planned_calls_this_round = min(len(needed_in_round), max_calls - calls_made)
-        est_seconds = planned_calls_this_round * est_seconds_per_call
-        est_cost = (
-            planned_calls_this_round
-            * (EST_INPUT_TOKENS_PER_CALL * price_in + EST_OUTPUT_TOKENS_PER_CALL * price_out)
-            / 1_000_000
-        )
-
         now_utc = datetime.now(timezone.utc)
-        peak_status_str = format_peak_status(now_utc)
-        print(f"\n--- Round {round_num} Pre-Flight ---")
-        print(f"Planned calls:         {planned_calls_this_round}")
-        print(f"Estimated duration:    {est_seconds:.1f} s")
-        print(f"Estimated cost:        ${est_cost:.4f} USD")
-        print(f"Peak status:           {peak_status_str}")
 
-        if mode == "live":
-            intersects = window_intersects_peak(now_utc, est_seconds)
-            if intersects and not allow_peak:
-                print(
-                    "ERROR: Execution window intersects DeepSeek peak pricing hours. "
-                    "Schedule during off-peak window or pass '--allow-peak'.",
-                    file=sys.stderr,
-                )
-                return 1
+        if backend == "command" and mode == "live":
+            est_seconds = planned_calls_this_round * 20.0
+            print(f"\n--- Round {round_num} Pre-Flight (Command Backend) ---")
+            print(f"Planned calls:         {planned_calls_this_round}")
+            print(f"Estimated duration:    {est_seconds:.1f} s (@ 20s/call)")
+            print("Reminder:              'Generate memory from chats' must be OFF on target Claude account.")
+        else:
+            est_seconds = planned_calls_this_round * est_seconds_per_call
+            est_cost = (
+                planned_calls_this_round
+                * (EST_INPUT_TOKENS_PER_CALL * price_in + EST_OUTPUT_TOKENS_PER_CALL * price_out)
+                / 1_000_000
+            )
+            peak_status_str = format_peak_status(now_utc)
+            print(f"\n--- Round {round_num} Pre-Flight ---")
+            print(f"Planned calls:         {planned_calls_this_round}")
+            print(f"Estimated duration:    {est_seconds:.1f} s")
+            print(f"Estimated cost:        ${est_cost:.4f} USD")
+            print(f"Peak status:           {peak_status_str}")
+
+            if mode == "live" and backend == "deepseek":
+                intersects = window_intersects_peak(now_utc, est_seconds)
+                if intersects and not allow_peak:
+                    print(
+                        "ERROR: Execution window intersects DeepSeek peak pricing hours. "
+                        "Schedule during off-peak window or pass '--allow-peak'.",
+                        file=sys.stderr,
+                    )
+                    return 1
 
         for sf_idx, sf in needed_in_round:
             if calls_made >= max_calls:
@@ -795,44 +1179,117 @@ def run_generation_loop(
             user_prompt = build_user_prompt(sf, round_num, subfield_collected[sf])
 
             if mode == "live":
-                assert metered_client is not None
-                try:
-                    resp = metered_client.complete(system=system_prompt, user=user_prompt)
-                    resp_text = resp.text
-                except Exception as exc:
-                    print(f"Warning: LLM call failed for ({round_num}, {sf}): {exc}", file=sys.stderr)
-                    continue
+                assert gen_backend is not None
+                if backend == "command":
+                    res = gen_backend.complete(
+                        subfield=sf,
+                        round_num=round_num,
+                        previous_names=subfield_collected[sf],
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                    )
+                    calls_made += 1
+                    if not res.ok:
+                        if res.error_code == 10:
+                            print(f"Rate limit reached (error 10): {res.error_message}", file=sys.stderr)
+                            if res.reset_time:
+                                print(f"Reset time: {res.reset_time}", file=sys.stderr)
+                            return 3
+                        elif res.error_code == 11:
+                            print(f"Login/challenge required (error 11): {res.error_message}", file=sys.stderr)
+                            print(
+                                f"Please log in or clear the challenge in profile '{adapter_profile}' and rerun.",
+                                file=sys.stderr,
+                            )
+                            return 4
+                        elif res.error_code == 14:
+                            print(f"Model mismatch (error 14): {res.error_message}", file=sys.stderr)
+                            return 5
+                        elif res.error_code == 2:
+                            print(f"Bad request (error 2): {res.error_message}", file=sys.stderr)
+                            return 1
+                        else:
+                            # Error codes 12, 13, 1
+                            print(
+                                f"Warning: Adapter call failed for ({round_num}, {sf}) [error {res.error_code}]: {res.error_message}",
+                                file=sys.stderr,
+                            )
+                            consecutive_failures += 1
+                            if consecutive_failures >= 3:
+                                print("ERROR: 3 consecutive failures encountered. Stopping generation.", file=sys.stderr)
+                                return 6
+                            if pause_s > 0:
+                                time.sleep(pause_s)
+                            continue
+                else:
+                    try:
+                        res = gen_backend.complete(
+                            subfield=sf,
+                            round_num=round_num,
+                            previous_names=subfield_collected[sf],
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                        )
+                    except Exception as exc:
+                        print(f"Warning: LLM call failed for ({round_num}, {sf}): {exc}", file=sys.stderr)
+                        calls_made += 1
+                        continue
+                    calls_made += 1
             else:
-                resp_text, resp = generate_offline_fake_response(sf, round_num)
-
-            calls_made += 1
+                resp_text, fake_resp = generate_offline_fake_response(sf, round_num)
+                calls_made += 1
+                res = GenerationResult(
+                    text=resp_text,
+                    model_id=fake_resp.model_id,
+                    token_usage={
+                        "input_tokens": fake_resp.input_tokens,
+                        "output_tokens": fake_resp.output_tokens,
+                        "reasoning_tokens": fake_resp.reasoning_tokens,
+                        "cache_hit_tokens": fake_resp.cache_hit_tokens,
+                        "cache_miss_tokens": fake_resp.cache_miss_tokens,
+                    },
+                    latency_s=fake_resp.latency_s,
+                    retries=fake_resp.attempts - 1,
+                    ok=True,
+                )
 
             try:
-                parsed = parse_json_array_response(resp_text)
+                parsed = parse_json_array_response(res.text)
             except ValueError as err:
                 print(f"Warning: Failed to parse JSON array from ({round_num}, {sf}): {err}", file=sys.stderr)
-                # Unparseable response is NOT marked complete in cache; will retry on rerun
                 parsed = []
+                if backend == "command" and mode == "live":
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        print("ERROR: 3 consecutive failures encountered. Stopping generation.", file=sys.stderr)
+                        return 6
+
+            if parsed:
+                consecutive_failures = 0
+
+            rec_backend = "deepseek" if mode == "offline-fake" else backend
+            rec_prompt_version = (
+                NAME_POOL_PROMPT_VERSION_COMMAND if rec_backend == "command" else NAME_POOL_PROMPT_VERSION
+            )
 
             entry = CacheEntry(
                 round=round_num,
                 subfield=sf,
                 subfield_idx=sf_idx,
-                request_system=system_prompt,
-                request_user=user_prompt,
-                response_text=resp_text,
-                model_id=resp.model_id,
-                token_usage={
-                    "input_tokens": resp.input_tokens,
-                    "output_tokens": resp.output_tokens,
-                    "reasoning_tokens": resp.reasoning_tokens,
-                    "cache_hit_tokens": resp.cache_hit_tokens,
-                    "cache_miss_tokens": resp.cache_miss_tokens,
-                },
+                request_system=system_prompt if rec_backend != "command" else "",
+                request_user=user_prompt
+                if rec_backend != "command"
+                else build_command_prompt(sf, round_num, subfield_collected[sf]),
+                response_text=res.text,
+                model_id=res.model_id,
+                token_usage=res.token_usage,
                 timestamp_utc=datetime.now(timezone.utc).isoformat(),
-                retries=resp.attempts - 1,
-                latency_s=resp.latency_s,
+                retries=res.retries,
+                latency_s=res.latency_s,
                 parsed_names=parsed,
+                backend=rec_backend,
+                prompt_version=rec_prompt_version,
+                backend_meta=res.backend_meta,
             )
 
             append_cache_record(cache_path, entry)
@@ -848,6 +1305,9 @@ def run_generation_loop(
                 print(f"Reached target {target_names} valid names ({len(valid_names)} collected).")
                 break
 
+            if backend == "command" and mode == "live" and pause_s > 0:
+                time.sleep(pause_s)
+
         # Check stopping condition after round
         valid_names, _, _ = validate_and_dedupe_candidates(
             list(cache.values()), corpus_nodes, corpus_embeds
@@ -857,10 +1317,15 @@ def run_generation_loop(
         round_num += 1
 
     print(f"\nGeneration complete. Building final pool into {output_path}...")
+    gen_kind = (
+        "offline-fake"
+        if mode == "offline-fake"
+        else ("claude-web-ui-via-prompt-adapter" if backend == "command" else "deepseek")
+    )
     build_pool_from_cache(
         cache_path=cache_path,
         output_path=output_path,
-        generator_kind=mode,
+        generator_kind=gen_kind,
         configured_model=configured_model,
         seed=DEFAULT_SEED,
         run_ids=[run_id],
@@ -973,6 +1438,49 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="DeepSeek model alias (defaults to DEEPSEEK_MODEL or 'deepseek-flash').",
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["deepseek", "command"],
+        default="deepseek",
+        help="Generation backend: 'deepseek' (default) or 'command' (claude-automator prompt-adapter).",
+    )
+    parser.add_argument(
+        "--command",
+        type=str,
+        default=None,
+        help="Command string for command backend (shlex-split, executed without shell).",
+    )
+    parser.add_argument(
+        "--adapter-profile",
+        type=str,
+        default=None,
+        help="Browser profile name for claude-automator prompt-adapter (required for live command runs).",
+    )
+    parser.add_argument(
+        "--adapter-model",
+        type=str,
+        default="sonnet",
+        help="Model identifier requested for command adapter (default: sonnet).",
+    )
+    parser.add_argument(
+        "--adapter-effort",
+        type=str,
+        default="low",
+        help="Effort tier for command adapter: low, medium, high, extra, max (default: low).",
+    )
+    parser.add_argument(
+        "--adapter-timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for adapter conversation (default: 300).",
+    )
+    parser.add_argument(
+        "--pause-s",
+        type=float,
+        default=3.0,
+        help="Pause in seconds between command backend calls (default: 3.0).",
+    )
     return parser
 
 
@@ -995,12 +1503,24 @@ def main() -> int:
 
     # Build-only mode
     if args.build_only:
-        configured_model = resolve_model_alias(args.model)
+        cache = load_completed_cache(cache_path)
+        sample = next(iter(cache.values())) if cache else None
+        backend_kind = sample.backend if sample else args.backend
+        gen_kind = (
+            "claude-web-ui-via-prompt-adapter"
+            if backend_kind == "command"
+            else "deepseek"
+        )
+        configured_model = (
+            resolve_model_alias(args.model)
+            if backend_kind != "command"
+            else args.adapter_model
+        )
         print(f"Rebuilding pool from cache: {cache_path} -> {output_path}")
         built = build_pool_from_cache(
             cache_path=cache_path,
             output_path=output_path,
-            generator_kind="deepseek",
+            generator_kind=gen_kind,
             configured_model=configured_model,
             seed=DEFAULT_SEED,
             run_ids=[run_id],
@@ -1019,21 +1539,37 @@ def main() -> int:
 
     # Dry-run mode
     if args.dry_run:
-        est_cost = (
-            min(len(SUBFIELDS), args.max_calls)
-            * (EST_INPUT_TOKENS_PER_CALL * args.price_in + EST_OUTPUT_TOKENS_PER_CALL * args.price_out)
-            / 1_000_000
-        )
         now_utc = datetime.now(timezone.utc)
-        print("=== DATA-004 Concept Name Pool Generator Plan (Dry Run) ===")
-        print(f"Subfields count:       {len(SUBFIELDS)}")
-        print(f"Target valid names:    {args.target_names}")
-        print(f"Max calls cap:         {args.max_calls}")
-        print(f"Output path:           {output_path}")
-        print(f"Cache file:            {cache_path}")
-        print(f"Current UTC time:      {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        print(f"Peak status:           {format_peak_status(now_utc)}")
-        print(f"Estimated round 1 cost: ${est_cost:.4f} USD")
+        if args.backend == "command":
+            planned = min(len(SUBFIELDS), args.max_calls)
+            est_duration = planned * 20.0
+            print("=== DATA-005 Concept Name Pool Generator Plan (Dry Run - Command Backend) ===")
+            print(f"Subfields count:       {len(SUBFIELDS)}")
+            print(f"Target valid names:    {args.target_names}")
+            print(f"Max calls cap:         {args.max_calls}")
+            print(f"Output path:           {output_path}")
+            print(f"Cache file:            {cache_path}")
+            print(f"Current UTC time:      {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            print(f"Command string:        {args.command or '[not set]'}")
+            print(f"Adapter profile:       {args.adapter_profile or '[not set]'}")
+            print(f"Adapter model:         {args.adapter_model}")
+            print(f"Estimated duration:    {est_duration:.1f} s (@ 20s/call)")
+            print("Reminder:              'Generate memory from chats' must be OFF on target Claude account.")
+        else:
+            est_cost = (
+                min(len(SUBFIELDS), args.max_calls)
+                * (EST_INPUT_TOKENS_PER_CALL * args.price_in + EST_OUTPUT_TOKENS_PER_CALL * args.price_out)
+                / 1_000_000
+            )
+            print("=== DATA-004 Concept Name Pool Generator Plan (Dry Run) ===")
+            print(f"Subfields count:       {len(SUBFIELDS)}")
+            print(f"Target valid names:    {args.target_names}")
+            print(f"Max calls cap:         {args.max_calls}")
+            print(f"Output path:           {output_path}")
+            print(f"Cache file:            {cache_path}")
+            print(f"Current UTC time:      {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            print(f"Peak status:           {format_peak_status(now_utc)}")
+            print(f"Estimated round 1 cost: ${est_cost:.4f} USD")
         print("Dry run complete (no API calls made, no files created).")
         return 0
 
@@ -1043,13 +1579,22 @@ def main() -> int:
         print("\nERROR: Please specify --offline-fake, --live, --build-only, or --verify.", file=sys.stderr)
         return 1
 
-    if args.live and not args.confirm:
-        print("ERROR: Live generation requires explicit '--confirm' flag to proceed.", file=sys.stderr)
-        return 1
+    if args.live:
+        if not args.confirm:
+            print("ERROR: Live generation requires explicit '--confirm' flag to proceed.", file=sys.stderr)
+            return 1
+        if args.backend == "command":
+            if not args.command:
+                print("ERROR: --command is required for command backend live generation.", file=sys.stderr)
+                return 1
+            if not args.adapter_profile:
+                print("ERROR: --adapter-profile is required for command backend live generation.", file=sys.stderr)
+                return 1
 
     mode = "live" if args.live else "offline-fake"
     return run_generation_loop(
         mode=mode,
+        backend=args.backend,
         output_path=output_path,
         cache_path=cache_path,
         run_id=run_id,
@@ -1060,6 +1605,12 @@ def main() -> int:
         est_seconds_per_call=args.est_seconds_per_call,
         allow_peak=args.allow_peak,
         model=args.model,
+        command=args.command,
+        adapter_profile=args.adapter_profile,
+        adapter_model=args.adapter_model,
+        adapter_effort=args.adapter_effort,
+        adapter_timeout=args.adapter_timeout,
+        pause_s=args.pause_s,
     )
 
 

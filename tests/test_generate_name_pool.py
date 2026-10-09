@@ -31,7 +31,11 @@ from scripts.generate_name_pool import (
     CacheEntry,
     DEFAULT_TRACKED_OUTPUT,
     MIN_REQUIRED_NAMES_FOR_VALIDATION,
+    NAME_POOL_PROMPT_VERSION,
+    NAME_POOL_PROMPT_VERSION_COMMAND,
     SUBFIELDS,
+    SYSTEM_PROMPT,
+    build_command_prompt,
     build_pool_from_cache,
     build_user_prompt,
     load_completed_cache,
@@ -500,3 +504,457 @@ def test_dry_run_cli_execution() -> None:
     assert res.returncode == 0
     assert "Dry run complete" in res.stdout
     assert "Estimated round 1 cost" in res.stdout
+
+
+# ---------------------------------------------------------------------------
+# 9. DATA-005 Command Backend & Prompt Adapter Tests
+# ---------------------------------------------------------------------------
+
+def test_command_prompt_composition() -> None:
+    """Verify build_command_prompt pure function composition (np1w)."""
+    p1 = build_command_prompt("algorithms", 1, [])
+    expected1 = f"{SYSTEM_PROMPT}\n\n{build_user_prompt('algorithms', 1, [])}"
+    assert p1 == expected1
+    assert NAME_POOL_PROMPT_VERSION_COMMAND == "np1w"
+
+    prev = ["merge_sort", "quick_sort"]
+    p2 = build_command_prompt("algorithms", 2, prev)
+    expected2 = f"{SYSTEM_PROMPT}\n\n{build_user_prompt('algorithms', 2, prev)}"
+    assert p2 == expected2
+
+
+def test_parse_json_array_response_fallback() -> None:
+    """Verify parser fallback on fenced and prose-wrapped responses."""
+    # Fenced array
+    fenced = "```json\n[\"b_tree\", \"avl_tree\"]\n```"
+    assert parse_json_array_response(fenced) == ["b_tree", "avl_tree"]
+
+    # Prose wrapped plain array
+    prose_plain = "Here are the concept names: [\"b_tree\", \"avl_tree\"]. Hope this helps!"
+    assert parse_json_array_response(prose_plain) == ["b_tree", "avl_tree"]
+
+    # Prose wrapped with markdown code fences
+    prose_fenced = (
+        "Sure, here is the list:\n```json\n[\"b_tree\", \"avl_tree\"]\n```\nEnjoy!"
+    )
+    assert parse_json_array_response(prose_fenced) == ["b_tree", "avl_tree"]
+
+    # Prose with dictionary containing array (must fail strict parse and not extract dict)
+    with pytest.raises(ValueError, match="Expected JSON array"):
+        parse_json_array_response('{"concepts": ["b_tree"]}')
+
+    # Prose without any array -> ValueError
+    with pytest.raises(ValueError, match="Failed to parse response as JSON"):
+        parse_json_array_response("I cannot fulfill this request because it violates policy.")
+
+    # Prose with malformed array -> ValueError
+    with pytest.raises(ValueError, match="Failed to parse response as JSON"):
+        parse_json_array_response("Here is the array: [b_tree, avl_tree]")
+
+
+def test_command_backend_live_gating() -> None:
+    """Verify command backend CLI gates require --confirm, --command, and --adapter-profile."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+
+    # Live without confirm
+    res1 = subprocess.run(
+        [sys.executable, script, "--live", "--backend", "command"],
+        capture_output=True,
+        text=True,
+    )
+    assert res1.returncode == 1
+    assert "confirm" in res1.stderr
+
+    # Live with confirm but missing --command
+    res2 = subprocess.run(
+        [sys.executable, script, "--live", "--confirm", "--backend", "command"],
+        capture_output=True,
+        text=True,
+    )
+    assert res2.returncode == 1
+    assert "--command is required" in res2.stderr
+    assert "Traceback" not in res2.stderr
+
+    # Live with confirm and --command but missing --adapter-profile
+    res3 = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            "python3 tests/stub_prompt_adapter.py",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res3.returncode == 1
+    assert "--adapter-profile is required" in res3.stderr
+    assert "Traceback" not in res3.stderr
+
+
+def test_command_backend_dry_run() -> None:
+    """Verify command backend --dry-run prints duration estimate and memory reminder."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+
+    res = subprocess.run(
+        [sys.executable, script, "--dry-run", "--backend", "command"],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0
+    assert "Command Backend" in res.stdout
+    assert "@ 20s/call" in res.stdout
+    assert "Generate memory from chats" in res.stdout
+
+
+def test_command_backend_success_e2e(tmp_path: Path) -> None:
+    """End-to-end integration test of CommandBackend with stub adapter success."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    pool_path = tmp_path / "claude_pool.json"
+    cache_path = tmp_path / "raw.jsonl"
+
+    cmd_str = f"{sys.executable} {stub} --scenario success"
+    res = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            cmd_str,
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--target-names",
+            "80",
+            "--max-calls",
+            "5",
+            "--output",
+            str(pool_path),
+            "--cache-file",
+            str(cache_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0
+    assert pool_path.exists()
+    assert cache_path.exists()
+
+    with open(pool_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    meta = data["meta"]
+    assert meta["generator"] == "claude-web-ui-via-prompt-adapter"
+    assert meta["prompt_version"] == "np1w"
+    assert meta["requested_model"] == "sonnet"
+    assert meta["requested_effort"] == "low"
+    assert meta["requested_memory"] is False
+    assert meta["requested_web_search"] is False
+    assert "Claude 3.5 Sonnet" in meta["observed_models"]
+    assert "1" in meta["tier_histogram"]
+    assert "1.0.0" in meta["adapter_versions"]
+    assert meta["temperature"] is None
+    assert meta["max_tokens"] is None
+    assert meta["n_valid"] >= 80
+
+    # Passes load_and_validate_names_file
+    loaded = load_and_validate_names_file(pool_path, min_required_names=80)
+    assert len(loaded) >= 80
+
+
+def test_command_backend_error_codes(tmp_path: Path) -> None:
+    """Verify CommandBackend stops with specific exit codes on adapter error outcomes."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+
+    # 1. Rate limit (error 10) -> exit 3
+    res_rl = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            f"{sys.executable} {stub} --scenario rate_limit",
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--output",
+            str(tmp_path / "p1.json"),
+            "--cache-file",
+            str(tmp_path / "c1.jsonl"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_rl.returncode == 3
+    assert "Rate limit reached" in res_rl.stderr
+    assert "Reset time:" in res_rl.stderr
+
+    # 2. Login required (error 11) -> exit 4
+    res_lr = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            f"{sys.executable} {stub} --scenario login_required",
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--output",
+            str(tmp_path / "p2.json"),
+            "--cache-file",
+            str(tmp_path / "c2.jsonl"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_lr.returncode == 4
+    assert "Login/challenge required" in res_lr.stderr
+
+    # 3. Model mismatch (error 14) -> exit 5
+    res_mm = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            f"{sys.executable} {stub} --scenario model_mismatch",
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--output",
+            str(tmp_path / "p3.json"),
+            "--cache-file",
+            str(tmp_path / "c3.jsonl"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_mm.returncode == 5
+    assert "Model mismatch" in res_mm.stderr
+
+    # 4. Bad request (error 2) -> exit 1
+    res_br = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            f"{sys.executable} {stub} --scenario bad_request",
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--output",
+            str(tmp_path / "p4.json"),
+            "--cache-file",
+            str(tmp_path / "c4.jsonl"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_br.returncode == 1
+
+    # 5. Three consecutive failures (timeout, refusal, other, or garbage) -> exit 6
+    for sc in ("timeout", "refusal", "other", "garbage", "unparseable"):
+        res_fail = subprocess.run(
+            [
+                sys.executable,
+                script,
+                "--live",
+                "--confirm",
+                "--backend",
+                "command",
+                "--command",
+                f"{sys.executable} {stub} --scenario {sc}",
+                "--adapter-profile",
+                "test_prof",
+                "--pause-s",
+                "0",
+                "--output",
+                str(tmp_path / f"p_{sc}.json"),
+                "--cache-file",
+                str(tmp_path / f"c_{sc}.jsonl"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res_fail.returncode == 6, f"Expected exit 6 for scenario {sc}, got {res_fail.returncode}"
+        assert "3 consecutive failures encountered" in res_fail.stderr
+
+
+def test_command_backend_hang_timeout(tmp_path: Path) -> None:
+    """Verify CommandBackend kills a hanging subprocess and exits 6 after 3 timeouts."""
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    from scripts.generate_name_pool import CommandGenerationBackend
+    backend = CommandGenerationBackend(
+        command=f"{sys.executable} {stub} --scenario hang",
+        profile="test_prof",
+        timeout_s=-59,  # timeout_s + 60 = 1 second
+    )
+    res = backend.complete(
+        subfield="algorithms",
+        round_num=1,
+        previous_names=[],
+        system_prompt="",
+        user_prompt="",
+    )
+    assert res.ok is False
+    assert res.error_code == 12
+    assert "timed out" in res.error_message
+
+
+def test_stop_and_resume_after_rate_limit(tmp_path: Path) -> None:
+    """Verify stop on rate limit preserves cache and resuming makes zero repeated calls."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    state_file = tmp_path / "state.txt"
+    cache_path = tmp_path / "raw.jsonl"
+    pool_path = tmp_path / "pool.json"
+
+    cmd1 = f"{sys.executable} {stub} --scenario rate_limit_after_n --state-file {state_file} --limit-n 2"
+
+    # Run 1: completes 2 calls then hits rate limit on 3rd call
+    res1 = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            cmd1,
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--target-names",
+            "120",
+            "--max-calls",
+            "10",
+            "--output",
+            str(pool_path),
+            "--cache-file",
+            str(cache_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res1.returncode == 3
+    assert cache_path.exists()
+
+    cache1 = load_completed_cache(cache_path)
+    assert len(cache1) == 2
+    completed_pairs = set(cache1.keys())
+
+    # Run 2: resume with success scenario
+    cmd2 = f"{sys.executable} {stub} --scenario success"
+    res2 = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            cmd2,
+            "--adapter-profile",
+            "test_prof",
+            "--pause-s",
+            "0",
+            "--target-names",
+            "120",
+            "--max-calls",
+            "10",
+            "--output",
+            str(pool_path),
+            "--cache-file",
+            str(cache_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res2.returncode == 0
+    assert pool_path.exists()
+
+    cache2 = load_completed_cache(cache_path)
+    assert len(cache2) > len(cache1)
+    # The first 2 pairs must retain their original timestamps and parsed names unchanged
+    for pair in completed_pairs:
+        assert cache2[pair].timestamp_utc == cache1[pair].timestamp_utc
+        assert cache2[pair].parsed_names == cache1[pair].parsed_names
+
+
+def test_mixed_cache_refusal(tmp_path: Path) -> None:
+    """Verify load_completed_cache raises ValueError when cache mixes backends or prompt versions."""
+    cache_path = tmp_path / "mixed.jsonl"
+
+    # 1. Mixed backends
+    rec1 = {
+        "round": 1,
+        "subfield": "algorithms",
+        "subfield_idx": 0,
+        "request_system": "",
+        "request_user": "",
+        "response_text": json.dumps(["a", "b"]),
+        "model_id": "test",
+        "token_usage": {},
+        "timestamp_utc": "2026-10-07T00:00:00Z",
+        "retries": 0,
+        "latency_s": 0.1,
+        "backend": "deepseek",
+        "prompt_version": "np1",
+    }
+    rec2 = {
+        "round": 1,
+        "subfield": "data_structures",
+        "subfield_idx": 1,
+        "request_system": "",
+        "request_user": "",
+        "response_text": json.dumps(["c", "d"]),
+        "model_id": "test",
+        "token_usage": {},
+        "timestamp_utc": "2026-10-07T00:00:01Z",
+        "retries": 0,
+        "latency_s": 0.1,
+        "backend": "command",
+        "prompt_version": "np1w",
+    }
+    cache_path.write_text(json.dumps(rec1) + "\n" + json.dumps(rec2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mixed backends"):
+        load_completed_cache(cache_path)
+
+    # 2. Mixed prompt versions with same backend
+    rec2_same_be = dict(rec2)
+    rec2_same_be["backend"] = "deepseek"
+    cache_path.write_text(json.dumps(rec1) + "\n" + json.dumps(rec2_same_be) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mixed prompt versions"):
+        load_completed_cache(cache_path)
