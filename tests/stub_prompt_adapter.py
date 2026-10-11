@@ -94,7 +94,7 @@ def main() -> int:
     if m:
         subfield = m.group(1).replace(" ", "_")
 
-    if scenario == "hang":
+    if scenario == "hang" or scenario.startswith("hang_"):
         if args.spawn_child:
             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
             if args.child_pid_file:
@@ -102,9 +102,40 @@ def main() -> int:
         time.sleep(args.hang_seconds)
         return 0
 
+    if scenario.startswith("slow_success_"):
+        time.sleep(args.hang_seconds if args.hang_seconds != 15.0 else 0.15)
+        scenario = "success"
+
     if scenario == "garbage":
         print("CRITICAL: [fatal] Process crashed! Non-JSON garbage on stdout.")
         return 1
+
+    m_rla = re.match(r"^rate_limit_after_(\d+)_(.+)$", scenario)
+    if m_rla:
+        limit_k = int(m_rla.group(1))
+        suffix_id = re.sub(r"[^a-zA-Z0-9_]", "_", m_rla.group(2))
+        base_state = Path(args.state_file) if args.state_file else Path("stub_state.json")
+        state_file = base_state.parent / f"{base_state.stem}_{suffix_id}.txt"
+        count = 0
+        if state_file.exists():
+            try:
+                count = int(state_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                count = 0
+        if count >= limit_k:
+            out = {
+                "ok": False,
+                "error": "rate_limit",
+                "message": f"Rate limit reached after {count} calls on {scenario}",
+                "reset_time": "2026-10-07T23:59:59Z",
+            }
+            print(json.dumps(out))
+            return 10
+        else:
+            count += 1
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(str(count), encoding="utf-8")
+            scenario = "success"
 
     if scenario == "rate_limit_after_n":
         state_file = Path(args.state_file) if args.state_file else Path("stub_state.json")
@@ -129,7 +160,7 @@ def main() -> int:
             state_file.write_text(str(count), encoding="utf-8")
             scenario = "success"
 
-    if scenario == "rate_limit":
+    if scenario == "rate_limit" or scenario.startswith("rate_limit_"):
         out = {
             "ok": False,
             "error": "rate_limit",
@@ -139,7 +170,7 @@ def main() -> int:
         print(json.dumps(out))
         return 10
 
-    if scenario == "login_required":
+    if scenario == "login_required" or scenario.startswith("login_required_"):
         out = {
             "ok": False,
             "error": "login_required",
@@ -149,7 +180,7 @@ def main() -> int:
         print(json.dumps(out))
         return 11
 
-    if scenario == "model_mismatch":
+    if scenario == "model_mismatch" or scenario.startswith("model_mismatch_"):
         out = {
             "ok": False,
             "error": "model_mismatch",
@@ -159,7 +190,7 @@ def main() -> int:
         print(json.dumps(out))
         return 14
 
-    if scenario == "profile_in_use":
+    if scenario == "profile_in_use" or scenario.startswith("profile_in_use_"):
         out = {
             "ok": False,
             "error": "profile_in_use",
