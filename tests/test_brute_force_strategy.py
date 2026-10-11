@@ -97,6 +97,12 @@ class TestBruteForceUnit:
         assert len(sl.scores) == len(sl.candidates)
 
     def test_shortlist_excludes_new_name_even_if_already_in_graph(self) -> None:
+        """Verify that shortlist excludes new_name even if it is already present in the graph.
+
+        Note: this state is unreachable through insert_node (its precondition rejects
+        existing names at strategy.py:261-262), but this test pins the strategy's own
+        contract and defensive filtering.
+        """
         g = ConceptGraph(domain_context="computer science")
         for name in ["alpha", "beta", "gamma"]:
             g.add_node(name)
@@ -106,6 +112,40 @@ class TestBruteForceUnit:
         assert sl.candidates == ("alpha", "gamma")
         assert "beta" not in sl.candidates
         assert sl.scores == (0.0, 0.0)
+
+    def test_shortlist_reads_live_graph_without_caching(self) -> None:
+        """Strategy reads ConceptGraph live; bypassing on_inserted still updates shortlist.
+
+        Guards against implementations that cache nodes during setup() and only
+        synchronize via on_inserted(). Adding a node directly via graph.add_node()
+        must be visible in the next shortlist() call, sorted ascending and excluding probe.
+        """
+        g = ConceptGraph(domain_context="computer science")
+        g.add_node("alpha")
+        g.add_node("gamma")
+
+        strat = BruteForceStrategy(seed=42)
+        strat.setup(g, FakeEmbedder())
+
+        sl_initial = strat.shortlist("probe")
+        assert sl_initial.candidates == ("alpha", "gamma")
+
+        # Mutate the graph directly WITHOUT calling on_inserted
+        g.add_node("beta")
+        sl_after_direct_add = strat.shortlist("probe")
+        assert sl_after_direct_add.candidates == ("alpha", "beta", "gamma")
+        assert "probe" not in sl_after_direct_add.candidates
+        assert sl_after_direct_add.scores == (0.0, 0.0, 0.0)
+
+        # Also add a node through the real driver (insert_node) and verify it appears
+        meter = MeteredEmbedder(FakeEmbedder())
+        decision_step = FakeDecisionStep(make_edge=False)
+        insert_node(strat, g, decision_step, "delta", metered_embedder=meter)
+
+        sl_after_insert_node = strat.shortlist("probe")
+        assert sl_after_insert_node.candidates == ("alpha", "beta", "delta", "gamma")
+        assert "probe" not in sl_after_insert_node.candidates
+        assert sl_after_insert_node.scores == (0.0, 0.0, 0.0, 0.0)
 
     def test_shortlist_empty_graph(self) -> None:
         g = ConceptGraph()
@@ -291,6 +331,10 @@ class TestBruteForceHarnessSmoke:
             assert rec["status"] == "success"
             assert rec["strategy"] == "brute_force"
             n = rec["size"]
-            assert rec["metrics"]["llm_calls"] == n
-            assert rec["metrics"]["shortlist_size"] == n
-            assert rec["metrics"]["embedding_calls"] == 0
+            m = rec["metrics"]
+            assert m["n_before"] == n
+            assert m["llm_calls"] == n
+            assert m["shortlist_size"] == n
+            assert m["embedding_calls"] == 0
+            assert m["embed_s"] == 0.0
+            assert m["extra"] == {"candidate_count": n}
