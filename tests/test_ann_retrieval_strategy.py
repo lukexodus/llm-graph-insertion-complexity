@@ -975,15 +975,31 @@ class TestMutationKillers:
 # ===========================================================================
 
 class _SelectiveFailingEmbedder:
-    """Local Embedder implementing protocol with failing vectors only for specified concepts."""
+    """Local Embedder implementing protocol with failing vectors or exceptions for specified concepts."""
 
-    def __init__(self, base_embedder: Embedder, fail_concept: str) -> None:
+    def __init__(
+        self,
+        base_embedder: Embedder,
+        fail_concept: str,
+        fail_mode: str = "zero_norm",
+    ) -> None:
         self.base = base_embedder
         self.fail_text = embed_text(fail_concept)
+        self.fail_mode = fail_mode
 
     def embed(self, text: str) -> np.ndarray:
         if text == self.fail_text:
-            return np.zeros(16, dtype=np.float32)
+            if self.fail_mode == "embedder_raises":
+                raise RuntimeError("Simulated embedder failure")
+            if self.fail_mode == "zero_norm":
+                return np.zeros(16, dtype=np.float32)
+            if self.fail_mode == "nan_vec":
+                vec = np.ones(16, dtype=np.float32)
+                vec[0] = np.nan
+                return vec
+            if self.fail_mode == "dim_mismatch":
+                return np.ones(8, dtype=np.float32)
+            raise ValueError(f"Unknown fail_mode: {self.fail_mode!r}")
         return self.base.embed(text)
 
     def embed_many(self, texts: Sequence[str]) -> np.ndarray:
@@ -991,12 +1007,35 @@ class _SelectiveFailingEmbedder:
 
 
 class TestPostReviewAmendments:
-    def test_t1_shortlist_cache_cleared_on_entry_failed_shortlist_leaves_no_cached_vector(self):
-        """Test T-1 (A-1 regression): failed shortlist clears per-insertion cache."""
+    # Note on C.2 (not-set-up check after earlier successful shortlist):
+    # Through the public API (__init__, setup, shortlist, on_inserted), a strategy
+    # cannot enter the not-set-up state while retaining a non-None cache from an
+    # earlier shortlist(), because setup() unconditionally clears _cached_new_name
+    # and _cached_new_vec at its entry before any setup failure can occur.
+    @pytest.mark.parametrize(
+        "fail_mode,bad_arg,exc_type,exc_match",
+        [
+            ("empty_name", "", ValueError, "cannot be empty"),
+            ("txt_suffix", "bad_node.txt", ValueError, r"cannot end in '\.txt'"),
+            ("embedder_raises", "failing_node", RuntimeError, "Simulated embedder failure"),
+            ("zero_norm", "failing_node", ValueError, "Zero-norm"),
+            ("nan_vec", "failing_node", ValueError, "non-finite"),
+            ("dim_mismatch", "failing_node", ValueError, "Dimension mismatch"),
+        ],
+    )
+    def test_t1_shortlist_cache_cleared_on_entry_failed_shortlist_leaves_no_cached_vector(
+        self,
+        fail_mode: str,
+        bad_arg: str,
+        exc_type: type[Exception],
+        exc_match: str,
+    ):
+        """Test T-1 (A-1 / D-58 regression): failed shortlist clears per-insertion cache on every path."""
         graph = ConceptGraph()
         graph.add_node("existing_node")
         base_emb = FakeEmbedder(dim=16, seed=42)
-        emb = _SelectiveFailingEmbedder(base_emb, "failing_node")
+        emb_mode = fail_mode if fail_mode in {"embedder_raises", "zero_norm", "nan_vec", "dim_mismatch"} else "zero_norm"
+        emb = _SelectiveFailingEmbedder(base_emb, "failing_node", fail_mode=emb_mode)
         strat = AnnRetrievalStrategy(k=5)
         strat.setup(graph, emb)
 
@@ -1006,11 +1045,11 @@ class TestPostReviewAmendments:
         assert strat._cached_new_name == "good_node"
         assert strat._cached_new_vec is not None
 
-        # 2. Failing shortlist("failing_node") raises ValueError
-        with pytest.raises(ValueError, match="Zero-norm"):
-            strat.shortlist("failing_node")
+        # 2. Failing shortlist(bad_arg) raises expected exception
+        with pytest.raises(exc_type, match=exc_match):
+            strat.shortlist(bad_arg)
 
-        # 3. Must leave NO cached vector from earlier successful shortlist
+        # 3. Must leave NO cached name or vector from earlier successful shortlist
         assert strat._cached_new_name is None
         assert strat._cached_new_vec is None
 
@@ -1021,12 +1060,12 @@ class TestPostReviewAmendments:
         # 5. After failed shortlist on a fresh strategy, on_inserted raises RuntimeError
         strat_fresh = AnnRetrievalStrategy(k=5)
         strat_fresh.setup(graph, emb)
-        with pytest.raises(ValueError, match="Zero-norm"):
-            strat_fresh.shortlist("failing_node")
+        with pytest.raises(exc_type, match=exc_match):
+            strat_fresh.shortlist(bad_arg)
         assert strat_fresh._cached_new_name is None
         assert strat_fresh._cached_new_vec is None
         with pytest.raises(RuntimeError, match="without matching shortlist"):
-            strat_fresh.on_inserted("failing_node", ())
+            strat_fresh.on_inserted(bad_arg or "good_node", ())
 
     def test_t2_setup_clears_cached_shortlist_vector(self):
         """Test T-2 (kills Mutation 15): setup() clears any previously cached shortlist vector."""

@@ -993,6 +993,74 @@ class TestValidationAndContracts:
         d2 = strat.diagnostics()
         assert d2["index_size"] == 4
 
+    # Note on C.2 (not-set-up check after earlier successful shortlist):
+    # Through the public API (__init__, setup, shortlist, on_inserted), a strategy
+    # cannot enter the not-set-up state while retaining a non-None cache from an
+    # earlier shortlist(), because setup() unconditionally clears _cached_new_name
+    # and _cached_new_vec at its entry before any setup failure can occur.
+    @pytest.mark.parametrize(
+        "fail_mode,bad_arg,exc_type,exc_match",
+        [
+            ("empty_name", "", ValueError, "cannot be empty"),
+            ("txt_suffix", "bad_node.txt", ValueError, r"cannot end in '\.txt'"),
+            ("embedder_raises", "failing_node", RuntimeError, "Simulated embedder failure"),
+            ("zero_norm", "failing_node", ValueError, "Zero-norm"),
+            ("nan_vec", "failing_node", ValueError, "non-finite"),
+            ("dim_mismatch", "failing_node", ValueError, "Dimension mismatch"),
+        ],
+    )
+    def test_shortlist_failure_clears_stale_cache(
+        self,
+        fail_mode: str,
+        bad_arg: str,
+        exc_type: type[Exception],
+        exc_match: str,
+    ):
+        """Test D-58: failed shortlist() clears stale _cached_new_name and _cached_new_vec on every path."""
+        base_emb = ControllableEmbedder(dim=8, seed=42)
+        fail_text = embed_text("failing_node")
+
+        class _SelectiveFailEmbedder:
+            def embed(self, text: str) -> np.ndarray:
+                if text == fail_text:
+                    if fail_mode == "embedder_raises":
+                        raise RuntimeError("Simulated embedder failure")
+                    if fail_mode == "zero_norm":
+                        return np.zeros(8, dtype=np.float32)
+                    if fail_mode == "nan_vec":
+                        vec = np.ones(8, dtype=np.float32)
+                        vec[0] = np.nan
+                        return vec
+                    if fail_mode == "dim_mismatch":
+                        return np.ones(4, dtype=np.float32)
+                return base_emb.embed(text)
+
+            def embed_many(self, texts: Sequence[str]) -> np.ndarray:
+                return base_emb.embed_many(texts)
+
+        graph = ConceptGraph(domain_context="cs")
+        graph.add_node("existing_node")
+
+        strat = EmbeddingThresholdStrategy(theta=0.6)
+        strat.setup(graph, _SelectiveFailEmbedder())
+
+        # 1. Successful shortlist("good_node") populates cache
+        strat.shortlist("good_node")
+        assert strat._cached_new_name == "good_node"
+        assert strat._cached_new_vec is not None
+
+        # 2. Failing shortlist(bad_arg) raises expected error
+        with pytest.raises(exc_type, match=exc_match):
+            strat.shortlist(bad_arg)
+
+        # 3. Both cache attributes must be cleared to None
+        assert strat._cached_new_name is None
+        assert strat._cached_new_vec is None
+
+        # 4. Subsequent on_inserted("good_node", ()) must raise RuntimeError
+        with pytest.raises(RuntimeError, match="without matching prior shortlist"):
+            strat.on_inserted("good_node", ())
+
 
 # ===========================================================================
 # 6. Harness Smoke Test

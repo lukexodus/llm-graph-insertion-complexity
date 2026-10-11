@@ -193,6 +193,11 @@ class EmbeddingThresholdStrategy:
         Shortlist:
             Candidates ordered by (-score, name) and matching float scores.
         """
+        # Clear per-insertion cache as first executable statement (D-58) so any
+        # failed shortlist() call leaves no cached vector from an earlier shortlist
+        self._cached_new_name = None
+        self._cached_new_vec = None
+
         if not self._setup_called or self._embedder is None:
             raise RuntimeError("setup() must be called before shortlist()")
 

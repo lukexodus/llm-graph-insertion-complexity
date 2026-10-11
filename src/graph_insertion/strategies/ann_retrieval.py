@@ -270,15 +270,15 @@ class AnnRetrievalStrategy:
         1.0 in such cases). This is unreachable through `insert_node` but
         documented for completeness per [D-50](4) and [D-55].
         """
+        # Clear per-insertion cache as first executable statement (D-58) so any
+        # failed shortlist() call leaves no cached vector from an earlier shortlist
+        self._cached_new_name = None
+        self._cached_new_vec = None
+
         if not self._setup_called or self._embedder is None:
             raise RuntimeError("setup() must be called before shortlist()")
 
         _validate_concept_name(new_name)
-
-        # Clear per-insertion cache on entry (D-55 / A-1) so a failed shortlist
-        # leaves no cached vector from an earlier successful shortlist
-        self._cached_new_name = None
-        self._cached_new_vec = None
 
         # Invalidate cached diagnostic overlap for previous query
         self._cached_exact_topk_overlap = None
