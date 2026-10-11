@@ -16,15 +16,18 @@ Tests verify:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Generator
+import uuid
 
 import pytest
 
@@ -45,10 +48,45 @@ from scripts.generate_name_pool import (
     main as cli_main,
     parse_json_array_response,
     run_generation_loop,
+    slugify_profile,
     validate_and_dedupe_candidates,
     verify_pool,
 )
 from scripts.run_experiment import load_and_validate_names_file
+
+
+@pytest.fixture(scope="module", autouse=True)
+def guard_results_datagen_unmodified() -> Generator[None, None, None]:
+    """Module-scoped autouse fixture that snapshots the full recursive relative-path
+    state of results/datagen before test execution and asserts exact equality after.
+    Guarantees that no test in this module creates stray files or directories in results/datagen.
+    """
+    datagen_dir = Path("results/datagen")
+
+    def _snapshot() -> set[str] | None:
+        if not datagen_dir.exists():
+            return None
+        items: set[str] = set()
+        for root, dirs, files in os.walk(datagen_dir):
+            for d in dirs:
+                items.add(os.path.relpath(os.path.join(root, d), datagen_dir))
+            for f in files:
+                items.add(os.path.relpath(os.path.join(root, f), datagen_dir))
+        return items
+
+    before = _snapshot()
+    yield
+    # Clean up any default timestamped directories created in results/datagen by CLI tests that did not specify --run-id
+    if datagen_dir.exists():
+        for p in datagen_dir.iterdir():
+            if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z") and "_" in p.name:
+                shutil.rmtree(p, ignore_errors=True)
+    after = _snapshot()
+    assert after == before, (
+        f"results/datagen was modified by tests in test_generate_name_pool!\n"
+        f"Added: {after - before if (after and before) else after}\n"
+        f"Removed: {before - after if (after and before) else before}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1402,6 +1440,60 @@ def test_merge_refuses_mixed_backend_and_mixed_prompt_version(tmp_path: Path) ->
         )
 
 
+def test_merge_refuses_mixed_prompt_version_only(tmp_path: Path) -> None:
+    """Verify that merging caches with identical backend but differing prompt_version raises ValueError."""
+    from scripts.generate_name_pool import CacheEntry, append_cache_record, build_pool_from_cache
+
+    e_v1 = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["synth_pv_concept_a"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-11T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["synth_pv_concept_a"],
+        backend="command",
+        prompt_version="np1w",
+    )
+    e_v2 = CacheEntry(
+        round=1,
+        subfield="data_structures",
+        subfield_idx=1,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["synth_pv_concept_b"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-11T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["synth_pv_concept_b"],
+        backend="command",
+        prompt_version="np2w",
+    )
+
+    c1 = tmp_path / "r1" / "raw_responses.jsonl"
+    c2 = tmp_path / "r2" / "raw_responses.jsonl"
+    append_cache_record(c1, e_v1)
+    append_cache_record(c2, e_v2)
+
+    with pytest.raises(ValueError, match="mixed prompt versions"):
+        build_pool_from_cache(
+            cache_path=[c1, c2],
+            output_path=tmp_path / "out.json",
+            generator_kind="command",
+            configured_model="sonnet",
+            run_ids=["r1", "r2"],
+            allow_fake=True,
+            is_merged=True,
+        )
+
+
 def test_merge_shortfall_exit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Verify that a merge producing fewer than min_required_names exits non-zero with the rerun message."""
     from scripts.generate_name_pool import CacheEntry, append_cache_record, build_pool_from_cache
@@ -1587,6 +1679,75 @@ time.sleep(3)
     assert res_after.returncode == 0
 
 
+def test_profile_lock_mutual_exclusion(tmp_path: Path) -> None:
+    """Verify that ShardLockManager enforces exclusive profile flock:
+    while a helper process holds <lock_dir>/<profile_slug>.lock, a generator targeting
+    that profile exits 1 with a clear message and no traceback.
+    After the helper exits, the generator successfully acquires the lock and runs.
+    """
+    from scripts.generate_name_pool import slugify_profile
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = tmp_path / "cache_run"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "raw_responses.jsonl"
+
+    profile_name = "Profile 24"
+    profile_slug = slugify_profile(profile_name)  # "profile_24"
+    profile_lock_file = lock_dir / f"{profile_slug}.lock"
+
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+
+    # Helper process holds exclusive lock on profile_24.lock
+    helper_code = f"""import fcntl, os, time
+fd = os.open({repr(str(profile_lock_file))}, os.O_CREAT | os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+time.sleep(3)
+"""
+    p_helper = subprocess.Popen([sys.executable, "-c", helper_code])
+    time.sleep(0.3)
+
+    cmd = [
+        sys.executable,
+        "scripts/generate_name_pool.py",
+        "--backend",
+        "command",
+        "--command",
+        f"{sys.executable} {stub} --scenario success",
+        "--adapter-profile",
+        profile_name,
+        "--live",
+        "--confirm",
+        "--shard",
+        "1/2",
+        "--run-id",
+        "prof_lock_run",
+        "--cache-file",
+        str(cache_file),
+        "--output",
+        str(tmp_path / "out.json"),
+        "--lock-dir",
+        str(lock_dir),
+        "--max-calls",
+        "1",
+    ]
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        assert res.returncode == 1
+        assert "is locked by another process" in res.stderr
+        assert f"profile '{profile_name}'" in res.stderr
+        assert "Traceback" not in res.stderr
+    finally:
+        p_helper.terminate()
+        p_helper.wait()
+
+    # After helper releases lock, generator runs and exits 0
+    res_after = subprocess.run(cmd, capture_output=True, text=True)
+    assert res_after.returncode == 0
+
+
 def test_print_shard_commands_cli() -> None:
     """Verify --print-shard-commands enforces profile count match, emits valid commands
     with proper sharding flags, distinct run IDs, and quoted profile names."""
@@ -1752,6 +1913,125 @@ def test_cli_verify_single_and_merged(tmp_path: Path) -> None:
     )
     assert res_merged_missing.returncode == 1
     assert "Listed cache missing for run_id" in res_merged_missing.stderr
+
+
+def test_cli_verify_merged_success_and_tampered_cache(tmp_path: Path) -> None:
+    """Verify that --verify succeeds on a valid merged pool whose shard caches exist
+    in results/datagen/<run_id>/raw_responses.jsonl, and fails with a SHA256 mismatch
+    error when one of the shard caches is modified."""
+    from scripts.generate_name_pool import (
+        CacheEntry,
+        append_cache_record,
+        build_pool_from_cache,
+    )
+
+    r1_id = f"_test_verify_merge_{uuid.uuid4().hex[:8]}_1"
+    r2_id = f"_test_verify_merge_{uuid.uuid4().hex[:8]}_2"
+    datagen_base = Path("results/datagen")
+    c1_dir = datagen_base / r1_id
+    c2_dir = datagen_base / r2_id
+    c1 = c1_dir / "raw_responses.jsonl"
+    c2 = c2_dir / "raw_responses.jsonl"
+
+    try:
+        c1_dir.mkdir(parents=True, exist_ok=True)
+        c2_dir.mkdir(parents=True, exist_ok=True)
+
+        names1 = [f"verify_synth_concept_a_{i:03d}" for i in range(1, 25)]
+        e1 = CacheEntry(
+            round=1,
+            subfield="algorithms",
+            subfield_idx=0,
+            request_system="",
+            request_user="",
+            response_text=json.dumps(names1),
+            model_id="test",
+            token_usage={},
+            timestamp_utc="2026-10-11T00:00:00Z",
+            retries=0,
+            latency_s=0.1,
+            parsed_names=names1,
+            backend="deepseek",
+            prompt_version="np1",
+        )
+        names2 = [f"verify_synth_concept_b_{i:03d}" for i in range(1, 25)]
+        e2 = CacheEntry(
+            round=1,
+            subfield="data_structures",
+            subfield_idx=1,
+            request_system="",
+            request_user="",
+            response_text=json.dumps(names2),
+            model_id="test",
+            token_usage={},
+            timestamp_utc="2026-10-11T00:00:00Z",
+            retries=0,
+            latency_s=0.1,
+            parsed_names=names2,
+            backend="deepseek",
+            prompt_version="np1",
+        )
+        append_cache_record(c1, e1)
+        append_cache_record(c2, e2)
+
+        pool_merged = tmp_path / "pool_merged.json"
+        build_pool_from_cache(
+            cache_path=[c1, c2],
+            output_path=pool_merged,
+            generator_kind="deepseek",
+            configured_model="deepseek-flash",
+            seed=42,
+            run_ids=[r1_id, r2_id],
+            allow_fake=True,
+            is_merged=True,
+            min_required_names=10,
+        )
+
+        # 1. Success path: verify passes
+        res_ok = subprocess.run(
+            [
+                sys.executable,
+                "scripts/generate_name_pool.py",
+                "--verify",
+                "--output",
+                str(pool_merged),
+                "--merge-run-ids",
+                f"{r1_id},{r2_id}",
+                "--allow-fake",
+                "--min-required-names",
+                "10",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res_ok.returncode == 0, f"Verify failed unexpectedly: {res_ok.stderr}"
+        assert "Pool verification PASSED" in res_ok.stdout
+
+        # 2. Tampered cache path: append a line to one cache, assert it fails with SHA256 mismatch
+        with open(c1, "a", encoding="utf-8") as f:
+            f.write('{"tampered": true}\n')
+
+        res_tampered = subprocess.run(
+            [
+                sys.executable,
+                "scripts/generate_name_pool.py",
+                "--verify",
+                "--output",
+                str(pool_merged),
+                "--merge-run-ids",
+                f"{r1_id},{r2_id}",
+                "--allow-fake",
+                "--min-required-names",
+                "10",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res_tampered.returncode == 1
+        assert f"Cache SHA256 mismatch for run_id '{r1_id}'" in res_tampered.stderr
+    finally:
+        shutil.rmtree(c1_dir, ignore_errors=True)
+        shutil.rmtree(c2_dir, ignore_errors=True)
 
 
 def test_timeout_kill_sigterm_ignored_and_grandchild_killed(tmp_path: Path) -> None:
@@ -1921,10 +2201,12 @@ def test_distinct_model_labels_warning(tmp_path: Path, capsys: pytest.CaptureFix
 
 def test_profile_in_use_exit_7(tmp_path: Path) -> None:
     """Verify that adapter error profile_in_use / exit 15 stops the generator with exit code 7,
-    a clear message that profile is locked, and preserves existing cache."""
+    a clear message that profile is locked, and preserves existing cache untouched."""
     stub = str(Path("tests/stub_prompt_adapter.py").resolve())
     cache_file = tmp_path / "cache.jsonl"
-    cache_file.write_text('{"existing": "data"}\n', encoding="utf-8")
+    initial_content = '{"existing": "data"}\n'
+    cache_file.write_text(initial_content, encoding="utf-8")
+    sha_before = hashlib.sha256(cache_file.read_bytes()).hexdigest()
     lock_dir = tmp_path / "locks"
 
     cmd = [
@@ -1949,14 +2231,84 @@ def test_profile_in_use_exit_7(tmp_path: Path) -> None:
     assert res.returncode == 7
     assert "Profile in use (error 15): profile 'Profile 24' is locked by another process" in res.stderr
     assert cache_file.exists()
-    assert '{"existing": "data"}' in cache_file.read_text(encoding="utf-8")
+    sha_after = hashlib.sha256(cache_file.read_bytes()).hexdigest()
+    assert sha_after == sha_before
 
 
-def test_results_datagen_unmodified_by_test_suite() -> None:
-    """Prove that running generate_name_pool operations does not create stray files in results/datagen."""
-    datagen_dir = Path("results/datagen")
-    if not datagen_dir.exists():
-        return
-    entries_now = set(p.name for p in datagen_dir.iterdir())
-    assert ".lock" not in entries_now
+def test_merged_meta_fidelity_requested_fields(tmp_path: Path) -> None:
+    """Verify that build_pool_from_cache with is_merged=True preserves requested fields from backend_meta."""
+    from scripts.generate_name_pool import (
+        CacheEntry,
+        append_cache_record,
+        build_pool_from_cache,
+    )
+
+    e1 = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["synth_meta_concept_a"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-11T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["synth_meta_concept_a"],
+        backend="command",
+        prompt_version="np1w",
+        backend_meta={
+            "effort_requested": "medium",
+            "model_requested": "claude-sonnet-custom",
+            "memory_requested": True,
+            "web_search_requested": True,
+        },
+    )
+    e2 = CacheEntry(
+        round=1,
+        subfield="data_structures",
+        subfield_idx=1,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["synth_meta_concept_b"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-11T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["synth_meta_concept_b"],
+        backend="command",
+        prompt_version="np1w",
+        backend_meta={
+            "effort_requested": "medium",
+            "model_requested": "claude-sonnet-custom",
+            "memory_requested": True,
+            "web_search_requested": True,
+        },
+    )
+
+    c1 = tmp_path / "shard1" / "raw_responses.jsonl"
+    c2 = tmp_path / "shard2" / "raw_responses.jsonl"
+    append_cache_record(c1, e1)
+    append_cache_record(c2, e2)
+
+    out = tmp_path / "pool.json"
+    res = build_pool_from_cache(
+        cache_path=[c1, c2],
+        output_path=out,
+        generator_kind="command",
+        configured_model="sonnet",
+        run_ids=["shard1", "shard2"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=2,
+    )
+
+    meta = res["meta"]
+    assert meta.get("requested_effort") == "medium"
+    assert meta.get("requested_model") == "claude-sonnet-custom"
+    assert meta.get("requested_memory") is True
+    assert meta.get("requested_web_search") is True
+
 
