@@ -51,6 +51,7 @@
 │   │   ├── STRAT-002-review-claude-code.md
 │   │   ├── STRAT-002-V-opencode.md
 │   │   ├── STRAT-003-A-gemini.md
+│   │   ├── STRAT-003-B-gemini.md
 │   │   ├── STRAT-003-claude-code-ann-retrieval.md
 │   │   ├── STRAT-003-gemini-ann-retrieval.md
 │   │   ├── STRAT-003-review-gemini.md
@@ -66,6 +67,7 @@
 ├── patch
 │   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
+│   ├── 0001-STRAT-003-B-close-stale-cache-hole-in-Strategy-2-and.patch
 │   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
 │   ├── 0002-FIX-013-repair-and-test-DATA-006-shard-orchestration.patch
 │   ├── 0003-STRAT-001-A-close-test-coverage-gap-and-review-nits-.patch
@@ -101,10 +103,13 @@
 │   ├── STRAT-001.patch
 │   ├── STRAT-002_code.patch
 │   ├── STRAT-002-R_code.patch
-│   └── STRAT-002-V_code.patch
+│   ├── STRAT-002-V_code.patch
+│   ├── STRAT-003-B_code.patch
+│   └── STRAT-003-B.patch
 ├── scripts
 │   ├── apc-bundle.sh
 │   ├── generate_name_pool.py
+│   ├── name_pool_supervisor.py
 │   ├── pilot_dsa_zero_shot.py
 │   ├── README.md
 │   └── run_experiment.py
@@ -112,6 +117,7 @@
 │   └── graph_insertion
 │       ├── strategies
 │       │   ├── ann_retrieval.py
+│       │   ├── bounded_bucket.py
 │       │   ├── brute_force.py
 │       │   ├── embedding_threshold.py
 │       │   ├── __init__.py
@@ -133,6 +139,7 @@
 │   ├── stub_prompt_adapter.py
 │   ├── test_ann_retrieval_strategy.py
 │   ├── test_apc_bundle.sh
+│   ├── test_bounded_bucket_strategy.py
 │   ├── test_brute_force_strategy.py
 │   ├── test_controllable_embedder.py
 │   ├── test_decision.py
@@ -144,6 +151,7 @@
 │   ├── test_live_guard.py
 │   ├── test_llm.py
 │   ├── test_loader.py
+│   ├── test_name_pool_supervisor.py
 │   ├── test_null_strategy.py
 │   ├── test_pilot.py
 │   ├── test_schedule.py
