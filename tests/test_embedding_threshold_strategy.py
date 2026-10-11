@@ -933,41 +933,62 @@ class TestValidationAndContracts:
 
     def test_third_setup_recovery(self):
         """Test V-E: successful setup, failed setup, successful third setup works correctly."""
-        embedder_good = ControllableEmbedder(dim=8, seed=42)
-        
+        base = np.zeros(8, dtype=np.float32)
+        base[0] = 1.0
+        v_high = vector_with_cosine(base, 0.85)  # > 0.6
+        v_mid = vector_with_cosine(base, 0.75)   # > 0.6
+        v_low = vector_with_cosine(base, 0.35)   # < 0.6
+
+        embedder_good = ControllableEmbedder(
+            {
+                "node_1a": v_high,
+                "node_1b": v_mid,
+                "node_2": v_high,
+                "node_3a": v_high,
+                "node_3b": v_mid,
+                "node_3c": v_low,
+                "probe": base,
+            },
+            dim=8,
+            seed=42,
+        )
+
         class BadEmbedder(ControllableEmbedder):
             def embed_many(self, texts):
                 raise ValueError("Simulated failure")
-                
+
         strat = EmbeddingThresholdStrategy(theta=0.6)
-        
+
         # 1. Successful setup
         graph1 = ConceptGraph(domain_context="cs")
         graph1.add_node("node_1a")
         graph1.add_node("node_1b")
         strat.setup(graph1, embedder_good)
-        
+
         # 2. Failed setup
         graph2 = ConceptGraph(domain_context="cs")
         graph2.add_node("node_2")
         with pytest.raises(ValueError, match="Simulated failure"):
             strat.setup(graph2, BadEmbedder(dim=8, seed=42))
-            
+
         # 3. Successful third setup
         graph3 = ConceptGraph(domain_context="cs")
         graph3.add_node("node_3a")
         graph3.add_node("node_3b")
         graph3.add_node("node_3c")
         strat.setup(graph3, embedder_good)
-        
+
         # Verify shortlist candidates come only from graph 3
         res = strat.shortlist("probe")
-        assert all(c.startswith("node_3") for c in res.candidates)
-        
+        assert len(res.candidates) >= 1
+        assert res.candidates == ("node_3a", "node_3b")
+        assert "node_1a" not in res.candidates
+        assert "node_1b" not in res.candidates
+
         # Verify index size and on_inserted
         d = strat.diagnostics()
         assert d["index_size"] == 3
-        
+
         strat.on_inserted("probe", ())
         d2 = strat.diagnostics()
         assert d2["index_size"] == 4

@@ -19,13 +19,16 @@ Decisions cited:
   - [D-26], [D-28]: Single-embedding invariant: new_name embedded exactly once
     in shortlist(), cached, and reused in on_inserted(). No embedding in update.
   - [D-35](4)(5): Embedding model is all-MiniLM-L6-v2 on CPU; parameters fixed
-    a priori: k=10, M=16, efConstruction=200, efSearch=64; no tuning on evaluation corpora.
+    a priori: k=10, M=16, efConstruction=200, efSearch=64 (updated to 128 per [D-55]);
+    no tuning on evaluation corpora.
   - [D-41]: max_candidates defined as min(k, n_existing); guard bound evaluates
     to exactly 600 calls over the D-35 sweep matrix (6 sizes x 10 trials x 10).
   - [D-47]: Locked Strategy 3 specification: IndexHNSWFlat with inner product on
     L2-normalised unit vectors, single-threaded determinism (omp_set_num_threads(1)),
     -1 padding filtering, exact_topk_overlap diagnostic computed in diagnostics(),
     all-or-nothing setup(), and guarded faiss import.
+  - [D-55]: Strategy 3 review amendments: shortlist() cache clearing on entry (A-1),
+    default ef_search updated from 64 to 128 (A-3), and max_cosine documentation note (A-2).
 
 Key semantics & design choices:
   - Similarity metric: Inner product on L2-normalised float32 vectors. This is
@@ -96,7 +99,7 @@ class AnnRetrievalStrategy:
     ef_construction:
         HNSW search depth during index construction (default 200).
     ef_search:
-        HNSW search depth during nearest-neighbour queries (default 64).
+        HNSW search depth during nearest-neighbour queries (default 128 per [D-55]).
     """
 
     name: str = "ann_retrieval"
@@ -108,7 +111,7 @@ class AnnRetrievalStrategy:
         seed: int = 42,
         M: int = 16,
         ef_construction: int = 200,
-        ef_search: int = 64,
+        ef_search: int = 128,
     ) -> None:
         if faiss is None:
             raise ImportError(
@@ -259,11 +262,23 @@ class AnnRetrievalStrategy:
         -------
         Shortlist:
             Candidates ordered by (-score, name) and matching float scores.
+
+        Notes
+        -----
+        `max_cosine` in diagnostics is taken over the raw search results and
+        includes `new_name`'s own row if `new_name` is already indexed (would be
+        1.0 in such cases). This is unreachable through `insert_node` but
+        documented for completeness per [D-50](4) and [D-55].
         """
         if not self._setup_called or self._embedder is None:
             raise RuntimeError("setup() must be called before shortlist()")
 
         _validate_concept_name(new_name)
+
+        # Clear per-insertion cache on entry (D-55 / A-1) so a failed shortlist
+        # leaves no cached vector from an earlier successful shortlist
+        self._cached_new_name = None
+        self._cached_new_vec = None
 
         # Invalidate cached diagnostic overlap for previous query
         self._cached_exact_topk_overlap = None
@@ -404,6 +419,11 @@ class AnnRetrievalStrategy:
 
         exact_topk_overlap is computed here outside every timed window using
         index.reconstruct_n() to isolate exact calculation from shortlist_s.
+
+        Note: `max_cosine` is the maximum over the raw search results across the
+        whole index, including `new_name`'s own row if `new_name` is already indexed
+        (would be 1.0 in such cases). This is unreachable through `insert_node`
+        but documented for completeness per [D-50](4) and [D-55].
         """
         index_size = self._index.ntotal if self._index is not None else 0
 

@@ -790,7 +790,7 @@ class TestParameterValidation:
         with pytest.raises(ValueError):
             AnnRetrievalStrategy(ef_construction=bad_val)
 
-    @pytest.mark.parametrize("bad_val", [True, 0, -1, 2.5, "64"])
+    @pytest.mark.parametrize("bad_val", [True, 0, -1, 2.5, "128"])
     def test_ef_search_validation(self, bad_val):
         with pytest.raises(ValueError):
             AnnRetrievalStrategy(ef_search=bad_val)
@@ -800,7 +800,7 @@ class TestParameterValidation:
         assert strat.k == 10
         assert strat.M == 16
         assert strat.ef_construction == 200
-        assert strat.ef_search == 64
+        assert strat.ef_search == 128
 
 
 # ===========================================================================
@@ -968,3 +968,189 @@ class TestMutationKillers:
             assert ef_c_at_add == [200], f"Expected efConstruction=200 at add, got {ef_c_at_add}"
         finally:
             faiss.IndexHNSWFlat.add = orig_add
+
+
+# ===========================================================================
+# 19. Post-Review Amendment Tests (A-4: T-1, T-2, T-3, T-4)
+# ===========================================================================
+
+class _SelectiveFailingEmbedder:
+    """Local Embedder implementing protocol with failing vectors only for specified concepts."""
+
+    def __init__(self, base_embedder: Embedder, fail_concept: str) -> None:
+        self.base = base_embedder
+        self.fail_text = embed_text(fail_concept)
+
+    def embed(self, text: str) -> np.ndarray:
+        if text == self.fail_text:
+            return np.zeros(16, dtype=np.float32)
+        return self.base.embed(text)
+
+    def embed_many(self, texts: Sequence[str]) -> np.ndarray:
+        return self.base.embed_many(texts)
+
+
+class TestPostReviewAmendments:
+    def test_t1_shortlist_cache_cleared_on_entry_failed_shortlist_leaves_no_cached_vector(self):
+        """Test T-1 (A-1 regression): failed shortlist clears per-insertion cache."""
+        graph = ConceptGraph()
+        graph.add_node("existing_node")
+        base_emb = FakeEmbedder(dim=16, seed=42)
+        emb = _SelectiveFailingEmbedder(base_emb, "failing_node")
+        strat = AnnRetrievalStrategy(k=5)
+        strat.setup(graph, emb)
+
+        # 1. shortlist("good_node") succeeds and caches "good_node"
+        res = strat.shortlist("good_node")
+        assert len(res.candidates) == 1
+        assert strat._cached_new_name == "good_node"
+        assert strat._cached_new_vec is not None
+
+        # 2. Failing shortlist("failing_node") raises ValueError
+        with pytest.raises(ValueError, match="Zero-norm"):
+            strat.shortlist("failing_node")
+
+        # 3. Must leave NO cached vector from earlier successful shortlist
+        assert strat._cached_new_name is None
+        assert strat._cached_new_vec is None
+
+        # 4. on_inserted("good_node") must now raise RuntimeError
+        with pytest.raises(RuntimeError, match="without matching shortlist"):
+            strat.on_inserted("good_node", ())
+
+        # 5. After failed shortlist on a fresh strategy, on_inserted raises RuntimeError
+        strat_fresh = AnnRetrievalStrategy(k=5)
+        strat_fresh.setup(graph, emb)
+        with pytest.raises(ValueError, match="Zero-norm"):
+            strat_fresh.shortlist("failing_node")
+        assert strat_fresh._cached_new_name is None
+        assert strat_fresh._cached_new_vec is None
+        with pytest.raises(RuntimeError, match="without matching shortlist"):
+            strat_fresh.on_inserted("failing_node", ())
+
+    def test_t2_setup_clears_cached_shortlist_vector(self):
+        """Test T-2 (kills Mutation 15): setup() clears any previously cached shortlist vector."""
+        graph_a = ConceptGraph()
+        graph_a.add_node("n_a")
+        embedder = FakeEmbedder(dim=16, seed=42)
+        strat = AnnRetrievalStrategy(k=5)
+        strat.setup(graph_a, embedder)
+
+        strat.shortlist("p")
+        assert strat._cached_new_name == "p"
+        assert strat._cached_new_vec is not None
+
+        graph_b = ConceptGraph()
+        graph_b.add_node("n_b")
+        strat.setup(graph_b, embedder)
+
+        assert strat._cached_new_name is None
+        assert strat._cached_new_vec is None
+
+        with pytest.raises(RuntimeError, match="without matching shortlist"):
+            strat.on_inserted("p", ())
+
+    def test_t3_diagnostics_after_on_inserted_through_driver(self):
+        """Test T-3: diagnostics exact_topk_overlap matches independent float64 top-k through driver."""
+        init_names = [f"initial_concept_{i:03d}" for i in range(35)]
+        graph = ConceptGraph()
+        for name in init_names:
+            graph.add_node(name)
+
+        embedder = ControllableEmbedder(dim=16, seed=42)
+        meter = MeteredEmbedder(embedder)
+        decision_step = FakeDecisionStep(make_edge=False)
+
+        strat = AnnRetrievalStrategy(k=10, seed=42)
+        strat.setup(graph, meter)
+
+        probes = ["query_concept_alpha", "query_concept_beta", "query_concept_gamma"]
+        for probe in probes:
+            nodes_at_query = list(strat._names)
+            n_at_q = len(nodes_at_query)
+            reconstructed_64 = strat._index.reconstruct_n(0, n_at_q).astype(np.float64)
+            q_vec_raw = embedder.embed(embed_text(probe))
+            q_vec_64 = (q_vec_raw / np.linalg.norm(q_vec_raw)).astype(np.float64)
+            cosines_64 = reconstructed_64 @ q_vec_64
+            pairs = [
+                (float(cosines_64[i]), nodes_at_query[i])
+                for i in range(n_at_q)
+                if nodes_at_query[i] != probe
+            ]
+            pairs.sort(key=lambda item: (-item[0], item[1]))
+            k_eff = min(10, len(pairs))
+            exact_set = {cand for _, cand in pairs[:k_eff]}
+
+            n_before = graph.num_nodes()
+            res = insert_node(strat, graph, decision_step, probe, metered_embedder=meter)
+
+            assert res.shortlist is not None
+            ret_cands = res.shortlist.candidates
+            expected_overlap = (
+                sum(1 for c in ret_cands if c in exact_set) / len(ret_cands)
+                if ret_cands
+                else (1.0 if k_eff == 0 else 0.0)
+            )
+
+            diag = strat.diagnostics()
+            assert diag["exact_topk_overlap"] == expected_overlap
+            assert 0.0 <= diag["exact_topk_overlap"] <= 1.0
+            assert diag["index_size"] == n_before + 1
+
+        # Deterministic low ef_search case (ef_search=1, n >= 100) where overlap < 1.0 is observed
+        g_low = ConceptGraph()
+        for i in range(120):
+            g_low.add_node(f"node_low_{i:03d}")
+        emb_low = FakeEmbedder(dim=16, seed=42)
+        meter_low = MeteredEmbedder(emb_low)
+        strat_low = AnnRetrievalStrategy(k=10, ef_search=1, seed=42)
+        strat_low.setup(g_low, meter_low)
+        insert_res_low = insert_node(strat_low, g_low, decision_step, "probe_low", metered_embedder=meter_low)
+        diag_low = strat_low.diagnostics()
+        assert diag_low["exact_topk_overlap"] is not None
+        assert 0.0 <= diag_low["exact_topk_overlap"] < 1.0
+
+    def test_t4_ef_search_applied_and_configured(self):
+        """Test T-4: efSearch is correctly applied to HNSW index, config, and diagnostics."""
+        graph = ConceptGraph()
+        graph.add_node("n1")
+        embedder = FakeEmbedder(dim=16, seed=42)
+
+        # 1. Default ef_search is 128
+        strat_def = AnnRetrievalStrategy()
+        assert strat_def.ef_search == 128
+        assert strat_def.config()["ef_search"] == 128
+        strat_def.setup(graph, embedder)
+        assert strat_def._index.hnsw.efSearch == 128
+        assert strat_def.diagnostics()["ef_search"] == 128
+
+        # 2. Non-default ef_search (e.g. 7) on non-empty graph
+        strat_7 = AnnRetrievalStrategy(ef_search=7)
+        assert strat_7.ef_search == 7
+        assert strat_7.config()["ef_search"] == 7
+        strat_7.setup(graph, embedder)
+        assert strat_7._index.hnsw.efSearch == 7
+        assert strat_7.diagnostics()["ef_search"] == 7
+
+        # 3. Non-default ef_search on empty graph with lazy creation
+        strat_empty_7 = AnnRetrievalStrategy(ef_search=7)
+        strat_empty_7.setup(ConceptGraph(), embedder)
+        assert strat_empty_7._index is None
+        strat_empty_7.shortlist("concept_lazy")
+        assert strat_empty_7._index.hnsw.efSearch == 7
+        assert strat_empty_7.config()["ef_search"] == 7
+        assert strat_empty_7.diagnostics()["ef_search"] == 7
+
+        # 4. Default ef_search on empty graph with lazy creation
+        strat_empty_def = AnnRetrievalStrategy()
+        strat_empty_def.setup(ConceptGraph(), embedder)
+        assert strat_empty_def._index is None
+        strat_empty_def.shortlist("concept_lazy_def")
+        assert strat_empty_def._index.hnsw.efSearch == 128
+        assert strat_empty_def.config()["ef_search"] == 128
+        assert strat_empty_def.diagnostics()["ef_search"] == 128
+
+        # 5. Pre-search reapplication before search (kills mutation deleting pre-search assignment)
+        strat_def._index.hnsw.efSearch = 1
+        strat_def.shortlist("recheck_concept")
+        assert strat_def._index.hnsw.efSearch == 128
