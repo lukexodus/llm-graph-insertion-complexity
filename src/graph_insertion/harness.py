@@ -45,6 +45,7 @@ from graph_insertion.strategy import (
     InsertionMetrics,
     InsertionResult,
     NarrowingStrategy,
+    candidate_upper_bound,
     insert_node,
 )
 
@@ -616,10 +617,6 @@ def estimate_and_print_plan(
     print(f"Strategy Config: {strategy.config()}")
     print("=" * 70)
 
-    # Estimate max candidate shortlist size per insertion
-    # If strategy provides top_k in config, use it; otherwise worst-case is N-1
-    top_k_bound = strategy.config().get("top_k", None)
-
     if config.mode == "accuracy":
         if corpora is None:
             corpora = {
@@ -637,7 +634,7 @@ def estimate_and_print_plan(
             else:
                 sample_k = nodes_count
             trials = sample_k * config.repeats
-            max_cands = min(nodes_count - 1, top_k_bound) if top_k_bound else (nodes_count - 1)
+            max_cands = candidate_upper_bound(strategy, nodes_count - 1)
             max_llm = trials * max_cands
 
             plan["details"].append({
@@ -665,7 +662,7 @@ def estimate_and_print_plan(
 
         for sz in config.sweep_sizes:
             trials = config.sweep_trials_per_size
-            max_cands = min(sz, top_k_bound) if top_k_bound else sz
+            max_cands = candidate_upper_bound(strategy, sz)
             max_llm = trials * max_cands
             total_trials += trials
             total_llm += max_llm
