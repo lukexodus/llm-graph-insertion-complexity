@@ -1,0 +1,153 @@
+.
+├── docs
+│   ├── context
+│   │   ├── apc-bundle-quickref.md
+│   │   ├── apc-handoff-template.md
+│   │   ├── complete-context.md
+│   │   ├── data-formats.md
+│   │   ├── prompt-adapter-contract.md
+│   │   ├── repo-tree.txt
+│   │   └── strategy-interface.md
+│   ├── decisions
+│   │   └── decision-log.md
+│   ├── guide
+│   │   └── Name-pool generation runbook.md
+│   ├── reports
+│   │   ├── to-be-shared
+│   │   │   ├── llm-graph-insertion-complexity-thesis.md
+│   │   │   └── thesis-orientation.md
+│   │   ├── DATA-001-gemini-verify-file-formats.md
+│   │   ├── DATA-002-gemini-mekg-directionality.md
+│   │   ├── DATA-003-gemini-source-text-evidence.md
+│   │   ├── DATA-004-claude-code-name-pool-generator.md
+│   │   ├── DATA-005-gemini-claude-web-backend.md
+│   │   ├── DATA-006-kiro_default-name-pool-shards.md
+│   │   ├── DOC-001-gemini-doc-sync.md
+│   │   ├── DOC-003-claude-code-agents-worktree-rule.md
+│   │   ├── FIX-001-gemini-infra-001-followup.md
+│   │   ├── FIX-002-gemini-infra-002-hardening.md
+│   │   ├── FIX-003-gemini-driver-followup.md
+│   │   ├── FIX-004-gemini-harness-pilot-corrections.md
+│   │   ├── FIX-005-claude-code-prompt-v2.md
+│   │   ├── FIX-006-claude-code-observed-model-integrity.md
+│   │   ├── FIX-007-claude-code-pilot-outcome.md
+│   │   ├── FIX-008-claude-code-infra005-hardening.md
+│   │   ├── FIX-009-claude-code-prelive-hardening.md
+│   │   ├── FIX-010-gemini-resume-estimate-unification.md
+│   │   ├── FIX-011-claude-code-command-backend-error-codes.md
+│   │   ├── FIX-013-gemini-repair-data-006.md
+│   │   ├── FIX-014-gemini-finish-fix-013.md
+│   │   ├── FIX-015-gemini-adapter-thinking-and-fixture-repair.md
+│   │   ├── INFRA-001-claude-code-graph-representation.md
+│   │   ├── INFRA-002-gemini-strategy-interface.md
+│   │   ├── INFRA-003-gemini-corpus-loader.md
+│   │   ├── INFRA-004-gemini-measurement-harness.md
+│   │   ├── INFRA-005-claude-code-null-strategy-e2e.md
+│   │   ├── INFRA-006-gemini-decision-step-llm-client.md
+│   │   ├── STRAT-001-A-claude-code.md
+│   │   ├── STRAT-001-gemini-brute-force.md
+│   │   ├── STRAT-001-review-opencode.md
+│   │   ├── STRAT-002-gemini-embedding-threshold.md
+│   │   ├── STRAT-002-review-claude-code.md
+│   │   ├── STRAT-002-V-opencode.md
+│   │   ├── STRAT-003-A-gemini.md
+│   │   ├── STRAT-003-claude-code-ann-retrieval.md
+│   │   ├── STRAT-003-gemini-ann-retrieval.md
+│   │   ├── STRAT-003-review-gemini.md
+│   │   ├── STRAT-004-D-gemini-design-note.md
+│   │   └── TOOL-001-claude-code-apc-bundle.md
+│   ├── rrl
+│   │   └── catalogue.md
+│   ├── tasks
+│   │   ├── high-level-tasks.md
+│   │   └── status.md
+│   └── thesis
+│       └── An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction.md
+├── patch
+│   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
+│   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
+│   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
+│   ├── 0002-FIX-013-repair-and-test-DATA-006-shard-orchestration.patch
+│   ├── 0003-STRAT-001-A-close-test-coverage-gap-and-review-nits-.patch
+│   ├── 0004-STRAT-001-R-independent-review-of-Strategy-1-brute-f.patch
+│   ├── 0005-docs-reports-record-STRAT-003-prerequisite-check-rep.patch
+│   ├── 0006-FIX-015-explicit-adapter-thinking-control-results-da.patch
+│   ├── code_changes.patch
+│   ├── commit_DATA-004.patch
+│   ├── commit_DATA-005_code.patch
+│   ├── commit_DATA-005.patch
+│   ├── commit_FIX-001.patch
+│   ├── commit_FIX-002_INFRA-003.patch
+│   ├── commit_FIX-002.patch
+│   ├── commit_FIX-003.patch
+│   ├── commit_FIX-004.patch
+│   ├── commit_FIX-008.patch
+│   ├── commit_FIX-009.patch
+│   ├── commit_FIX-010.patch
+│   ├── commit_INFRA-001.patch
+│   ├── commit_INFRA-003.patch
+│   ├── commit_INFRA-004.patch
+│   ├── commit_INFRA-005.patch
+│   ├── commit_INFRA-006.patch
+│   ├── DATA-006_code.patch
+│   ├── diff.txt
+│   ├── FIX-006.patch
+│   ├── FIX-011_code.patch
+│   ├── FIX-011_working_tree.patch
+│   ├── FIX-013_code.patch
+│   ├── full_commit.patch
+│   ├── STRAT-001-A.patch
+│   ├── STRAT-001_code.patch
+│   ├── STRAT-001.patch
+│   ├── STRAT-002_code.patch
+│   ├── STRAT-002-R_code.patch
+│   └── STRAT-002-V_code.patch
+├── scripts
+│   ├── apc-bundle.sh
+│   ├── generate_name_pool.py
+│   ├── pilot_dsa_zero_shot.py
+│   ├── README.md
+│   └── run_experiment.py
+├── src
+│   └── graph_insertion
+│       ├── strategies
+│       │   ├── ann_retrieval.py
+│       │   ├── brute_force.py
+│       │   ├── embedding_threshold.py
+│       │   ├── __init__.py
+│       │   └── null.py
+│       ├── decision.py
+│       ├── embedding.py
+│       ├── graph_representation.py
+│       ├── harness.py
+│       ├── __init__.py
+│       ├── llm.py
+│       ├── loader.py
+│       ├── schedule.py
+│       ├── scoring.py
+│       └── strategy.py
+├── tests
+│   ├── conftest.py
+│   ├── controllable_embedder.py
+│   ├── __init__.py
+│   ├── stub_prompt_adapter.py
+│   ├── test_ann_retrieval_strategy.py
+│   ├── test_apc_bundle.sh
+│   ├── test_brute_force_strategy.py
+│   ├── test_controllable_embedder.py
+│   ├── test_decision.py
+│   ├── test_embedding_threshold_strategy.py
+│   ├── test_generate_name_pool.py
+│   ├── test_graph_representation.py
+│   ├── test_harness_embedding.py
+│   ├── test_harness.py
+│   ├── test_live_guard.py
+│   ├── test_llm.py
+│   ├── test_loader.py
+│   ├── test_null_strategy.py
+│   ├── test_pilot.py
+│   ├── test_schedule.py
+│   ├── test_scoring.py
+│   └── test_strategy_interface.py
+├── AGENTS.md
+└── pyproject.toml

@@ -13,6 +13,8 @@ PROFILE_CORE=(
   docs/context/data-formats.md
   docs/context/strategy-interface.md
   docs/context/apc-handoff-template.md
+  docs/context/apc-bundle-quickref.md
+  docs/context/repo-tree.txt
   docs/decisions/decision-log.md
   docs/tasks/status.md
   pyproject.toml
@@ -72,7 +74,7 @@ OPTIONAL_REPORTS=(
 )
 
 show_help() {
-  cat << 'EOF'
+  cat <<'EOF'
 Usage: scripts/apc-bundle.sh [PROFILE] [OPTIONS]
 
 Profiles:
@@ -102,30 +104,30 @@ is_secret_or_forbidden() {
 
   # Forbidden directories
   case "$p" in
-    results|results/*|*/results/*|\
-    repositories|repositories/*|*/repositories/*|\
-    .git|.git/*|*/.git/*|\
-    .venv|.venv/*|*/.venv/*|\
-    node_modules|node_modules/*|*/node_modules/*)
-      return 0
-      ;;
+  results | results/* | */results/* | \
+    repositories | repositories/* | */repositories/* | \
+    .git | .git/* | */.git/* | \
+    .venv | .venv/* | */.venv/* | \
+    node_modules | node_modules/* | */node_modules/*)
+    return 0
+    ;;
   esac
 
   # Forbidden filename prefixes/extensions
   case "$base" in
-    .env*)
-      return 0
-      ;;
-    *.key|*.pem)
-      return 0
-      ;;
+  .env*)
+    return 0
+    ;;
+  *.key | *.pem)
+    return 0
+    ;;
   esac
 
   # Forbidden keywords anywhere in path
   case "$lower_p" in
-    *secret*|*token*|*credential*)
-      return 0
-      ;;
+  *secret* | *token* | *credential*)
+    return 0
+    ;;
   esac
 
   return 1
@@ -141,51 +143,51 @@ ADDS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)
-      show_help
-      exit 0
-      ;;
-    --list)
-      LIST_ONLY=1
-      shift
-      ;;
-    --discover)
-      DISCOVER_ONLY=1
-      shift
-      ;;
-    --with-reports)
-      WITH_REPORTS=1
-      shift
-      ;;
-    --exclude)
-      if [[ $# -lt 2 ]]; then
-        echo "ERROR: --exclude requires a glob argument" >&2
-        exit 2
-      fi
-      EXCLUDES+=("$2")
-      shift 2
-      ;;
-    --add)
-      if [[ $# -lt 2 ]]; then
-        echo "ERROR: --add requires a path argument" >&2
-        exit 2
-      fi
-      ADDS+=("$2")
-      shift 2
-      ;;
-    -*)
-      echo "ERROR: Unknown option: $1" >&2
+  -h | --help)
+    show_help
+    exit 0
+    ;;
+  --list)
+    LIST_ONLY=1
+    shift
+    ;;
+  --discover)
+    DISCOVER_ONLY=1
+    shift
+    ;;
+  --with-reports)
+    WITH_REPORTS=1
+    shift
+    ;;
+  --exclude)
+    if [[ $# -lt 2 ]]; then
+      echo "ERROR: --exclude requires a glob argument" >&2
       exit 2
-      ;;
-    *)
-      if [[ -z "$PROFILE" ]]; then
-        PROFILE="$1"
-        shift
-      else
-        echo "ERROR: Unexpected argument: $1" >&2
-        exit 2
-      fi
-      ;;
+    fi
+    EXCLUDES+=("$2")
+    shift 2
+    ;;
+  --add)
+    if [[ $# -lt 2 ]]; then
+      echo "ERROR: --add requires a path argument" >&2
+      exit 2
+    fi
+    ADDS+=("$2")
+    shift 2
+    ;;
+  -*)
+    echo "ERROR: Unknown option: $1" >&2
+    exit 2
+    ;;
+  *)
+    if [[ -z "$PROFILE" ]]; then
+      PROFILE="$1"
+      shift
+    else
+      echo "ERROR: Unexpected argument: $1" >&2
+      exit 2
+    fi
+    ;;
   esac
 done
 
@@ -196,28 +198,36 @@ fi
 
 PROFILE="${PROFILE:-core}"
 
+# Generate repository file tree mapping current state
+if command -v tree >/dev/null 2>&1; then
+  mkdir -p docs/context
+  tree -I ".git|.venv|__pycache__|*.egg-info|repositories|results|*.tar.gz|*.log|foundations*" --dirsfirst --noreport > docs/context/repo-tree.txt
+else
+  echo "WARNING: 'tree' command not found, skipping docs/context/repo-tree.txt update." >&2
+fi
+
 # Select raw profile items
 RAW_PROFILE_ITEMS=()
 case "$PROFILE" in
-  core)
-    RAW_PROFILE_ITEMS=("${PROFILE_CORE[@]}")
-    ;;
-  strat)
-    RAW_PROFILE_ITEMS=("${PROFILE_STRAT[@]}")
-    ;;
-  strat-design)
-    RAW_PROFILE_ITEMS=("${PROFILE_STRAT_DESIGN[@]}")
-    ;;
-  fix)
-    RAW_PROFILE_ITEMS=("${PROFILE_FIX[@]}")
-    ;;
-  full)
-    RAW_PROFILE_ITEMS=("${PROFILE_FULL[@]}")
-    ;;
-  *)
-    echo "ERROR: Unknown profile '$PROFILE'. Valid profiles: core, strat, strat-design, fix, full." >&2
-    exit 2
-    ;;
+core)
+  RAW_PROFILE_ITEMS=("${PROFILE_CORE[@]}")
+  ;;
+strat)
+  RAW_PROFILE_ITEMS=("${PROFILE_STRAT[@]}")
+  ;;
+strat-design)
+  RAW_PROFILE_ITEMS=("${PROFILE_STRAT_DESIGN[@]}")
+  ;;
+fix)
+  RAW_PROFILE_ITEMS=("${PROFILE_FIX[@]}")
+  ;;
+full)
+  RAW_PROFILE_ITEMS=("${PROFILE_FULL[@]}")
+  ;;
+*)
+  echo "ERROR: Unknown profile '$PROFILE'. Valid profiles: core, strat, strat-design, fix, full." >&2
+  exit 2
+  ;;
 esac
 
 # Resolve globs in profile items
@@ -316,7 +326,7 @@ fi
 # Warn if thesis file is over 300 KB
 for f in "${RESOLVED_FILES[@]}"; do
   if [[ "$f" == docs/thesis/*.md ]]; then
-    thesis_sz=$(wc -c < "$f" | tr -d ' ')
+    thesis_sz=$(wc -c <"$f" | tr -d ' ')
     if [[ $thesis_sz -gt 307200 ]]; then
       echo "WARNING: Thesis file '$f' size is $thesis_sz bytes (> 300 KB)." >&2
     fi
@@ -326,7 +336,7 @@ done
 # If --list mode, output files with size and exit 0
 if [[ $LIST_ONLY -eq 1 ]]; then
   for f in "${RESOLVED_FILES[@]}"; do
-    sz=$(wc -c < "$f" | tr -d ' ')
+    sz=$(wc -c <"$f" | tr -d ' ')
     printf "%8d  %s\n" "$sz" "$f"
   done
   exit 0
@@ -354,15 +364,15 @@ MANIFEST="$TMP_DIR/MANIFEST.txt"
   echo "Files:"
   for f in "${RESOLVED_FILES[@]}"; do
     sha=$(sha256sum "$f" | awk '{print $1}')
-    sz=$(wc -c < "$f" | tr -d ' ')
+    sz=$(wc -c <"$f" | tr -d ' ')
     echo "$sha  $sz  $f"
   done
-} > "$MANIFEST"
+} >"$MANIFEST"
 
 # Create archive
 tar -czf "$OUT" -C "$TMP_DIR" MANIFEST.txt "${RESOLVED_FILES[@]}"
 
-archive_sz=$(wc -c < "$OUT" | tr -d ' ')
+archive_sz=$(wc -c <"$OUT" | tr -d ' ')
 file_cnt=$((${#RESOLVED_FILES[@]} + 1))
 
 echo "Archive: $OUT"

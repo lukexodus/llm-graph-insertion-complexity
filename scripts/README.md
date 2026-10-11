@@ -32,7 +32,7 @@ The script provides 5 standard profiles. If no profile is specified, it defaults
 
 | Profile | Purpose | Included Files |
 | :--- | :--- | :--- |
-| `core` *(default)* | Operational context & tracking | `AGENTS.md`, `docs/context/complete-context.md`, `docs/context/data-formats.md`, `docs/context/strategy-interface.md`, `docs/context/apc-handoff-template.md`, `docs/decisions/decision-log.md`, `docs/tasks/status.md`, `pyproject.toml` |
+| `core` *(default)* | Operational context & tracking | `AGENTS.md`, `docs/context/complete-context.md`, `docs/context/data-formats.md`, `docs/context/strategy-interface.md`, `docs/context/apc-handoff-template.md`, `docs/context/apc-bundle-quickref.md`, `docs/decisions/decision-log.md`, `docs/tasks/status.md`, `pyproject.toml` |
 | `strat` | Strategy review & testing | All of `core`, plus `src/graph_insertion/strategies/null.py`, `tests/test_strategy_interface.py`, `tests/test_null_strategy.py`, `docs/rrl/catalogue.md` |
 | `strat-design` | Methodology & thesis text | All of `strat`, plus the thesis document (`docs/thesis/*.md`) |
 | `fix` | Interface contracts & fixes | All of `core`, plus `docs/context/prompt-adapter-contract.md` |

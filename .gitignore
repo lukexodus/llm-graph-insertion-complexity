@@ -17,3 +17,4 @@ patch/
 .env
 
 results/datagen/
+*.log
