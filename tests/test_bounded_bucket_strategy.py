@@ -1440,3 +1440,250 @@ class TestSequentialStreamNoCascades:
                 assert combined_after == set(segs_before[home_idx]) | {name}
                 # Reset split counters for the two new child segments
                 inserts_since_split[home_idx : home_idx + 1] = [0, 0]
+
+
+# ===========================================================================
+# 19. Post-Review Amendments (STRAT-004-A: Gap A and Gap B)
+# ===========================================================================
+
+
+class TestPostReviewAmendments:
+    """Closes STRAT-004-R review test gaps A (merge_occurred inside span) and B (second setup diagnostics reset)."""
+
+    def test_merge_occurred_false_inside_span_true_in_gap_and_false_on_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proves merge_occurred is False on empty index and inside-span inserts (with/without split) and True in gaps (kills A-01)."""
+        vecs = {
+            "a_0": TestMergeAndNeighbourRule._vec_for_code(0b0000, 4),  # gray=0
+            "a_1": TestMergeAndNeighbourRule._vec_for_code(0b0000, 4),  # gray=0
+            "b_0": TestMergeAndNeighbourRule._vec_for_code(0b0010, 4),  # gray=3
+            "b_1": TestMergeAndNeighbourRule._vec_for_code(0b0010, 4),  # gray=3
+            "b_2": TestMergeAndNeighbourRule._vec_for_code(0b0010, 4),  # gray=3
+            "in_no_split": TestMergeAndNeighbourRule._vec_for_code(0b0001, 4),  # gray=1 (inside [0, 3])
+            "in_with_split": TestMergeAndNeighbourRule._vec_for_code(0b0011, 4),  # gray=2 (inside [0, 3])
+            "gap_node": TestMergeAndNeighbourRule._vec_for_code(0b1100, 4),  # gray=8 (outside [0, 3])
+        }
+        emb = ControllableEmbedder(vecs, dim=4)
+
+        # 1. Insertion into an EMPTY index (n_before == 0): merge_occurred is False (direct and via insert_node)
+        strat_empty = BoundedBucketStrategy(s_min=3, s_max=6, n_bits=4, seed=42)
+        monkeypatch.setattr(
+            strat_empty, "_draw_hyperplanes", lambda dim: np.eye(4, dtype=np.float64)
+        )
+        strat_empty.setup(ConceptGraph(), emb)
+        strat_empty.shortlist("a_0")
+        strat_empty.on_inserted("a_0", ())
+        d_empty_direct = strat_empty.diagnostics()
+        assert d_empty_direct["merge_occurred"] is False
+        assert d_empty_direct["split_occurred"] is False
+
+        strat_empty_drv = BoundedBucketStrategy(s_min=3, s_max=6, n_bits=4, seed=42)
+        monkeypatch.setattr(
+            strat_empty_drv, "_draw_hyperplanes", lambda dim: np.eye(4, dtype=np.float64)
+        )
+        g_empty_drv = ConceptGraph()
+        meter_empty = MeteredEmbedder(emb)
+        strat_empty_drv.setup(g_empty_drv, meter_empty)
+        res_empty = insert_node(
+            strat_empty_drv,
+            g_empty_drv,
+            FakeDecisionStep(make_edge=False),
+            "a_0",
+            metered_embedder=meter_empty,
+        )
+        assert res_empty.metrics.extra["merge_occurred"] is False
+        assert res_empty.metrics.extra["split_occurred"] is False
+
+        # 2. Direct strategy calls: inside-span without split, inside-span with split, and gap insertion
+        strat_direct = BoundedBucketStrategy(s_min=3, s_max=6, n_bits=4, seed=42)
+        monkeypatch.setattr(
+            strat_direct, "_draw_hyperplanes", lambda dim: np.eye(4, dtype=np.float64)
+        )
+        g_direct = ConceptGraph()
+        for init_name in ["a_0", "a_1", "b_0", "b_1", "b_2"]:
+            g_direct.add_node(init_name)
+        strat_direct.setup(g_direct, emb)
+        assert [len(s) for s in strat_direct._segments] == [5]
+
+        # 2a. Inside span, no split (size 5 -> 6 <= s_max=6)
+        strat_direct.shortlist("in_no_split")
+        assert strat_direct.diagnostics()["inside_bucket_span"] is True
+        strat_direct.on_inserted("in_no_split", ())
+        d_in_no_split = strat_direct.diagnostics()
+        assert d_in_no_split["inside_bucket_span"] is True
+        assert d_in_no_split["split_occurred"] is False
+        assert d_in_no_split["merge_occurred"] is False
+
+        # 2b. Inside span, with split (size 6 -> 7 > s_max=6, splits into [3, 4])
+        strat_direct.shortlist("in_with_split")
+        assert strat_direct.diagnostics()["inside_bucket_span"] is True
+        strat_direct.on_inserted("in_with_split", ())
+        d_in_split = strat_direct.diagnostics()
+        assert d_in_split["inside_bucket_span"] is True
+        assert d_in_split["split_occurred"] is True
+        assert d_in_split["merge_occurred"] is False
+
+        # 2c. Gap insertion (gray=8 > max gray=3): inside_bucket_span is False, merge_occurred is True
+        strat_direct.shortlist("gap_node")
+        assert strat_direct.diagnostics()["inside_bucket_span"] is False
+        strat_direct.on_inserted("gap_node", ())
+        d_gap = strat_direct.diagnostics()
+        assert d_gap["inside_bucket_span"] is False
+        assert d_gap["split_occurred"] is False
+        assert d_gap["merge_occurred"] is True
+
+        # 3. Same sequence through insert_node with FakeDecisionStep
+        strat_drv = BoundedBucketStrategy(s_min=3, s_max=6, n_bits=4, seed=42)
+        monkeypatch.setattr(
+            strat_drv, "_draw_hyperplanes", lambda dim: np.eye(4, dtype=np.float64)
+        )
+        g_drv = ConceptGraph()
+        for init_name in ["a_0", "a_1", "b_0", "b_1", "b_2"]:
+            g_drv.add_node(init_name)
+        meter = MeteredEmbedder(emb)
+        strat_drv.setup(g_drv, meter)
+
+        res_no_split = insert_node(
+            strat_drv,
+            g_drv,
+            FakeDecisionStep(make_edge=False),
+            "in_no_split",
+            metered_embedder=meter,
+        )
+        assert res_no_split.metrics.extra["inside_bucket_span"] is True
+        assert res_no_split.metrics.extra["split_occurred"] is False
+        assert res_no_split.metrics.extra["merge_occurred"] is False
+
+        res_split = insert_node(
+            strat_drv,
+            g_drv,
+            FakeDecisionStep(make_edge=False),
+            "in_with_split",
+            metered_embedder=meter,
+        )
+        assert res_split.metrics.extra["inside_bucket_span"] is True
+        assert res_split.metrics.extra["split_occurred"] is True
+        assert res_split.metrics.extra["merge_occurred"] is False
+
+        res_gap = insert_node(
+            strat_drv,
+            g_drv,
+            FakeDecisionStep(make_edge=False),
+            "gap_node",
+            metered_embedder=meter,
+        )
+        assert res_gap.metrics.extra["inside_bucket_span"] is False
+        assert res_gap.metrics.extra["split_occurred"] is False
+        assert res_gap.metrics.extra["merge_occurred"] is True
+
+    def test_second_setup_resets_per_query_diagnostics_on_valid_and_failed_setup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proves a second setup() (valid or failed) resets all per-query diagnostics before any new shortlist() (kills A-02)."""
+        strat = BoundedBucketStrategy(s_min=3, s_max=6, n_bits=4, seed=42)
+        monkeypatch.setattr(
+            strat, "_draw_hyperplanes", lambda dim: np.eye(4, dtype=np.float64)
+        )
+        vecs = {
+            f"n_{i:02d}": TestMergeAndNeighbourRule._vec_for_code(i % 16, 4)
+            for i in range(16)
+        }
+        vecs["a"] = TestMergeAndNeighbourRule._vec_for_code(0b1111, 4)
+        emb = ControllableEmbedder(vecs, dim=4)
+
+        g1 = ConceptGraph()
+        for i in range(6):
+            g1.add_node(f"n_{i:02d}")
+        strat.setup(g1, emb)
+
+        # Populate all per-query fields, cached overlap, split_occurred, and merge_occurred
+        strat.shortlist("a")
+        d_populated = strat.diagnostics()
+        assert d_populated["bucket_id"] is not None
+        assert d_populated["exact_topk_overlap"] is not None
+        assert d_populated["query_code"] is not None
+        assert d_populated["query_gray_rank"] is not None
+        assert d_populated["shortlist_size"] == 6
+        assert d_populated["bucket_size"] == 6
+        assert d_populated["min_hamming_to_shortlist"] is not None
+        strat.on_inserted("a", ())
+        assert strat.diagnostics()["split_occurred"] is True
+        assert strat.diagnostics()["merge_occurred"] is True
+
+        # 1. Valid second setup() on a larger 12-node graph g2 BEFORE any new shortlist()
+        g2 = ConceptGraph()
+        for i in range(12):
+            g2.add_node(f"n_{i:02d}")
+        strat.setup(g2, emb)
+
+        d_after_valid_setup = strat.diagnostics()
+        _assert_no_numpy_types(d_after_valid_setup)
+        json.dumps(d_after_valid_setup)
+        assert d_after_valid_setup["bucket_id"] is None
+        assert d_after_valid_setup["bucket_gray_min"] is None
+        assert d_after_valid_setup["bucket_gray_max"] is None
+        assert d_after_valid_setup["exact_topk_overlap"] is None
+        assert d_after_valid_setup["query_code"] is None
+        assert d_after_valid_setup["query_gray_rank"] is None
+        assert d_after_valid_setup["code_existed_in_bucket"] is False
+        assert d_after_valid_setup["inside_bucket_span"] is False
+        assert d_after_valid_setup["bucket_size_at_shortlist"] == 0
+        assert d_after_valid_setup["bucket_size"] == 0
+        assert d_after_valid_setup["shortlist_size"] == 0
+        assert d_after_valid_setup["split_occurred"] is False
+        assert d_after_valid_setup["merge_occurred"] is False
+        assert d_after_valid_setup["min_hamming_to_shortlist"] is None
+        # Partition-level diagnostics must describe the NEW 12-node graph g2
+        assert d_after_valid_setup["num_segments"] == len(strat._segments) >= 2
+        assert d_after_valid_setup["min_segment_size"] >= 3
+        assert d_after_valid_setup["max_segment_size"] <= 6
+        assert np.isclose(
+            d_after_valid_setup["mean_segment_size"],
+            12.0 / d_after_valid_setup["num_segments"],
+        )
+
+        # 2. Re-populate per-query diagnostics on g2, then call a FAILED second setup() (zero-norm row)
+        strat.shortlist("a")
+        assert strat.diagnostics()["bucket_id"] is not None
+        assert strat.diagnostics()["exact_topk_overlap"] is not None
+
+        class _ZeroRowBatchEmbedder:
+            def embed(self, text: str) -> np.ndarray:
+                return np.ones(4, dtype=np.float32)
+
+            def embed_many(self, texts: Sequence[str]) -> np.ndarray:
+                m = np.ones((len(texts), 4), dtype=np.float32)
+                m[0] = 0.0
+                return m
+
+        with pytest.raises(ValueError, match="Zero-norm"):
+            strat.setup(g2, _ZeroRowBatchEmbedder())  # type: ignore[arg-type]
+
+        assert not strat._setup_called
+        assert strat._embedder is None
+        with pytest.raises(RuntimeError, match="setup\\(\\) must be called"):
+            strat.shortlist("a")
+
+        d_after_failed_setup = strat.diagnostics()
+        _assert_no_numpy_types(d_after_failed_setup)
+        json.dumps(d_after_failed_setup)
+        assert d_after_failed_setup["bucket_id"] is None
+        assert d_after_failed_setup["bucket_gray_min"] is None
+        assert d_after_failed_setup["bucket_gray_max"] is None
+        assert d_after_failed_setup["exact_topk_overlap"] is None
+        assert d_after_failed_setup["query_code"] is None
+        assert d_after_failed_setup["query_gray_rank"] is None
+        assert d_after_failed_setup["code_existed_in_bucket"] is False
+        assert d_after_failed_setup["inside_bucket_span"] is False
+        assert d_after_failed_setup["bucket_size_at_shortlist"] == 0
+        assert d_after_failed_setup["bucket_size"] == 0
+        assert d_after_failed_setup["shortlist_size"] == 0
+        assert d_after_failed_setup["split_occurred"] is False
+        assert d_after_failed_setup["merge_occurred"] is False
+        assert d_after_failed_setup["min_hamming_to_shortlist"] is None
+        assert d_after_failed_setup["num_segments"] == 0
+        assert d_after_failed_setup["min_segment_size"] == 0
+        assert d_after_failed_setup["max_segment_size"] == 0
+        assert d_after_failed_setup["mean_segment_size"] == 0.0
+
