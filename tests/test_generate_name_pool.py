@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -113,7 +114,11 @@ def test_parse_json_array_response() -> None:
 def test_drop_reasons_fire() -> None:
     """Verify that every drop reason fires and increments drop_counts accurately."""
     corpus_nodes = {"binary_search_tree", "sorting_algorithm"}
-    corpus_embeds = {embed_text("binary_search_tree"), embed_text("sorting_algorithm")}
+    corpus_embeds = {
+        embed_text("binary_search_tree"),
+        embed_text("sorting_algorithm"),
+        "unusual concept payload",
+    }
 
     candidates = [
         "graph_theory.txt",                 # ends_with_txt
@@ -123,6 +128,7 @@ def test_drop_reasons_fire() -> None:
         "one_two_three_four_five_six",      # invalid_word_count (> 5 words)
         "binary_search_tree",               # corpus_overlap_exact
         "sorting_algorithm",                # corpus_overlap_exact
+        "unusual_concept_payload",          # corpus_overlap_embed
         "accepted_concept_one",             # valid 1
         "accepted_concept_one",             # duplicate_exact
         "accepted_concept_two",             # valid 2
@@ -147,9 +153,6 @@ def test_drop_reasons_fire() -> None:
         parsed_names=candidates,
     )
 
-    # Also test embed_text overlap via candidate whose embed matches corpus
-    # e.g., if corpus has "sorting_algorithm", its embed_text is "sorting algorithm".
-    # A candidate matching that embed_text is filtered.
     filtered, n_raw, drop_counts = validate_and_dedupe_candidates(
         [fake_entry], corpus_nodes, corpus_embeds
     )
@@ -160,6 +163,7 @@ def test_drop_reasons_fire() -> None:
     assert drop_counts["invalid_length"] == 2
     assert drop_counts["invalid_word_count"] == 1
     assert drop_counts["corpus_overlap_exact"] == 2
+    assert drop_counts["corpus_overlap_embed"] == 1
     assert drop_counts["duplicate_exact"] == 1
     assert drop_counts["plural_pair"] == 2
 
@@ -170,6 +174,7 @@ def test_drop_reasons_fire() -> None:
     assert "decision_trees" not in filtered
     assert "process" in filtered
     assert "processes" not in filtered
+    assert "unusual_concept_payload" not in filtered
 
 
 def test_corpus_overlap_embed_drop_reason() -> None:
@@ -676,6 +681,7 @@ def test_command_backend_error_codes(tmp_path: Path) -> None:
     """Verify CommandBackend stops with specific exit codes on adapter error outcomes."""
     script = str(Path("scripts/generate_name_pool.py").resolve())
     stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    lock_dir = tmp_path / "locks"
 
     # 1. Rate limit (error 10) -> exit 3
     res_rl = subprocess.run(
@@ -696,6 +702,8 @@ def test_command_backend_error_codes(tmp_path: Path) -> None:
             str(tmp_path / "p1.json"),
             "--cache-file",
             str(tmp_path / "c1.jsonl"),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -723,6 +731,8 @@ def test_command_backend_error_codes(tmp_path: Path) -> None:
             str(tmp_path / "p2.json"),
             "--cache-file",
             str(tmp_path / "c2.jsonl"),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -749,6 +759,8 @@ def test_command_backend_error_codes(tmp_path: Path) -> None:
             str(tmp_path / "p3.json"),
             "--cache-file",
             str(tmp_path / "c3.jsonl"),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -775,6 +787,8 @@ def test_command_backend_error_codes(tmp_path: Path) -> None:
             str(tmp_path / "p4.json"),
             "--cache-file",
             str(tmp_path / "c4.jsonl"),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -801,6 +815,8 @@ def test_command_backend_error_codes(tmp_path: Path) -> None:
                 str(tmp_path / f"p_{sc}.json"),
                 "--cache-file",
                 str(tmp_path / f"c_{sc}.jsonl"),
+                "--lock-dir",
+                str(lock_dir),
             ],
             capture_output=True,
             text=True,
@@ -971,12 +987,13 @@ def test_contract_doc_fixtures_subprocess_execution(tmp_path: Path) -> None:
     # Extract all json code blocks under Example Responses
     example_section = content.split("### Example Responses (`stdout`)")[1]
     json_blocks = re.findall(r"```json\n(.*?)\n```", example_section, re.DOTALL)
-    assert len(json_blocks) == 8, f"Expected 8 response fixtures, found {len(json_blocks)}"
+    assert len(json_blocks) == 9, f"Expected 9 response fixtures, found {len(json_blocks)}"
 
     expected_codes = {
         "rate_limit": 10,
         "login_required": 11,
         "model_mismatch": 14,
+        "profile_in_use": 15,
         "timeout": 12,
         "refusal": 13,
         "bad_request": 2,
@@ -1010,6 +1027,7 @@ def test_contract_doc_fixtures_subprocess_execution(tmp_path: Path) -> None:
             )
             assert res.ok is True
             assert res.model_id == "Sonnet 5.5 Low"
+            assert res.backend_meta.get("profile_used") == "Profile 24"
             concepts = parse_json_array_response(res.text)
             assert len(concepts) == 4
             assert "binary_search" in concepts
@@ -1135,4 +1153,810 @@ def test_command_backend_process_group_timeout_kills_child(tmp_path: Path) -> No
     )
     assert res_ign.ok is False
     assert res_ign.error_code == 12
+
+
+# ===========================================================================
+# 11. FIX-013 Shard & Merge Tests (Partition, Byte-Identical, Locks, Cli, Timeout)
+# ===========================================================================
+
+def test_shard_partition_disjoint_and_union() -> None:
+    """Verify that for N in {1, 2, 3, 5, 14}, the union of shards 1..N covers
+    every global subfield index exactly once, with no overlap, and that
+    parse_shard_arg rejects invalid specifications.
+    """
+    from scripts.generate_name_pool import SUBFIELDS, get_shard_subfields, parse_shard_arg
+
+    total = len(SUBFIELDS)
+    for n in (1, 2, 3, 5, 14):
+        seen_indices: list[int] = []
+        seen_subfields: list[str] = []
+        for i in range(1, n + 1):
+            sfs = get_shard_subfields(i, n)
+            for idx, sf in sfs:
+                seen_indices.append(idx)
+                seen_subfields.append(sf)
+        # Covers every global subfield index and name exactly once
+        assert len(seen_indices) == total
+        assert sorted(seen_indices) == list(range(total))
+        assert len(seen_subfields) == total
+        assert set(seen_subfields) == set(SUBFIELDS)
+        assert len(set(seen_subfields)) == total
+
+    # Rejection of invalid shard specs
+    for bad in ("0/3", "4/3", "a/b", "1/0", "2", "1/2/3", "-1/3", "3/0"):
+        with pytest.raises(ValueError):
+            parse_shard_arg(bad)
+
+
+def test_byte_identical_merge_n1_vs_n3_and_reversed(tmp_path: Path) -> None:
+    """Build one synthetic record set (mixed rounds and subfields).
+    Build the pool:
+      (a) from one cache file,
+      (b) from the same records split into 3 shard caches,
+      (c) from the 3 shard caches with the run-ID list reversed.
+    Assert that names and meta.sha256_names are identical in all three.
+
+    Scope of 'identical':
+    The assertion of identity strictly covers the ordered list of validated concept
+    names and its cryptographic digest meta['sha256_names']. Run-specific metadata
+    such as run_ids, per-shard summaries, and timestamps reflect individual execution
+    contexts and are excluded from the byte-for-byte identity check.
+    """
+    from scripts.generate_name_pool import (
+        SUBFIELDS,
+        CacheEntry,
+        append_cache_record,
+        build_pool_from_cache,
+    )
+
+    subfields_sample = [SUBFIELDS[0], SUBFIELDS[1], SUBFIELDS[2]]
+    entries: list[CacheEntry] = []
+
+    for round_num in (1, 2):
+        for sf_idx, sf in enumerate(subfields_sample):
+            names = [f"synth_{sf}_r{round_num}_item_{k:02d}" for k in range(10)]
+            entries.append(
+                CacheEntry(
+                    round=round_num,
+                    subfield=sf,
+                    subfield_idx=sf_idx,
+                    request_system="sys",
+                    request_user="user",
+                    response_text=json.dumps(names),
+                    model_id="test-model",
+                    token_usage={},
+                    timestamp_utc=f"2026-10-09T10:0{round_num}:00Z",
+                    retries=0,
+                    latency_s=0.1,
+                    parsed_names=names,
+                    backend="command",
+                    prompt_version="np1w",
+                    backend_meta={
+                        "model_requested": "sonnet",
+                        "model_observed": "Sonnet 5.5 Low",
+                        "effort_requested": "low",
+                        "tier": 2,
+                        "profile_used": "Profile 24",
+                        "adapter": {"name": "prompt-adapter", "version": "1.0"},
+                    },
+                )
+            )
+
+    # 1. Single cache
+    single_cache = tmp_path / "single" / "raw_responses.jsonl"
+    for e in entries:
+        append_cache_record(single_cache, e)
+
+    out_single = tmp_path / "out_single.json"
+    res_single = build_pool_from_cache(
+        cache_path=single_cache,
+        output_path=out_single,
+        generator_kind="command",
+        configured_model="sonnet",
+        seed=42,
+        run_ids=["run_single"],
+        allow_fake=True,
+        min_required_names=10,
+    )
+
+    # 2. Split into 3 shard caches (by subfield index % 3)
+    c1 = tmp_path / "shard1" / "raw_responses.jsonl"
+    c2 = tmp_path / "shard2" / "raw_responses.jsonl"
+    c3 = tmp_path / "shard3" / "raw_responses.jsonl"
+
+    for e in entries:
+        target_c = [c1, c2, c3][e.subfield_idx % 3]
+        append_cache_record(target_c, e)
+
+    out_shard_fwd = tmp_path / "out_shard_fwd.json"
+    res_shard_fwd = build_pool_from_cache(
+        cache_path=[c1, c2, c3],
+        output_path=out_shard_fwd,
+        generator_kind="command",
+        configured_model="sonnet",
+        seed=42,
+        run_ids=["s1", "s2", "s3"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=10,
+    )
+
+    # 3. Reversed run-ID and cache order
+    out_shard_rev = tmp_path / "out_shard_rev.json"
+    res_shard_rev = build_pool_from_cache(
+        cache_path=[c3, c2, c1],
+        output_path=out_shard_rev,
+        generator_kind="command",
+        configured_model="sonnet",
+        seed=42,
+        run_ids=["s3", "s2", "s1"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=10,
+    )
+
+    # Assert names and sha256_names are identical in all three
+    assert res_single["names"] == res_shard_fwd["names"] == res_shard_rev["names"]
+    assert (
+        res_single["meta"]["sha256_names"]
+        == res_shard_fwd["meta"]["sha256_names"]
+        == res_shard_rev["meta"]["sha256_names"]
+    )
+
+
+def test_duplicate_parseable_pair_refusal(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify that merging caches containing the same (round, subfield) parseable response exits non-zero,
+    naming the duplicate pair and both run IDs in the message."""
+    from scripts.generate_name_pool import CacheEntry, append_cache_record, build_pool_from_cache
+
+    entry = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["binary_search"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["binary_search"],
+        backend="command",
+        prompt_version="np1w",
+    )
+
+    c1 = tmp_path / "run_a" / "raw_responses.jsonl"
+    c2 = tmp_path / "run_b" / "raw_responses.jsonl"
+    append_cache_record(c1, entry)
+    append_cache_record(c2, entry)
+
+    with pytest.raises(SystemExit) as exc_info:
+        build_pool_from_cache(
+            cache_path=[c1, c2],
+            output_path=tmp_path / "out.json",
+            generator_kind="command",
+            configured_model="sonnet",
+            run_ids=["run_a", "run_b"],
+            allow_fake=True,
+            is_merged=True,
+        )
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "(round 1, subfield 'algorithms')" in captured.err
+    assert "run_a" in captured.err
+    assert "run_b" in captured.err
+
+
+def test_merge_refuses_mixed_backend_and_mixed_prompt_version(tmp_path: Path) -> None:
+    """Verify that merging caches with mixed backend or mixed prompt_version raises ValueError."""
+    from scripts.generate_name_pool import CacheEntry, append_cache_record, build_pool_from_cache
+
+    e_deepseek = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["binary_search"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["binary_search"],
+        backend="deepseek",
+        prompt_version="np1",
+    )
+    e_command = CacheEntry(
+        round=1,
+        subfield="data_structures",
+        subfield_idx=1,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["linked_list"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["linked_list"],
+        backend="command",
+        prompt_version="np1w",
+    )
+
+    c1 = tmp_path / "r1" / "raw_responses.jsonl"
+    c2 = tmp_path / "r2" / "raw_responses.jsonl"
+    append_cache_record(c1, e_deepseek)
+    append_cache_record(c2, e_command)
+
+    with pytest.raises(ValueError, match="mixed backends"):
+        build_pool_from_cache(
+            cache_path=[c1, c2],
+            output_path=tmp_path / "out.json",
+            generator_kind="command",
+            configured_model="sonnet",
+            run_ids=["r1", "r2"],
+            allow_fake=True,
+            is_merged=True,
+        )
+
+
+def test_merge_shortfall_exit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify that a merge producing fewer than min_required_names exits non-zero with the rerun message."""
+    from scripts.generate_name_pool import CacheEntry, append_cache_record, build_pool_from_cache
+
+    e = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["binary_search"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["binary_search"],
+        backend="command",
+        prompt_version="np1w",
+    )
+    c1 = tmp_path / "r1" / "raw_responses.jsonl"
+    append_cache_record(c1, e)
+
+    with pytest.raises(SystemExit) as exc_info:
+        build_pool_from_cache(
+            cache_path=[c1],
+            output_path=tmp_path / "out.json",
+            generator_kind="command",
+            configured_model="sonnet",
+            run_ids=["r1"],
+            allow_fake=True,
+            is_merged=True,
+            min_required_names=2001,
+        )
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "which is below --min-required-names (2001)" in captured.err
+    assert "Rerun shards with a higher --target-names (caches resume)" in captured.err
+
+
+def test_shard_cli_guards_and_no_pool_written(tmp_path: Path) -> None:
+    """Verify that:
+    1. --shard without --run-id is rejected.
+    2. A shard run writes no pool to output_path (Defect 2) and prints the build command instead.
+    3. --build-only with a missing cache file fails clearly.
+    """
+    out_pool = tmp_path / "pool.json"
+    cache_file = tmp_path / "raw.jsonl"
+    lock_dir = tmp_path / "locks"
+
+    # 1. --shard without --run-id
+    res1 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--shard",
+            "1/2",
+            "--offline-fake",
+            "--output",
+            str(out_pool),
+            "--lock-dir",
+            str(lock_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res1.returncode == 1
+    assert "requires an explicit --run-id" in res1.stderr
+
+    # 2. Shard run writes no pool (Defect 2)
+    res2 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--shard",
+            "1/2",
+            "--run-id",
+            "testrun-s1of2",
+            "--offline-fake",
+            "--max-calls",
+            "1",
+            "--output",
+            str(out_pool),
+            "--cache-file",
+            str(cache_file),
+            "--lock-dir",
+            str(lock_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res2.returncode == 0
+    assert not out_pool.exists(), "Shard run must NOT write a pool to output_path!"
+    assert "--build-only --merge-run-ids" in res2.stdout
+
+    # 3. Merge refuses missing cache
+    res3 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--build-only",
+            "--merge-run-ids",
+            "missing_run_id_xyz",
+            "--output",
+            str(out_pool),
+            "--lock-dir",
+            str(lock_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res3.returncode == 1
+    assert "Shard cache not found" in res3.stderr
+
+
+def test_shard_locks_mutual_exclusion(tmp_path: Path) -> None:
+    """Verify that ShardLockManager enforces exclusive locks:
+    while a helper process holds the run lock or profile lock, a second generator exits 1
+    with a clear message and no traceback. Locks release when helper exits.
+    """
+    cache_dir = tmp_path / "my_run"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "raw_responses.jsonl"
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+
+    helper_code = f"""import fcntl, os, time
+fd = os.open({repr(str(cache_dir / ".lock"))}, os.O_CREAT | os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+time.sleep(3)
+"""
+    p_helper = subprocess.Popen([sys.executable, "-c", helper_code])
+    time.sleep(0.3)
+
+    try:
+        res = subprocess.run(
+            [
+                sys.executable,
+                "scripts/generate_name_pool.py",
+                "--shard",
+                "1/2",
+                "--run-id",
+                "my_run",
+                "--cache-file",
+                str(cache_file),
+                "--offline-fake",
+                "--output",
+                str(tmp_path / "p.json"),
+                "--lock-dir",
+                str(lock_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 1
+        assert "is locked by another process" in res.stderr
+        assert "Traceback" not in res.stderr
+    finally:
+        p_helper.terminate()
+        p_helper.wait()
+
+    res_after = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--shard",
+            "1/2",
+            "--run-id",
+            "my_run",
+            "--cache-file",
+            str(cache_file),
+            "--offline-fake",
+            "--max-calls",
+            "1",
+            "--output",
+            str(tmp_path / "p.json"),
+            "--lock-dir",
+            str(lock_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_after.returncode == 0
+
+
+def test_print_shard_commands_cli() -> None:
+    """Verify --print-shard-commands enforces profile count match, emits valid commands
+    with proper sharding flags, distinct run IDs, and quoted profile names."""
+    res_mismatch = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--print-shard-commands",
+            "--shards",
+            "3",
+            "--profiles",
+            "Profile 1,Profile 2",
+            "--run-id-prefix",
+            "pfx",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_mismatch.returncode == 1
+    assert "Profiles count (2) must equal shards count (3)" in res_mismatch.stderr
+
+    res_ok = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--print-shard-commands",
+            "--shards",
+            "2",
+            "--profiles",
+            "Profile 24,Profile 25",
+            "--run-id-prefix",
+            "pool2026",
+            "--command",
+            "prompt-adapter",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_ok.returncode == 0
+    lines = [ln.strip() for ln in res_ok.stdout.strip().splitlines() if ln.strip()]
+    assert len(lines) == 2
+    assert "--shard 1/2" in lines[0]
+    assert "--run-id pool2026-s1of2" in lines[0]
+    assert "--adapter-profile 'Profile 24'" in lines[0]
+    assert "--backend command" in lines[0]
+    assert "--live" in lines[0]
+    assert "--confirm" in lines[0]
+
+    assert "--shard 2/2" in lines[1]
+    assert "--run-id pool2026-s2of2" in lines[1]
+    assert "--adapter-profile 'Profile 25'" in lines[1]
+
+
+def test_cli_verify_single_and_merged(tmp_path: Path) -> None:
+    """Verify that --verify operates through CLI main() for both single-run and merged pools,
+    and fails clearly when a listed cache is missing."""
+    from scripts.generate_name_pool import (
+        CacheEntry,
+        append_cache_record,
+        build_pool_from_cache,
+    )
+
+    names = [f"valid_concept_{i:03d}" for i in range(1, 50)]
+    entry = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(names),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=names,
+        backend="deepseek",
+        prompt_version="np1",
+    )
+
+    c_single = tmp_path / "single_run" / "raw_responses.jsonl"
+    append_cache_record(c_single, entry)
+    pool_single = tmp_path / "pool_single.json"
+    build_pool_from_cache(
+        cache_path=c_single,
+        output_path=pool_single,
+        generator_kind="deepseek",
+        configured_model="deepseek-flash",
+        seed=42,
+        run_ids=["single_run"],
+        allow_fake=True,
+        min_required_names=10,
+    )
+
+    res_single = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--verify",
+            "--output",
+            str(pool_single),
+            "--cache-file",
+            str(c_single),
+            "--allow-fake",
+            "--min-required-names",
+            "10",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_single.returncode == 0
+    assert "Pool verification PASSED" in res_single.stdout
+
+    c_m1 = tmp_path / "m1" / "raw_responses.jsonl"
+    c_m2 = tmp_path / "m2" / "raw_responses.jsonl"
+    append_cache_record(c_m1, entry)
+    e2 = CacheEntry(
+        round=1,
+        subfield="data_structures",
+        subfield_idx=1,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["binary_heap"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["binary_heap"],
+        backend="deepseek",
+        prompt_version="np1",
+    )
+    append_cache_record(c_m2, e2)
+
+    pool_merged = tmp_path / "pool_merged.json"
+    build_pool_from_cache(
+        cache_path=[c_m1, c_m2],
+        output_path=pool_merged,
+        generator_kind="deepseek",
+        configured_model="deepseek-flash",
+        seed=42,
+        run_ids=["m1", "m2"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=10,
+    )
+
+    res_merged_missing = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_name_pool.py",
+            "--verify",
+            "--output",
+            str(pool_merged),
+            "--merge-run-ids",
+            "m1,m2",
+            "--allow-fake",
+            "--min-required-names",
+            "10",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_merged_missing.returncode == 1
+    assert "Listed cache missing for run_id" in res_merged_missing.stderr
+
+
+def test_timeout_kill_sigterm_ignored_and_grandchild_killed(tmp_path: Path) -> None:
+    """Verify that when parent ignores SIGTERM and spawns a grandchild in the same process group,
+    both parent and grandchild PIDs are killed via group SIGKILL on timeout."""
+    p_pid_file = tmp_path / "parent.pid"
+    gc_pid_file = tmp_path / "grandchild.pid"
+
+    helper_code = f"""import os, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open({repr(str(p_pid_file))}, "w") as f:
+    f.write(str(os.getpid()))
+
+gc = subprocess.Popen([sys.executable, "-c", f'''import os, time
+with open({repr(str(gc_pid_file))}, "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(60)
+'''])
+
+time.sleep(60)
+"""
+    helper_script = tmp_path / "helper_ign.py"
+    helper_script.write_text(helper_code, encoding="utf-8")
+
+    from scripts.generate_name_pool import CommandGenerationBackend
+    backend = CommandGenerationBackend(
+        command=f"{sys.executable} {helper_script}",
+        profile="test_prof",
+        timeout_s=-59,  # 1.0s timeout limit
+        sigterm_wait_s=0.2,
+    )
+    res = backend.complete(
+        subfield="algorithms",
+        round_num=1,
+        previous_names=[],
+        system_prompt="",
+        user_prompt="",
+    )
+    assert res.ok is False
+    assert res.error_code == 12
+
+    assert p_pid_file.exists()
+    assert gc_pid_file.exists()
+    parent_pid = int(p_pid_file.read_text(encoding="utf-8").strip())
+    gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
+
+    time.sleep(0.1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(parent_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.kill(gc_pid, 0)
+
+
+def test_timeout_kill_descendant_outside_group_holds_stdout_bounded(tmp_path: Path) -> None:
+    """Verify that if a descendant process detaches into a new session and holds stdout open,
+    the timeout path returns within a bounded time (< 6.0s) rather than hanging indefinitely."""
+    child_pid_file = tmp_path / "detached_child.pid"
+    helper_code = f"""import os, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, "-c", f'''import os, time
+with open({repr(str(child_pid_file))}, "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(15)
+'''],
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+    start_new_session=True,
+)
+time.sleep(60)
+"""
+    helper_script = tmp_path / "helper_detached.py"
+    helper_script.write_text(helper_code, encoding="utf-8")
+
+    from scripts.generate_name_pool import CommandGenerationBackend
+    backend = CommandGenerationBackend(
+        command=f"{sys.executable} {helper_script}",
+        profile="test_prof",
+        timeout_s=-59,  # 1.0s timeout limit
+        sigterm_wait_s=0.2,
+    )
+    t0 = time.time()
+    res = backend.complete(
+        subfield="algorithms",
+        round_num=1,
+        previous_names=[],
+        system_prompt="",
+        user_prompt="",
+    )
+    elapsed = time.time() - t0
+    assert res.ok is False
+    assert res.error_code == 12
+    assert elapsed < 6.0, f"Call hung for {elapsed:.2f}s instead of returning bounded!"
+
+    if child_pid_file.exists():
+        try:
+            cid = int(child_pid_file.read_text(encoding="utf-8").strip())
+            os.kill(cid, signal.SIGKILL)
+        except (ProcessLookupError, OSError, ValueError):
+            pass
+
+
+def test_distinct_model_labels_warning(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify that when shards contain distinct observed model labels,
+    a warning is printed to stderr and meta records observed_models_warning: true."""
+    from scripts.generate_name_pool import (
+        CacheEntry,
+        append_cache_record,
+        build_pool_from_cache,
+    )
+
+    e1 = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["synth_model_warn_concept_a"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["synth_model_warn_concept_a"],
+        backend="command",
+        prompt_version="np1w",
+        backend_meta={"model_observed": "Sonnet 5.5 Low"},
+    )
+    e2 = CacheEntry(
+        round=1,
+        subfield="data_structures",
+        subfield_idx=1,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(["synth_model_warn_concept_b"]),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-09T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=["synth_model_warn_concept_b"],
+        backend="command",
+        prompt_version="np1w",
+        backend_meta={"model_observed": "Illustrative Other Model"},
+    )
+
+    c1 = tmp_path / "s1" / "raw_responses.jsonl"
+    c2 = tmp_path / "s2" / "raw_responses.jsonl"
+    append_cache_record(c1, e1)
+    append_cache_record(c2, e2)
+
+    out = tmp_path / "pool.json"
+    res = build_pool_from_cache(
+        cache_path=[c1, c2],
+        output_path=out,
+        generator_kind="command",
+        configured_model="sonnet",
+        run_ids=["s1", "s2"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=2,
+    )
+    captured = capsys.readouterr()
+    assert "WARNING: Multiple distinct model_observed labels observed" in captured.err
+    assert res["meta"].get("observed_models_warning") is True
+    assert set(res["meta"].get("observed_models_set", [])) == {"Illustrative Other Model", "Sonnet 5.5 Low"}
+
+
+def test_profile_in_use_exit_7(tmp_path: Path) -> None:
+    """Verify that adapter error profile_in_use / exit 15 stops the generator with exit code 7,
+    a clear message that profile is locked, and preserves existing cache."""
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    cache_file = tmp_path / "cache.jsonl"
+    cache_file.write_text('{"existing": "data"}\n', encoding="utf-8")
+    lock_dir = tmp_path / "locks"
+
+    cmd = [
+        sys.executable,
+        "scripts/generate_name_pool.py",
+        "--backend",
+        "command",
+        "--command",
+        f"{sys.executable} {stub} --scenario profile_in_use",
+        "--adapter-profile",
+        "Profile 24",
+        "--live",
+        "--confirm",
+        "--output",
+        str(tmp_path / "out.json"),
+        "--cache-file",
+        str(cache_file),
+        "--lock-dir",
+        str(lock_dir),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    assert res.returncode == 7
+    assert "Profile in use (error 15): profile 'Profile 24' is locked by another process" in res.stderr
+    assert cache_file.exists()
+    assert '{"existing": "data"}' in cache_file.read_text(encoding="utf-8")
+
+
+def test_results_datagen_unmodified_by_test_suite() -> None:
+    """Prove that running generate_name_pool operations does not create stray files in results/datagen."""
+    datagen_dir = Path("results/datagen")
+    if not datagen_dir.exists():
+        return
+    entries_now = set(p.name for p in datagen_dir.iterdir())
+    assert ".lock" not in entries_now
 

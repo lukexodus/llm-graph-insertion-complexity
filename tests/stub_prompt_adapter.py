@@ -140,11 +140,21 @@ def main() -> int:
         out = {
             "ok": False,
             "error": "model_mismatch",
-            "message": "Model mismatch: requested 'sonnet' but observed 'Sonnet 5.5 Low' in UI.",
+            "message": "Model mismatch: requested 'sonnet' but observed 'Illustrative Other Model' in UI.",
             "reset_time": None,
         }
         print(json.dumps(out))
         return 14
+
+    if scenario == "profile_in_use":
+        out = {
+            "ok": False,
+            "error": "profile_in_use",
+            "message": "Profile is locked by another active process.",
+            "reset_time": None,
+        }
+        print(json.dumps(out))
+        return 15
 
     if scenario == "timeout":
         out = {
@@ -255,6 +265,7 @@ def main() -> int:
         "effort_requested": effort_req,
         "memory_requested": False,
         "web_search_requested": False,
+        "profile_used": payload.get("profile") or "Profile 1",
         "elapsed_s": 0.05,
         "adapter": {"name": "prompt-adapter", "version": "1.0.0"},
     }

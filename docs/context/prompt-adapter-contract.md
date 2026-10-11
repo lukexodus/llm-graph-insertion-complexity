@@ -1,6 +1,6 @@
-# Claude Automator Prompt Adapter Contract — v1
+# Claude Automator Prompt Adapter Contract — v1.1
 
-This document specifies Contract v1 of the claude-automator `prompt-adapter`.
+This document specifies Contract v1.1 of the claude-automator `prompt-adapter`.
 The adapter provides a headless CLI interface to execute prompts sequentially against
 Claude via the claude.ai web UI.
 
@@ -15,7 +15,7 @@ One process = one prompt = one FRESH claude.ai conversation; run sequentially.
 Exactly one JSON object with the following fields:
 
 - `prompt` (str, required): The prompt text to submit.
-- `profile` (str, required): Browser profile name to use.
+- `profile` (str or null, optional, default `"auto"`): Browser profile name to use. Default `"auto"` auto-resolves the first available unreserved candidate in the pool, but this generator always passes an explicit profile for reproducibility.
 - `model` (str, optional, default `"sonnet"`): Model identifier requested.
 - `effort` (str or null, optional, default `"low"`): Effort tier (`"low"`, `"medium"`, `"high"`, `"extra"`, `"max"`, or `null`).
 - `thinking` (bool or null, optional, default `null`): Thinking mode toggle.
@@ -40,6 +40,7 @@ Exactly one JSON object. Diagnostic logs are emitted to `stderr` only.
   "effort_requested": str | null,
   "memory_requested": bool,
   "web_search_requested": bool,
+  "profile_used": str,
   "elapsed_s": float,
   "adapter": {
     "name": "prompt-adapter",
@@ -73,10 +74,13 @@ Note: Unknown additive fields (e.g., `profile_used`) may be present in responses
 | `12` | `timeout` | Browser automation or response generation timed out |
 | `13` | `refusal` | Model refused to respond or content blocked |
 | `14` | `model_mismatch` | Observed UI model did not match requested model |
+| `15` | `profile_in_use` | Profile held by another active process or all candidate profiles locked |
 
 ---
 
 ## 2. Fixtures
+
+*Note on fixtures:* All failure fixtures below are illustrative examples, not live captures. For the success fixture, the metadata is real (captured from an authoritative smoke test); however, its `text` field is illustrative (the real smoke-test response text was `"OK"`).
 
 ### Example Request (`stdin`)
 
@@ -145,7 +149,18 @@ Note: Unknown additive fields (e.g., `profile_used`) may be present in responses
 {
   "ok": false,
   "error": "model_mismatch",
-  "message": "Model mismatch: requested 'sonnet' but observed 'Sonnet 5.5 Low' in UI.",
+  "message": "Model mismatch: requested 'sonnet' but observed 'Illustrative Other Model' in UI.",
+  "reset_time": null
+}
+```
+
+#### Failure: Profile In Use (Exit Code 15, Exit Code 7 in caller)
+
+```json
+{
+  "ok": false,
+  "error": "profile_in_use",
+  "message": "Profile 'research-profile' is locked by another active process.",
   "reset_time": null
 }
 ```

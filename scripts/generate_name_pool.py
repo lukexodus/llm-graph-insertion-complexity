@@ -66,6 +66,7 @@ TARGET_NAMES_DEFAULT = 2600
 MIN_REQUIRED_NAMES_FOR_VALIDATION = 2001
 MAX_CALLS_DEFAULT = 400
 COMMAND_BACKEND_SECONDS_PER_CALL = 40.0
+DEFAULT_LOCK_DIR = _REPO_ROOT / "results" / "datagen" / ".locks"
 
 # Estimated token consumption per generation call
 EST_INPUT_TOKENS_PER_CALL = 250
@@ -214,14 +215,22 @@ class ShardLockManager:
     """Manages exclusive non-blocking file locks for a generation session.
 
     Holds exclusive non-blocking locks on:
-      1. results/datagen/<run_id>/.lock
-      2. results/datagen/.locks/<profile-slug>.lock (if adapter_profile is given)
+      1. <cache_dir>/.lock (run-id lock, same directory as cache file)
+      2. <lock_dir>/<profile-slug>.lock (profile lock, if adapter_profile is given)
     Exits with code 1 and a clear error message (no traceback) if either lock is held.
     """
 
-    def __init__(self, run_id: str, adapter_profile: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        cache_dir: Path,
+        adapter_profile: Optional[str] = None,
+        lock_dir: Optional[Path] = None,
+    ) -> None:
         self.run_id = run_id
+        self.cache_dir = cache_dir
         self.adapter_profile = adapter_profile
+        self.lock_dir = lock_dir if lock_dir is not None else DEFAULT_LOCK_DIR
         self._lock_fds: list[tuple[Path, int]] = []
 
     def __enter__(self) -> ShardLockManager:
@@ -255,12 +264,12 @@ class ShardLockManager:
         self._lock_fds.append((lock_path, fd))
 
     def acquire(self) -> None:
-        run_lock = Path(f"results/datagen/{self.run_id}/.lock")
+        run_lock = self.cache_dir / ".lock"
         self._lock_file(run_lock, f"run_id '{self.run_id}'")
 
         if self.adapter_profile:
             slug = slugify_profile(self.adapter_profile)
-            prof_lock = Path(f"results/datagen/.locks/{slug}.lock")
+            prof_lock = self.lock_dir / f"{slug}.lock"
             self._lock_file(prof_lock, f"profile '{self.adapter_profile}'")
 
     def release(self) -> None:
@@ -795,36 +804,78 @@ def build_pool_from_cache(
         profiles_used = sorted({s["profile"] for s in shard_infos if s["profile"]})
         sha256_raw_dict = {s["run_id"]: s["sha256_raw_responses"] for s in shard_infos}
 
-        meta = {
-            "schema_version": SCHEMA_VERSION,
-            "domain": DOMAIN,
-            "generator": "claude-web-ui-via-prompt-adapter" if is_command_backend else (
-                "offline-fake" if allow_fake else generator_kind
-            ),
-            "prompt_version": first_prompt_version or (NAME_POOL_PROMPT_VERSION_COMMAND if is_command_backend else NAME_POOL_PROMPT_VERSION),
-            "requested_model": configured_model,
-            "requested_effort": "low",
-            "requested_memory": False,
-            "requested_web_search": False,
-            "observed_models": agg_observed,
-            "tier_histogram": agg_tiers,
-            "adapter_versions": sorted(agg_adapter_vers),
-            "temperature": None if is_command_backend else 0.7,
-            "max_tokens": None if is_command_backend else 1500,
-            "parameter_note": "Web UI does not expose temperature or max_tokens controls" if is_command_backend else None,
-            "run_ids": sorted(all_rids),
-            "shards": shard_infos,
-            "profiles_used": profiles_used,
-            "first_utc_timestamp": first_ts,
-            "last_utc_timestamp": last_ts,
-            "n_raw": n_raw,
-            "n_valid": len(shuffled_names),
-            "drop_counts": drop_counts,
-            "seed": seed,
-            "sha256_names": sha256_names,
-            "sha256_raw_responses": sha256_raw_dict,
-            "corpora_checked": corpora_names,
-        }
+        req_model: Optional[str] = None
+        req_effort: Optional[str] = None
+        req_memory = False
+        req_web_search = False
+
+        for e in all_entries:
+            if e.backend_meta:
+                bm = e.backend_meta
+                if req_model is None and "model_requested" in bm:
+                    req_model = str(bm["model_requested"])
+                if req_effort is None and "effort_requested" in bm:
+                    req_effort = str(bm["effort_requested"])
+                if "memory_requested" in bm:
+                    req_memory = bool(bm["memory_requested"])
+                if "web_search_requested" in bm:
+                    req_web_search = bool(bm["web_search_requested"])
+
+        if is_command_backend:
+            meta = {
+                "schema_version": SCHEMA_VERSION,
+                "domain": DOMAIN,
+                "generator": "claude-web-ui-via-prompt-adapter",
+                "prompt_version": first_prompt_version or NAME_POOL_PROMPT_VERSION_COMMAND,
+                "requested_model": req_model or configured_model,
+                "requested_effort": req_effort or "low",
+                "requested_memory": req_memory,
+                "requested_web_search": req_web_search,
+                "observed_models": agg_observed,
+                "tier_histogram": agg_tiers,
+                "adapter_versions": sorted(agg_adapter_vers),
+                "temperature": None,
+                "max_tokens": None,
+                "parameter_note": "Web UI does not expose temperature or max_tokens controls",
+                "run_ids": sorted(all_rids),
+                "shards": shard_infos,
+                "profiles_used": profiles_used,
+                "first_utc_timestamp": first_ts,
+                "last_utc_timestamp": last_ts,
+                "n_raw": n_raw,
+                "n_valid": len(shuffled_names),
+                "drop_counts": drop_counts,
+                "seed": seed,
+                "sha256_names": sha256_names,
+                "sha256_raw_responses": sha256_raw_dict,
+                "corpora_checked": corpora_names,
+            }
+        else:
+            reported_ids = sorted(agg_observed.keys()) if agg_observed else sorted(
+                {e.model_id for e in all_entries if e.model_id}
+            )
+            meta = {
+                "schema_version": SCHEMA_VERSION,
+                "domain": DOMAIN,
+                "generator": "offline-fake" if allow_fake else generator_kind,
+                "configured_model_alias": configured_model,
+                "response_reported_model_ids": reported_ids,
+                "temperature": 0.7,
+                "max_tokens": 1500,
+                "prompt_version": first_prompt_version or NAME_POOL_PROMPT_VERSION,
+                "run_ids": sorted(all_rids),
+                "shards": shard_infos,
+                "profiles_used": profiles_used,
+                "first_utc_timestamp": first_ts,
+                "last_utc_timestamp": last_ts,
+                "n_raw": n_raw,
+                "n_valid": len(shuffled_names),
+                "drop_counts": drop_counts,
+                "seed": seed,
+                "sha256_names": sha256_names,
+                "sha256_raw_responses": sha256_raw_dict,
+                "corpora_checked": corpora_names,
+            }
         if len(all_observed_models) > 1:
             meta["observed_models_warning"] = True
             meta["observed_models_set"] = sorted(all_observed_models)
@@ -1006,6 +1057,8 @@ def verify_pool(
     pool_path: Path,
     cache_path: Optional[Path] = None,
     allow_fake: bool = False,
+    merge_run_ids: Optional[list[str]] = None,
+    min_required_names: int = MIN_REQUIRED_NAMES_FOR_VALIDATION,
 ) -> None:
     """Verify integrity, hashes, provenance, and corpus disjunction of a name pool file.
 
@@ -1047,26 +1100,48 @@ def verify_pool(
         sys.exit(1)
 
     # Verify cache SHA256 if cache exists
-    target_cache = cache_path
-    if target_cache is None and meta.get("run_ids"):
-        candidate = Path("results/datagen") / meta["run_ids"][0] / "raw_responses.jsonl"
-        if candidate.exists():
-            target_cache = candidate
+    expected_raw_sha = meta.get("sha256_raw_responses")
+    if isinstance(expected_raw_sha, dict):
+        rids_to_check = merge_run_ids or meta.get("run_ids") or list(expected_raw_sha.keys())
+        for rid in rids_to_check:
+            cp = Path("results/datagen") / rid / "raw_responses.jsonl"
+            if not cp.exists():
+                print(f"ERROR: Listed cache missing for run_id '{rid}': {cp}", file=sys.stderr)
+                sys.exit(1)
+            computed_sha = hashlib.sha256(cp.read_bytes()).hexdigest()
+            expected_sha = expected_raw_sha.get(rid)
+            if expected_sha is None:
+                print(
+                    f"ERROR: Run ID '{rid}' not found in pool sha256_raw_responses metadata.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if computed_sha != expected_sha:
+                print(
+                    f"ERROR: Cache SHA256 mismatch for run_id '{rid}'! Expected {expected_sha}, computed {computed_sha}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+    else:
+        target_cache = cache_path
+        if target_cache is None and meta.get("run_ids"):
+            candidate = Path("results/datagen") / meta["run_ids"][0] / "raw_responses.jsonl"
+            if candidate.exists():
+                target_cache = candidate
 
-    if target_cache is not None and target_cache.exists():
-        computed_raw_sha = hashlib.sha256(target_cache.read_bytes()).hexdigest()
-        expected_raw_sha = meta.get("sha256_raw_responses")
-        if computed_raw_sha != expected_raw_sha:
-            print(
-                f"ERROR: Cache SHA256 mismatch! Expected {expected_raw_sha}, computed {computed_raw_sha}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        if target_cache is not None and target_cache.exists():
+            computed_raw_sha = hashlib.sha256(target_cache.read_bytes()).hexdigest()
+            if computed_raw_sha != expected_raw_sha:
+                print(
+                    f"ERROR: Cache SHA256 mismatch! Expected {expected_raw_sha}, computed {computed_raw_sha}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     # Check minimum names length
-    if len(names) < MIN_REQUIRED_NAMES_FOR_VALIDATION:
+    if len(names) < min_required_names:
         print(
-            f"ERROR: Pool contains {len(names)} names, but at least {MIN_REQUIRED_NAMES_FOR_VALIDATION} are required.",
+            f"ERROR: Pool contains {len(names)} names, but at least {min_required_names} are required.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1182,9 +1257,10 @@ ADAPTER_ERROR_STRING_TO_CODE: dict[str, int] = {
     "timeout": 12,
     "refusal": 13,
     "model_mismatch": 14,
+    "profile_in_use": 15,
     "other": 1,
 }
-CONTRACT_ERROR_CODES: set[int] = {1, 2, 10, 11, 12, 13, 14}
+CONTRACT_ERROR_CODES: set[int] = {1, 2, 10, 11, 12, 13, 14, 15}
 
 
 def parse_adapter_error(raw_err: Any, proc_returncode: int) -> int:
@@ -1196,9 +1272,10 @@ def parse_adapter_error(raw_err: Any, proc_returncode: int) -> int:
     timeout -> 12
     refusal -> 13
     model_mismatch -> 14
+    profile_in_use -> 15
     other or unknown -> 1
     If stdout has no usable "error", fall back to the process exit code when it is
-    one of the contract codes ({1, 2, 10, 11, 12, 13, 14}), else 1.
+    one of the contract codes ({1, 2, 10, 11, 12, 13, 14, 15}), else 1.
     """
     if isinstance(raw_err, str):
         cleaned = raw_err.strip().lower()
@@ -1314,22 +1391,14 @@ class CommandGenerationBackend(GenerationBackend):
             except (ProcessLookupError, OSError):
                 pass
 
+            # Drain pipes with bounded timeout to prevent blocking
             try:
-                proc.wait(timeout=5.0)
-            except (subprocess.TimeoutExpired, OSError):
+                proc.communicate(timeout=2.0)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                # If still alive or pipes already closed, force-close everything
                 pass
 
-            # Drain and close the pipes
-            if proc.stdout:
-                try:
-                    proc.stdout.read()
-                except Exception:
-                    pass
-            if proc.stderr:
-                try:
-                    proc.stderr.read()
-                except Exception:
-                    pass
+            # Close any remaining pipes
             for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe:
                     try:
@@ -1454,10 +1523,11 @@ def run_generation_loop(
     pause_s: float = 3.0,
     shard: Optional[str] = None,
     stagger_s: float = 20.0,
+    lock_dir: Optional[Path] = None,
 ) -> int:
     """Execute iterative generation across subfields until target_names is reached."""
     # Enforce non-blocking exclusive flocks for the duration of the run
-    with ShardLockManager(run_id=run_id, adapter_profile=adapter_profile):
+    with ShardLockManager(run_id=run_id, cache_dir=cache_path.parent, adapter_profile=adapter_profile, lock_dir=lock_dir):
         configured_model = resolve_model_alias(model) if backend != "command" else adapter_model
 
         # Check offline-fake output path restriction
@@ -1470,9 +1540,20 @@ def run_generation_loop(
                 )
                 return 1
 
-        shard_i, shard_n = parse_shard_arg(shard)
+        shard_i, shard_n = parse_shard_arg(shard) if shard else (1, 1)
         effective_target = math.ceil(target_names / shard_n) if shard_n > 1 else target_names
         owned_subfields = get_shard_subfields(shard_i, shard_n)
+
+        # Precompute build command for shard mode
+        suffix = f"-s{shard_i}of{shard_n}"
+        if run_id.endswith(suffix):
+            prefix = run_id[:-len(suffix)]
+            merge_ids = ",".join(f"{prefix}-s{k}of{shard_n}" for k in range(1, shard_n + 1))
+        else:
+            merge_ids = run_id
+        build_cmd = f"python3 scripts/generate_name_pool.py --build-only --merge-run-ids {merge_ids}"
+        if output_path.resolve() != DEFAULT_TRACKED_OUTPUT.resolve():
+            build_cmd += f" --output {output_path}"
 
         cache = load_completed_cache(cache_path)
         corpus_nodes, corpus_embeds, _ = load_benchmark_corpus_concepts()
@@ -1482,6 +1563,15 @@ def run_generation_loop(
             list(cache.values()), corpus_nodes, corpus_embeds
         )
         if len(valid_names) >= effective_target:
+            # When --shard is given, do not build or write any pool
+            if shard is not None:
+                print(
+                    f"Cache already contains {len(valid_names)} valid names (target: {effective_target}). "
+                    f"Shard {shard} complete (no pool written)."
+                )
+                print(f"To build the merged pool, run:\n{build_cmd}")
+                return 0
+
             print(f"Cache already contains {len(valid_names)} valid names (target: {effective_target}). Building pool.")
             gen_kind = (
                 "offline-fake"
@@ -1633,6 +1723,12 @@ def run_generation_loop(
                             elif res.error_code == 2:
                                 print(f"Bad request (error 2): {res.error_message}", file=sys.stderr)
                                 return 1
+                            elif res.error_code == 15:
+                                print(
+                                    f"Profile in use (error 15): profile '{adapter_profile}' is locked by another process: {res.error_message}",
+                                    file=sys.stderr,
+                                )
+                                return 7
                             else:
                                 # Error codes 12, 13, 1
                                 print(
@@ -1742,6 +1838,12 @@ def run_generation_loop(
             if len(valid_names) >= effective_target:
                 break
             round_num += 1
+
+        # When --shard is given, do not build or write any pool
+        if shard is not None:
+            print(f"\nGeneration complete. Shard {shard} cache written (no pool written).")
+            print(f"To build the merged pool, run:\n{build_cmd}")
+            return 0
 
         print(f"\nGeneration complete. Building final pool into {output_path}...")
         gen_kind = (
@@ -1955,6 +2057,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=MIN_REQUIRED_NAMES_FOR_VALIDATION,
         help=f"Minimum required valid names for validation (default: {MIN_REQUIRED_NAMES_FOR_VALIDATION}).",
     )
+    parser.add_argument(
+        "--lock-dir",
+        type=Path,
+        default=DEFAULT_LOCK_DIR,
+        help="Directory for profile locks (default: results/datagen/.locks).",
+    )
     return parser
 
 
@@ -2034,6 +2142,7 @@ def main() -> int:
             cache_path=cache_path if args.cache_file else None,
             allow_fake=args.allow_fake,
             merge_run_ids=merge_rids,
+            min_required_names=args.min_required_names,
         )
         return 0
 
@@ -2188,6 +2297,7 @@ def main() -> int:
         pause_s=args.pause_s,
         shard=args.shard,
         stagger_s=args.stagger_s,
+        lock_dir=args.lock_dir,
     )
 
 
