@@ -784,11 +784,32 @@ def build_pool_from_cache(
                 elif e.model_id:
                     obs_counts[e.model_id] = obs_counts.get(e.model_id, 0) + 1
 
+            shard_profiles: list[str] = []
+            seen_shard_profiles: set[str] = set()
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+                    try:
+                        raw_rec = json.loads(line_str)
+                    except Exception:
+                        continue
+                    if not isinstance(raw_rec, dict):
+                        continue
+                    bm_raw = raw_rec.get("backend_meta")
+                    if isinstance(bm_raw, dict) and bm_raw.get("profile_used") is not None:
+                        prof_val = str(bm_raw["profile_used"])
+                        if prof_val and prof_val not in seen_shard_profiles:
+                            seen_shard_profiles.add(prof_val)
+                            shard_profiles.append(prof_val)
+
             p_sha = hashlib.sha256(p.read_bytes()).hexdigest()
             shard_infos.append({
                 "run_id": rid,
                 "shard": shard_label,
                 "profile": prof,
+                "profiles": shard_profiles,
                 "call_count": call_count,
                 "observed_models": obs_counts,
                 "tier_histogram": t_counts,
@@ -846,7 +867,7 @@ def build_pool_from_cache(
             agg_adapter_vers.update(s["adapter_versions"])
 
         is_command_backend = (first_backend == "command") or (generator_kind == "claude-web-ui-via-prompt-adapter")
-        profiles_used = sorted({s["profile"] for s in shard_infos if s["profile"]})
+        profiles_used = sorted({prof_name for s in shard_infos for prof_name in s["profiles"] if prof_name})
         sha256_raw_dict = {s["run_id"]: s["sha256_raw_responses"] for s in shard_infos}
 
         req_model: Optional[str] = None

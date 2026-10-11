@@ -209,6 +209,14 @@ def test_failover_on_rate_limit_to_spare_profile(
     assert len(pool_data["names"]) == 160
     assert pool_data["meta"]["run_ids"] == ["failover-s1of2", "failover-s2of2"]
     assert len(pool_data["meta"]["shards"]) == 2
+    s1_meta = next(s for s in pool_data["meta"]["shards"] if s["shard"] == "1/2")
+    s2_meta = next(s for s in pool_data["meta"]["shards"] if s["shard"] == "2/2")
+    assert s1_meta["profile"] == "rate_limit_after_1_p1"
+    assert s1_meta["profiles"] == ["rate_limit_after_1_p1", "Spare_P3"]
+    assert s2_meta["profiles"] == ["Profile_2"]
+    assert pool_data["meta"]["profiles_used"] == sorted(
+        ["rate_limit_after_1_p1", "Profile_2", "Spare_P3"]
+    )
 
 
 def test_profile_in_use_rotates_to_next_profile_with_short_cooldown(
@@ -626,6 +634,8 @@ def test_loader_value_error_stops_everything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """10. Loader ValueError (corrupt / conflicting cache lines mid-run) stops everything cleanly."""
+    import threading
+
     monkeypatch.chdir(tmp_path)
     state_dir = tmp_path / "sup_valerr"
     lock_dir = tmp_path / "locks_valerr"
@@ -635,10 +645,7 @@ def test_loader_value_error_stops_everything(
         f"--child-pid-file {child_pid_file} --hang-seconds 30"
     )
 
-    # Pre-populate shard 1 cache with mixed backend records ('command' vs 'deepseek')
-    # so load_completed_cache() raises ValueError during the supervisor's poll.
-    s1_cache = tmp_path / "results" / "datagen" / "valerr-s1of2" / "raw_responses.jsonl"
-    s1_cache.parent.mkdir(parents=True, exist_ok=True)
+    s1_cache = tmp_path / "results" / "datagen" / "valerr-s1of1" / "raw_responses.jsonl"
     rec1 = {
         "round": 1,
         "subfield": "algorithms",
@@ -661,14 +668,28 @@ def test_loader_value_error_stops_everything(
         "backend": "deepseek",
         "prompt_version": "np1",
     }
-    s1_cache.write_text(json.dumps(rec1) + "\n" + json.dumps(rec2) + "\n", encoding="utf-8")
+
+    def _inject_conflicting_cache_after_child_spawn() -> None:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if child_pid_file.exists() and child_pid_file.read_text(encoding="utf-8").strip():
+                break
+            time.sleep(0.02)
+        s1_cache.parent.mkdir(parents=True, exist_ok=True)
+        s1_cache.write_text(
+            json.dumps(rec1) + "\n" + json.dumps(rec2) + "\n",
+            encoding="utf-8",
+        )
+
+    injector = threading.Thread(target=_inject_conflicting_cache_after_child_spawn, daemon=True)
+    injector.start()
 
     rc = supervisor_main([
-        "--shards", "2",
-        "--profiles", "hang_p1,hang_p2",
+        "--shards", "1",
+        "--profiles", "hang_p1",
         "--run-id-prefix", "valerr",
         "--command", stub_cmd,
-        "--target-names", "160",
+        "--target-names", "80",
         "--pause-s", "0",
         "--stagger-s", "0",
         "--poll-s", "0.05",
@@ -678,14 +699,111 @@ def test_loader_value_error_stops_everything(
         "--live",
         "--confirm",
     ])
+    injector.join(timeout=5.0)
     assert rc == SUP_EXIT_ERROR
 
-    if child_pid_file.exists():
-        cpid = int(child_pid_file.read_text(encoding="utf-8").strip())
-        assert not _pid_is_alive(cpid)
+    assert child_pid_file.exists(), "Stub did not write child_pid_file before loader_error!"
+    cpid = int(child_pid_file.read_text(encoding="utf-8").strip())
+    assert not _pid_is_alive(cpid)
 
     events = _read_jsonl(state_dir / "supervisor-log.jsonl")
     assert any(
         e["event"] == "loader_error" and "mixed backends" in e.get("error", "")
         for e in events
     )
+
+
+def test_live_adapter_flags_passthrough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """11. Live pass-through of --adapter-model, --adapter-effort, and --adapter-thinking
+    reaches shard subprocesses, stdin payloads, cache backend_meta, and supervisor-log.jsonl.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    # Case A: primary generation settings (--adapter-model sonnet-5 --adapter-effort low --adapter-thinking off)
+    state_dir_a = tmp_path / "sup_flags_a"
+    lock_dir_a = tmp_path / "locks_flags_a"
+    out_pool_a = tmp_path / "pool_a.json"
+    payload_file_a = tmp_path / "payloads_a.jsonl"
+    stub_cmd_a = f"{sys.executable} {_STUB_SCRIPT} --record-payload-file {payload_file_a}"
+
+    rc_a = supervisor_main([
+        "--shards", "2",
+        "--profiles", "Prof_Flag_1,Prof_Flag_2",
+        "--run-id-prefix", "flagpass",
+        "--command", stub_cmd_a,
+        "--adapter-model", "sonnet-5",
+        "--adapter-effort", "low",
+        "--adapter-thinking", "off",
+        "--target-names", "120",
+        "--max-calls", "5",
+        "--pause-s", "0",
+        "--stagger-s", "0",
+        "--poll-s", "0.05",
+        "--state-dir", str(state_dir_a),
+        "--lock-dir", str(lock_dir_a),
+        "--output", str(out_pool_a),
+        "--live",
+        "--confirm",
+    ])
+    assert rc_a == SUP_EXIT_OK
+
+    payloads_a = _read_jsonl(payload_file_a)
+    assert len(payloads_a) == 4
+    for p in payloads_a:
+        assert p["model"] == "sonnet-5"
+        assert p["effort"] == "low"
+        assert "thinking" in p
+        assert p["thinking"] is False
+
+    for rid in ("flagpass-s1of2", "flagpass-s2of2"):
+        cpath = tmp_path / "results" / "datagen" / rid / "raw_responses.jsonl"
+        crecs = _read_jsonl(cpath)
+        assert len(crecs) == 2
+        for rec in crecs:
+            assert rec["backend_meta"]["thinking_requested"] is False
+            assert rec["backend_meta"]["model_requested"] == "sonnet-5"
+            assert rec["backend_meta"]["effort_requested"] == "low"
+
+    events_a = _read_jsonl(state_dir_a / "supervisor-log.jsonl")
+    launch_events_a = [e for e in events_a if e["event"] == "shard_launch"]
+    assert len(launch_events_a) == 2
+    for le in launch_events_a:
+        assert "--adapter-thinking off" in le["command"]
+        assert "--adapter-model sonnet-5" in le["command"]
+        assert "--adapter-effort low" in le["command"]
+
+    # Case B: non-default effort (--adapter-effort medium) so removing adapter_effort from
+    # _launch_shard (where build_shard_cli_tokens defaults adapter_effort='low') is caught
+    state_dir_b = tmp_path / "sup_flags_b"
+    lock_dir_b = tmp_path / "locks_flags_b"
+    out_pool_b = tmp_path / "pool_b.json"
+    payload_file_b = tmp_path / "payloads_b.jsonl"
+    stub_cmd_b = f"{sys.executable} {_STUB_SCRIPT} --record-payload-file {payload_file_b}"
+
+    rc_b = supervisor_main([
+        "--shards", "1",
+        "--profiles", "Prof_Flag_Med",
+        "--run-id-prefix", "flagmed",
+        "--command", stub_cmd_b,
+        "--adapter-model", "sonnet-5",
+        "--adapter-effort", "medium",
+        "--adapter-thinking", "off",
+        "--target-names", "40",
+        "--max-calls", "2",
+        "--pause-s", "0",
+        "--stagger-s", "0",
+        "--poll-s", "0.05",
+        "--state-dir", str(state_dir_b),
+        "--lock-dir", str(lock_dir_b),
+        "--output", str(out_pool_b),
+        "--live",
+        "--confirm",
+    ])
+    assert rc_b == SUP_EXIT_OK
+    payloads_b = _read_jsonl(payload_file_b)
+    assert len(payloads_b) == 1
+    assert payloads_b[0]["model"] == "sonnet-5"
+    assert payloads_b[0]["effort"] == "medium"
+    assert payloads_b[0]["thinking"] is False

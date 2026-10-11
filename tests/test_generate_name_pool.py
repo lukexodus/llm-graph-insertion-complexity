@@ -2631,4 +2631,126 @@ def test_adapter_thinking_dry_run_and_print_shard_commands(tmp_path: Path) -> No
             assert "--adapter-model sonnet-5" in ln
 
 
+# ===========================================================================
+# 13. FIX-017 Multi-Profile Shard Provenance in Merged Pool
+# ===========================================================================
 
+def test_merged_pool_records_all_profiles_per_shard_and_preserves_names_sha256(
+    tmp_path: Path,
+) -> None:
+    """Verify that when shard 1 has records with profile_used 'A' then 'B' and shard 2
+    has only 'C', build_pool_from_cache (merged path) records:
+      - shards[0]['profiles'] == ['A', 'B']
+      - shards[0]['profile'] == 'A'
+      - shards[1]['profiles'] == ['C']
+      - meta['profiles_used'] == ['A', 'B', 'C']
+    and that names, n_raw, n_valid, drop_counts, and meta['sha256_names'] are identical
+    to those produced from the same caches with profile_used removed from every record.
+    """
+    from scripts.generate_name_pool import (
+        CacheEntry,
+        append_cache_record,
+        build_pool_from_cache,
+    )
+
+    def _entry(
+        round_num: int,
+        subfield: str,
+        sf_idx: int,
+        names: list[str],
+        shard: str,
+        profile_used: str | None,
+    ) -> CacheEntry:
+        bm: dict[str, Any] = {
+            "model_requested": "sonnet-5",
+            "model_observed": "Sonnet 5 Low",
+            "effort_requested": "low",
+            "thinking_requested": False,
+            "tier": 2,
+            "adapter": {"name": "prompt-adapter", "version": "1.1"},
+        }
+        if profile_used is not None:
+            bm["profile_used"] = profile_used
+        return CacheEntry(
+            round=round_num,
+            subfield=subfield,
+            subfield_idx=sf_idx,
+            request_system="sys",
+            request_user="usr",
+            response_text=json.dumps(names),
+            model_id="Sonnet 5 Low",
+            token_usage={},
+            timestamp_utc=f"2026-10-11T10:0{sf_idx}:00Z",
+            retries=0,
+            latency_s=0.1,
+            parsed_names=names,
+            backend="command",
+            prompt_version="np1w",
+            backend_meta=bm,
+            shard=shard,
+        )
+
+    names_s1_a = [f"synth_algo_item_{i:02d}" for i in range(1, 11)]
+    names_s1_b = [f"synth_comp_item_{i:02d}" for i in range(1, 11)]
+    names_s2_c = [f"synth_ds_item_{i:02d}" for i in range(1, 11)]
+
+    # 1. Caches WITH profile_used ("A" then "B" on shard 1; "C" on shard 2)
+    c1_with = tmp_path / "with_prof" / "s1" / "raw_responses.jsonl"
+    c2_with = tmp_path / "with_prof" / "s2" / "raw_responses.jsonl"
+    append_cache_record(c1_with, _entry(1, "algorithms", 0, names_s1_a, "1/2", "A"))
+    append_cache_record(c1_with, _entry(1, "compilers", 2, names_s1_b, "1/2", "B"))
+    append_cache_record(c2_with, _entry(1, "data_structures", 1, names_s2_c, "2/2", "C"))
+
+    pool_with = build_pool_from_cache(
+        cache_path=[c1_with, c2_with],
+        output_path=tmp_path / "pool_with.json",
+        generator_kind="command",
+        configured_model="sonnet-5",
+        seed=42,
+        run_ids=["s1", "s2"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=10,
+    )
+
+    shards = pool_with["meta"]["shards"]
+    assert len(shards) == 2
+    assert shards[0]["shard"] == "1/2"
+    assert shards[0]["profile"] == "A"
+    assert shards[0]["profiles"] == ["A", "B"]
+    assert shards[1]["shard"] == "2/2"
+    assert shards[1]["profile"] == "C"
+    assert shards[1]["profiles"] == ["C"]
+    assert pool_with["meta"]["profiles_used"] == ["A", "B", "C"]
+
+    # 2. Same caches with profile_used removed from every record
+    c1_without = tmp_path / "without_prof" / "s1" / "raw_responses.jsonl"
+    c2_without = tmp_path / "without_prof" / "s2" / "raw_responses.jsonl"
+    append_cache_record(c1_without, _entry(1, "algorithms", 0, names_s1_a, "1/2", None))
+    append_cache_record(c1_without, _entry(1, "compilers", 2, names_s1_b, "1/2", None))
+    append_cache_record(c2_without, _entry(1, "data_structures", 1, names_s2_c, "2/2", None))
+
+    pool_without = build_pool_from_cache(
+        cache_path=[c1_without, c2_without],
+        output_path=tmp_path / "pool_without.json",
+        generator_kind="command",
+        configured_model="sonnet-5",
+        seed=42,
+        run_ids=["s1", "s2"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=10,
+    )
+
+    assert pool_without["meta"]["shards"][0]["profile"] is None
+    assert pool_without["meta"]["shards"][0]["profiles"] == []
+    assert pool_without["meta"]["shards"][1]["profile"] is None
+    assert pool_without["meta"]["shards"][1]["profiles"] == []
+    assert pool_without["meta"]["profiles_used"] == []
+
+    # Metadata-only guarantee: names, n_raw, n_valid, drop_counts, and sha256_names are identical
+    assert pool_with["names"] == pool_without["names"]
+    assert pool_with["meta"]["sha256_names"] == pool_without["meta"]["sha256_names"]
+    assert pool_with["meta"]["n_raw"] == pool_without["meta"]["n_raw"]
+    assert pool_with["meta"]["n_valid"] == pool_without["meta"]["n_valid"]
+    assert pool_with["meta"]["drop_counts"] == pool_without["meta"]["drop_counts"]
