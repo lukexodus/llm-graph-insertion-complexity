@@ -76,11 +76,6 @@ def guard_results_datagen_unmodified() -> Generator[None, None, None]:
 
     before = _snapshot()
     yield
-    # Clean up any default timestamped directories created in results/datagen by CLI tests that did not specify --run-id
-    if datagen_dir.exists():
-        for p in datagen_dir.iterdir():
-            if p.is_dir() and len(p.name) == 16 and p.name.endswith("Z") and "_" in p.name:
-                shutil.rmtree(p, ignore_errors=True)
     after = _snapshot()
     assert after == before, (
         f"results/datagen was modified by tests in test_generate_name_pool!\n"
@@ -456,7 +451,17 @@ def test_live_mode_refuses_without_confirm_and_without_key(tmp_path: Path) -> No
     env = dict(os.environ)
     env.pop("DEEPSEEK_API_KEY", None)
     res2 = subprocess.run(
-        [sys.executable, script, "--live", "--confirm", "--allow-peak"],
+        [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--allow-peak",
+            "--cache-file",
+            str(tmp_path / "raw.jsonl"),
+            "--lock-dir",
+            str(tmp_path / "locks"),
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -466,12 +471,20 @@ def test_live_mode_refuses_without_confirm_and_without_key(tmp_path: Path) -> No
     assert "Traceback" not in res2.stderr
 
 
-def test_offline_fake_refuses_default_output_path() -> None:
+def test_offline_fake_refuses_default_output_path(tmp_path: Path) -> None:
     """Verify offline-fake refuses to overwrite default tracked path data/synthetic/cs_concept_names.json."""
     script = str(Path("scripts/generate_name_pool.py").resolve())
 
     res = subprocess.run(
-        [sys.executable, script, "--offline-fake"],
+        [
+            sys.executable,
+            script,
+            "--offline-fake",
+            "--cache-file",
+            str(tmp_path / "raw.jsonl"),
+            "--lock-dir",
+            str(tmp_path / "locks"),
+        ],
         capture_output=True,
         text=True,
     )
@@ -661,6 +674,7 @@ def test_command_backend_success_e2e(tmp_path: Path) -> None:
     stub = str(Path("tests/stub_prompt_adapter.py").resolve())
     pool_path = tmp_path / "claude_pool.json"
     cache_path = tmp_path / "raw.jsonl"
+    lock_dir = tmp_path / "locks"
 
     cmd_str = f"{sys.executable} {stub} --scenario success"
     res = subprocess.run(
@@ -685,6 +699,8 @@ def test_command_backend_success_e2e(tmp_path: Path) -> None:
             str(pool_path),
             "--cache-file",
             str(cache_path),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -701,6 +717,7 @@ def test_command_backend_success_e2e(tmp_path: Path) -> None:
     assert meta["prompt_version"] == "np1w"
     assert meta["requested_model"] == "sonnet"
     assert meta["requested_effort"] == "low"
+    assert meta["requested_thinking"] is None
     assert meta["requested_memory"] is False
     assert meta["requested_web_search"] is False
     assert "Sonnet 5.5 Low" in meta["observed_models"]
@@ -891,6 +908,7 @@ def test_stop_and_resume_after_rate_limit(tmp_path: Path) -> None:
     state_file = tmp_path / "state.txt"
     cache_path = tmp_path / "raw.jsonl"
     pool_path = tmp_path / "pool.json"
+    lock_dir = tmp_path / "locks"
 
     cmd1 = f"{sys.executable} {stub} --scenario rate_limit_after_n --state-file {state_file} --limit-n 2"
 
@@ -917,6 +935,8 @@ def test_stop_and_resume_after_rate_limit(tmp_path: Path) -> None:
             str(pool_path),
             "--cache-file",
             str(cache_path),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -952,6 +972,8 @@ def test_stop_and_resume_after_rate_limit(tmp_path: Path) -> None:
             str(pool_path),
             "--cache-file",
             str(cache_path),
+            "--lock-dir",
+            str(lock_dir),
         ],
         capture_output=True,
         text=True,
@@ -1696,17 +1718,18 @@ def test_profile_lock_mutual_exclusion(tmp_path: Path) -> None:
     profile_name = "Profile 24"
     profile_slug = slugify_profile(profile_name)  # "profile_24"
     profile_lock_file = lock_dir / f"{profile_slug}.lock"
+    ready_file = tmp_path / "profile_lock.ready"
 
     stub = str(Path("tests/stub_prompt_adapter.py").resolve())
 
-    # Helper process holds exclusive lock on profile_24.lock
-    helper_code = f"""import fcntl, os, time
+    # Helper process holds exclusive lock on profile_24.lock and signals readiness via ready_file
+    helper_code = f"""import fcntl, os, pathlib, time
 fd = os.open({repr(str(profile_lock_file))}, os.O_CREAT | os.O_RDWR)
 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-time.sleep(3)
+pathlib.Path({repr(str(ready_file))}).write_text("ready", encoding="utf-8")
+time.sleep(5)
 """
     p_helper = subprocess.Popen([sys.executable, "-c", helper_code])
-    time.sleep(0.3)
 
     cmd = [
         sys.executable,
@@ -1734,6 +1757,12 @@ time.sleep(3)
     ]
 
     try:
+        deadline = time.monotonic() + 5.0
+        while not ready_file.exists():
+            if time.monotonic() >= deadline:
+                pytest.fail(f"Timed out after 5.0s waiting for lock helper ready file: {ready_file}")
+            time.sleep(0.02)
+
         res = subprocess.run(cmd, capture_output=True, text=True)
         assert res.returncode == 1
         assert "is locked by another process" in res.stderr
@@ -1925,113 +1954,112 @@ def test_cli_verify_merged_success_and_tampered_cache(tmp_path: Path) -> None:
         build_pool_from_cache,
     )
 
+    script = str(Path("scripts/generate_name_pool.py").resolve())
     r1_id = f"_test_verify_merge_{uuid.uuid4().hex[:8]}_1"
     r2_id = f"_test_verify_merge_{uuid.uuid4().hex[:8]}_2"
-    datagen_base = Path("results/datagen")
+    datagen_base = tmp_path / "results" / "datagen"
     c1_dir = datagen_base / r1_id
     c2_dir = datagen_base / r2_id
     c1 = c1_dir / "raw_responses.jsonl"
     c2 = c2_dir / "raw_responses.jsonl"
 
-    try:
-        c1_dir.mkdir(parents=True, exist_ok=True)
-        c2_dir.mkdir(parents=True, exist_ok=True)
+    c1_dir.mkdir(parents=True, exist_ok=True)
+    c2_dir.mkdir(parents=True, exist_ok=True)
 
-        names1 = [f"verify_synth_concept_a_{i:03d}" for i in range(1, 25)]
-        e1 = CacheEntry(
-            round=1,
-            subfield="algorithms",
-            subfield_idx=0,
-            request_system="",
-            request_user="",
-            response_text=json.dumps(names1),
-            model_id="test",
-            token_usage={},
-            timestamp_utc="2026-10-11T00:00:00Z",
-            retries=0,
-            latency_s=0.1,
-            parsed_names=names1,
-            backend="deepseek",
-            prompt_version="np1",
-        )
-        names2 = [f"verify_synth_concept_b_{i:03d}" for i in range(1, 25)]
-        e2 = CacheEntry(
-            round=1,
-            subfield="data_structures",
-            subfield_idx=1,
-            request_system="",
-            request_user="",
-            response_text=json.dumps(names2),
-            model_id="test",
-            token_usage={},
-            timestamp_utc="2026-10-11T00:00:00Z",
-            retries=0,
-            latency_s=0.1,
-            parsed_names=names2,
-            backend="deepseek",
-            prompt_version="np1",
-        )
-        append_cache_record(c1, e1)
-        append_cache_record(c2, e2)
+    names1 = [f"verify_synth_concept_a_{i:03d}" for i in range(1, 25)]
+    e1 = CacheEntry(
+        round=1,
+        subfield="algorithms",
+        subfield_idx=0,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(names1),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-11T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=names1,
+        backend="deepseek",
+        prompt_version="np1",
+    )
+    names2 = [f"verify_synth_concept_b_{i:03d}" for i in range(1, 25)]
+    e2 = CacheEntry(
+        round=1,
+        subfield="data_structures",
+        subfield_idx=1,
+        request_system="",
+        request_user="",
+        response_text=json.dumps(names2),
+        model_id="test",
+        token_usage={},
+        timestamp_utc="2026-10-11T00:00:00Z",
+        retries=0,
+        latency_s=0.1,
+        parsed_names=names2,
+        backend="deepseek",
+        prompt_version="np1",
+    )
+    append_cache_record(c1, e1)
+    append_cache_record(c2, e2)
 
-        pool_merged = tmp_path / "pool_merged.json"
-        build_pool_from_cache(
-            cache_path=[c1, c2],
-            output_path=pool_merged,
-            generator_kind="deepseek",
-            configured_model="deepseek-flash",
-            seed=42,
-            run_ids=[r1_id, r2_id],
-            allow_fake=True,
-            is_merged=True,
-            min_required_names=10,
-        )
+    pool_merged = tmp_path / "pool_merged.json"
+    build_pool_from_cache(
+        cache_path=[c1, c2],
+        output_path=pool_merged,
+        generator_kind="deepseek",
+        configured_model="deepseek-flash",
+        seed=42,
+        run_ids=[r1_id, r2_id],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=10,
+    )
 
-        # 1. Success path: verify passes
-        res_ok = subprocess.run(
-            [
-                sys.executable,
-                "scripts/generate_name_pool.py",
-                "--verify",
-                "--output",
-                str(pool_merged),
-                "--merge-run-ids",
-                f"{r1_id},{r2_id}",
-                "--allow-fake",
-                "--min-required-names",
-                "10",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert res_ok.returncode == 0, f"Verify failed unexpectedly: {res_ok.stderr}"
-        assert "Pool verification PASSED" in res_ok.stdout
+    # 1. Success path: verify passes
+    res_ok = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--verify",
+            "--output",
+            str(pool_merged),
+            "--merge-run-ids",
+            f"{r1_id},{r2_id}",
+            "--allow-fake",
+            "--min-required-names",
+            "10",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert res_ok.returncode == 0, f"Verify failed unexpectedly: {res_ok.stderr}"
+    assert "Pool verification PASSED" in res_ok.stdout
 
-        # 2. Tampered cache path: append a line to one cache, assert it fails with SHA256 mismatch
-        with open(c1, "a", encoding="utf-8") as f:
-            f.write('{"tampered": true}\n')
+    # 2. Tampered cache path: append a line to one cache, assert it fails with SHA256 mismatch
+    with open(c1, "a", encoding="utf-8") as f:
+        f.write('{"tampered": true}\n')
 
-        res_tampered = subprocess.run(
-            [
-                sys.executable,
-                "scripts/generate_name_pool.py",
-                "--verify",
-                "--output",
-                str(pool_merged),
-                "--merge-run-ids",
-                f"{r1_id},{r2_id}",
-                "--allow-fake",
-                "--min-required-names",
-                "10",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert res_tampered.returncode == 1
-        assert f"Cache SHA256 mismatch for run_id '{r1_id}'" in res_tampered.stderr
-    finally:
-        shutil.rmtree(c1_dir, ignore_errors=True)
-        shutil.rmtree(c2_dir, ignore_errors=True)
+    res_tampered = subprocess.run(
+        [
+            sys.executable,
+            script,
+            "--verify",
+            "--output",
+            str(pool_merged),
+            "--merge-run-ids",
+            f"{r1_id},{r2_id}",
+            "--allow-fake",
+            "--min-required-names",
+            "10",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert res_tampered.returncode == 1
+    assert f"Cache SHA256 mismatch for run_id '{r1_id}'" in res_tampered.stderr
 
 
 def test_timeout_kill_sigterm_ignored_and_grandchild_killed(tmp_path: Path) -> None:
@@ -2310,5 +2338,297 @@ def test_merged_meta_fidelity_requested_fields(tmp_path: Path) -> None:
     assert meta.get("requested_model") == "claude-sonnet-custom"
     assert meta.get("requested_memory") is True
     assert meta.get("requested_web_search") is True
+
+
+# ===========================================================================
+# 12. FIX-015 Explicit Adapter Thinking Control Tests
+# ===========================================================================
+
+def test_adapter_thinking_payload_and_meta_e2e(tmp_path: Path) -> None:
+    """Verify via real CLI and stub_prompt_adapter that --adapter-thinking {auto,on,off}:
+    1. Sends null (None), true (True), false (False) in the stdin payload received by the stub.
+    2. Records thinking_requested in each cache record's backend_meta.
+    3. Records requested_thinking in pool meta for both single-run and merged pools.
+    """
+    from scripts.generate_name_pool import build_pool_from_cache
+
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+    lock_dir = tmp_path / "locks"
+
+    cases: list[tuple[str | None, bool | None]] = [
+        (None, None),      # default (auto)
+        ("auto", None),
+        ("on", True),
+        ("off", False),
+    ]
+
+    for idx, (flag_val, expected_val) in enumerate(cases):
+        case_dir = tmp_path / f"case_{idx}_{flag_val or 'default'}"
+        payload_log = case_dir / "payloads.jsonl"
+        cache_file = case_dir / "raw_responses.jsonl"
+        pool_file = case_dir / "pool.json"
+
+        cmd_str = f"{sys.executable} {stub} --scenario success --record-payload-file {payload_log}"
+        cli_args = [
+            sys.executable,
+            script,
+            "--live",
+            "--confirm",
+            "--backend",
+            "command",
+            "--command",
+            cmd_str,
+            "--adapter-profile",
+            f"prof_{idx}",
+            "--adapter-model",
+            "sonnet-5",
+            "--pause-s",
+            "0",
+            "--target-names",
+            "30",
+            "--max-calls",
+            "1",
+            "--output",
+            str(pool_file),
+            "--cache-file",
+            str(cache_file),
+            "--lock-dir",
+            str(lock_dir),
+        ]
+        if flag_val is not None:
+            cli_args.extend(["--adapter-thinking", flag_val])
+
+        res = subprocess.run(cli_args, capture_output=True, text=True)
+        assert res.returncode == 0, f"CLI failed for {flag_val}: {res.stderr}"
+        assert payload_log.exists(), f"Stub did not write payload log for {flag_val}"
+
+        # 1. Check exact payload received by stub_prompt_adapter
+        payload_lines = [ln for ln in payload_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(payload_lines) == 1
+        received_payload = json.loads(payload_lines[0])
+        assert "thinking" in received_payload
+        assert received_payload["thinking"] is expected_val
+        assert received_payload["model"] == "sonnet-5"
+
+        # 2. Check cache record backend_meta["thinking_requested"]
+        cache_lines = [ln for ln in cache_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(cache_lines) == 1
+        cache_rec = json.loads(cache_lines[0])
+        assert "backend_meta" in cache_rec
+        assert "thinking_requested" in cache_rec["backend_meta"]
+        assert cache_rec["backend_meta"]["thinking_requested"] is expected_val
+
+        # 3. Check single-run pool meta["requested_thinking"]
+        pool_data = json.loads(pool_file.read_text(encoding="utf-8"))
+        assert "requested_thinking" in pool_data["meta"]
+        assert pool_data["meta"]["requested_thinking"] is expected_val
+        assert pool_data["meta"]["requested_model"] == "sonnet-5"
+
+    # 4. Check merged pool meta["requested_thinking"] across two shards run via CLI with --adapter-thinking off
+    s1_cache = tmp_path / "merge_off_s1" / "raw_responses.jsonl"
+    s2_cache = tmp_path / "merge_off_s2" / "raw_responses.jsonl"
+    s1_payload = tmp_path / "merge_off_s1" / "payload.jsonl"
+    s2_payload = tmp_path / "merge_off_s2" / "payload.jsonl"
+
+    for shard_idx, (scache, spayload) in enumerate([(s1_cache, s1_payload), (s2_cache, s2_payload)], start=1):
+        res_s = subprocess.run(
+            [
+                sys.executable,
+                script,
+                "--live",
+                "--confirm",
+                "--backend",
+                "command",
+                "--command",
+                f"{sys.executable} {stub} --scenario success --record-payload-file {spayload}",
+                "--adapter-profile",
+                f"Profile {23 + shard_idx}",
+                "--adapter-model",
+                "sonnet-5",
+                "--adapter-thinking",
+                "off",
+                "--shard",
+                f"{shard_idx}/2",
+                "--run-id",
+                f"s5off-s{shard_idx}of2",
+                "--pause-s",
+                "0",
+                "--stagger-s",
+                "0",
+                "--target-names",
+                "30",
+                "--max-calls",
+                "1",
+                "--output",
+                str(tmp_path / "unused_shard_out.json"),
+                "--cache-file",
+                str(scache),
+                "--lock-dir",
+                str(lock_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res_s.returncode == 0, f"Shard {shard_idx} failed: {res_s.stderr}"
+
+    merged_out = tmp_path / "merged_off_pool.json"
+    merged_res = build_pool_from_cache(
+        cache_path=[s1_cache, s2_cache],
+        output_path=merged_out,
+        generator_kind="command",
+        configured_model="sonnet-5",
+        run_ids=["s5off-s1of2", "s5off-s2of2"],
+        allow_fake=True,
+        is_merged=True,
+        min_required_names=20,
+    )
+    assert merged_res["meta"]["requested_thinking"] is False
+    assert merged_res["meta"]["requested_model"] == "sonnet-5"
+
+
+def test_merge_refuses_mixed_thinking_settings(tmp_path: Path) -> None:
+    """Verify that merging caches (or loading a single cache) with different thinking_requested
+    values raises ValueError containing 'mixed thinking settings'."""
+    from scripts.generate_name_pool import (
+        CacheEntry,
+        CommandGenerationBackend,
+        append_cache_record,
+        build_pool_from_cache,
+        load_completed_cache,
+    )
+
+    stub = str(Path("tests/stub_prompt_adapter.py").resolve())
+
+    def _make_shard_cache(name: str, subfield: str, sf_idx: int, thinking_val: bool | None) -> Path:
+        payload_log = tmp_path / name / "payload.jsonl"
+        be = CommandGenerationBackend(
+            command=f"{sys.executable} {stub} --scenario success --record-payload-file {payload_log}",
+            profile="Profile 24",
+            model="sonnet-5",
+            effort="low",
+            thinking=thinking_val,
+        )
+        gen_res = be.complete(
+            subfield=subfield,
+            round_num=1,
+            previous_names=[],
+            system_prompt="",
+            user_prompt="",
+        )
+        assert gen_res.ok is True
+        assert gen_res.backend_meta is not None
+        assert gen_res.backend_meta["thinking_requested"] is thinking_val
+
+        cpath = tmp_path / name / "raw_responses.jsonl"
+        entry = CacheEntry(
+            round=1,
+            subfield=subfield,
+            subfield_idx=sf_idx,
+            request_system="",
+            request_user="prompt",
+            response_text=gen_res.text,
+            model_id=gen_res.model_id,
+            token_usage=gen_res.token_usage,
+            timestamp_utc="2026-10-11T12:00:00Z",
+            retries=0,
+            latency_s=gen_res.latency_s,
+            parsed_names=json.loads(gen_res.text),
+            backend="command",
+            prompt_version="np1w",
+            backend_meta=gen_res.backend_meta,
+            shard="1/2",
+        )
+        append_cache_record(cpath, entry)
+        return cpath
+
+    c_off = _make_shard_cache("shard_off", "algorithms", 0, False)
+    c_on = _make_shard_cache("shard_on", "data_structures", 1, True)
+    c_auto = _make_shard_cache("shard_auto", "operating_systems", 2, None)
+
+    # 1. off (False) vs on (True) across merged caches
+    with pytest.raises(ValueError, match="mixed thinking settings"):
+        build_pool_from_cache(
+            cache_path=[c_off, c_on],
+            output_path=tmp_path / "out_off_on.json",
+            generator_kind="command",
+            configured_model="sonnet-5",
+            run_ids=["shard_off", "shard_on"],
+            allow_fake=True,
+            is_merged=True,
+            min_required_names=10,
+        )
+
+    # 2. off (False) vs auto (None) across merged caches
+    with pytest.raises(ValueError, match="mixed thinking settings"):
+        build_pool_from_cache(
+            cache_path=[c_off, c_auto],
+            output_path=tmp_path / "out_off_auto.json",
+            generator_kind="command",
+            configured_model="sonnet-5",
+            run_ids=["shard_off", "shard_auto"],
+            allow_fake=True,
+            is_merged=True,
+            min_required_names=10,
+        )
+
+    # 3. Single cache file mixing off (False) and on (True)
+    mixed_single = tmp_path / "mixed_single.jsonl"
+    mixed_single.write_text(
+        c_off.read_text(encoding="utf-8") + c_on.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="mixed thinking settings"):
+        load_completed_cache(mixed_single)
+
+
+def test_adapter_thinking_dry_run_and_print_shard_commands(tmp_path: Path) -> None:
+    """Verify --dry-run displays 'Adapter thinking:' and --print-shard-commands includes --adapter-thinking."""
+    script = str(Path("scripts/generate_name_pool.py").resolve())
+
+    # 1. --dry-run default (auto) and explicit (off, on)
+    for expected in ("auto", "off", "on"):
+        cmd = [
+            sys.executable,
+            script,
+            "--dry-run",
+            "--backend",
+            "command",
+            "--cache-file",
+            str(tmp_path / "raw.jsonl"),
+            "--lock-dir",
+            str(tmp_path / "locks"),
+        ]
+        if expected != "auto":
+            cmd.extend(["--adapter-thinking", expected])
+        res_dry = subprocess.run(cmd, capture_output=True, text=True)
+        assert res_dry.returncode == 0
+        assert f"Adapter thinking:      {expected}" in res_dry.stdout
+
+    # 2. --print-shard-commands default (auto) and explicit (off, on)
+    for expected in ("auto", "off", "on"):
+        cmd_psc = [
+            sys.executable,
+            script,
+            "--print-shard-commands",
+            "--shards",
+            "2",
+            "--profiles",
+            "Profile 24,Profile 26",
+            "--run-id-prefix",
+            "thinktest",
+            "--adapter-model",
+            "sonnet-5",
+        ]
+        if expected != "auto":
+            cmd_psc.extend(["--adapter-thinking", expected])
+        res_psc = subprocess.run(cmd_psc, capture_output=True, text=True)
+        assert res_psc.returncode == 0
+        lines = [ln.strip() for ln in res_psc.stdout.strip().splitlines() if ln.strip()]
+        assert len(lines) == 2
+        for ln in lines:
+            assert f"--adapter-thinking {expected}" in ln
+            assert "--adapter-model sonnet-5" in ln
+
 
 

@@ -53,6 +53,12 @@ def main() -> int:
         action="store_true",
         help="Spawn a child process that also hangs.",
     )
+    parser.add_argument(
+        "--record-payload-file",
+        type=str,
+        default=None,
+        help="Optional path to append received stdin JSON payload lines for inspection in tests.",
+    )
     args = parser.parse_args()
 
     # Read stdin
@@ -69,9 +75,16 @@ def main() -> int:
         print(json.dumps(out))
         return 2
 
+    if args.record_payload_file:
+        rec_path = Path(args.record_payload_file)
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(rec_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+
     scenario = args.scenario or payload.get("profile") or "success"
     model_req = payload.get("model", "sonnet")
     effort_req = payload.get("effort", "low")
+    thinking_req = payload.get("thinking", None)
 
     # Determine subfield from prompt if possible
     prompt = payload.get("prompt", "")
@@ -223,6 +236,7 @@ def main() -> int:
             "model_requested": model_req,
             "model_observed": "Sonnet 5.5 Low",
             "effort_requested": effort_req,
+            "thinking_requested": thinking_req,
             "memory_requested": False,
             "web_search_requested": False,
             "elapsed_s": 0.05,
@@ -246,6 +260,7 @@ def main() -> int:
             "model_requested": model_req,
             "model_observed": "Sonnet 5.5 Low",
             "effort_requested": effort_req,
+            "thinking_requested": thinking_req,
             "memory_requested": False,
             "web_search_requested": False,
             "elapsed_s": 0.05,
@@ -263,6 +278,7 @@ def main() -> int:
         "model_requested": model_req,
         "model_observed": "Sonnet 5.5 Low",
         "effort_requested": effort_req,
+        "thinking_requested": thinking_req,
         "memory_requested": False,
         "web_search_requested": False,
         "profile_used": payload.get("profile") or "Profile 1",

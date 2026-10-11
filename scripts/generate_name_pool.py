@@ -211,6 +211,25 @@ def slugify_profile(profile: str) -> str:
     return s or "default"
 
 
+ADAPTER_THINKING_MAP: dict[str, Optional[bool]] = {
+    "auto": None,
+    "on": True,
+    "off": False,
+}
+
+
+def parse_adapter_thinking(thinking_str: Optional[str]) -> Optional[bool]:
+    """Map --adapter-thinking {auto,on,off} to None, True, False."""
+    if thinking_str is None:
+        return None
+    norm = thinking_str.strip().lower()
+    if norm not in ADAPTER_THINKING_MAP:
+        raise ValueError(
+            f"Invalid --adapter-thinking value {thinking_str!r}. Expected one of: auto, on, off."
+        )
+    return ADAPTER_THINKING_MAP[norm]
+
+
 class ShardLockManager:
     """Manages exclusive non-blocking file locks for a generation session.
 
@@ -417,6 +436,8 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
 
     first_backend: Optional[str] = None
     first_prompt_version: Optional[str] = None
+    first_thinking_seen: bool = False
+    first_thinking: Any = None
 
     with open(cache_path, "r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -451,6 +472,18 @@ def load_completed_cache(cache_path: Path) -> dict[tuple[int, str], CacheEntry]:
                     raise ValueError(
                         f"Cache {cache_path} contains mixed prompt versions: found '{prompt_version_val}' "
                         f"and '{first_prompt_version}' (line {line_no})."
+                    )
+
+            bm_raw = record.get("backend_meta")
+            if isinstance(bm_raw, dict):
+                thinking_val = bm_raw.get("thinking_requested", None)
+                if not first_thinking_seen:
+                    first_thinking = thinking_val
+                    first_thinking_seen = True
+                elif (type(thinking_val), thinking_val) != (type(first_thinking), first_thinking):
+                    raise ValueError(
+                        f"Cache {cache_path} contains mixed thinking settings: found {thinking_val!r} "
+                        f"and {first_thinking!r} (line {line_no})."
                     )
 
             try:
@@ -687,9 +720,11 @@ def build_pool_from_cache(
             )
             sys.exit(1)
 
-        # 2. Consistency check across shards (mixed backends / prompt versions)
+        # 2. Consistency check across shards (mixed backends / prompt versions / thinking settings)
         first_backend: Optional[str] = None
         first_prompt_version: Optional[str] = None
+        first_thinking_seen: bool = False
+        first_thinking: Any = None
         all_entries: list[CacheEntry] = []
         shard_infos: list[dict[str, Any]] = []
 
@@ -711,6 +746,16 @@ def build_pool_from_cache(
                         raise ValueError(
                             f"Cache {p} contains mixed prompt versions: found '{entry.prompt_version}' "
                             f"and '{first_prompt_version}' in earlier shard."
+                        )
+                if entry.backend_meta is not None:
+                    thinking_val = entry.backend_meta.get("thinking_requested", None)
+                    if not first_thinking_seen:
+                        first_thinking = thinking_val
+                        first_thinking_seen = True
+                    elif (type(thinking_val), thinking_val) != (type(first_thinking), first_thinking):
+                        raise ValueError(
+                            f"Cache {p} contains mixed thinking settings: found {thinking_val!r} "
+                            f"and {first_thinking!r} in earlier shard."
                         )
                 all_entries.append(entry)
 
@@ -806,6 +851,8 @@ def build_pool_from_cache(
 
         req_model: Optional[str] = None
         req_effort: Optional[str] = None
+        req_thinking: Optional[bool] = None
+        req_thinking_seen = False
         req_memory = False
         req_web_search = False
 
@@ -816,6 +863,9 @@ def build_pool_from_cache(
                     req_model = str(bm["model_requested"])
                 if req_effort is None and "effort_requested" in bm:
                     req_effort = str(bm["effort_requested"])
+                if not req_thinking_seen and "thinking_requested" in bm:
+                    req_thinking = bm["thinking_requested"]
+                    req_thinking_seen = True
                 if "memory_requested" in bm:
                     req_memory = bool(bm["memory_requested"])
                 if "web_search_requested" in bm:
@@ -829,6 +879,7 @@ def build_pool_from_cache(
                 "prompt_version": first_prompt_version or NAME_POOL_PROMPT_VERSION_COMMAND,
                 "requested_model": req_model or configured_model,
                 "requested_effort": req_effort or "low",
+                "requested_thinking": req_thinking,
                 "requested_memory": req_memory,
                 "requested_web_search": req_web_search,
                 "observed_models": agg_observed,
@@ -934,6 +985,8 @@ def build_pool_from_cache(
 
         req_model: Optional[str] = None
         req_effort: Optional[str] = None
+        req_thinking: Optional[bool] = None
+        req_thinking_seen = False
         req_memory = False
         req_web_search = False
 
@@ -944,6 +997,9 @@ def build_pool_from_cache(
                     req_model = str(bm["model_requested"])
                 if req_effort is None and "effort_requested" in bm:
                     req_effort = str(bm["effort_requested"])
+                if not req_thinking_seen and "thinking_requested" in bm:
+                    req_thinking = bm["thinking_requested"]
+                    req_thinking_seen = True
                 if "memory_requested" in bm:
                     req_memory = bool(bm["memory_requested"])
                 if "web_search_requested" in bm:
@@ -969,6 +1025,7 @@ def build_pool_from_cache(
             "prompt_version": NAME_POOL_PROMPT_VERSION_COMMAND,
             "requested_model": req_model or configured_model,
             "requested_effort": req_effort or "low",
+            "requested_thinking": req_thinking,
             "requested_memory": req_memory,
             "requested_web_search": req_web_search,
             "observed_models": observed_counts,
@@ -1306,6 +1363,7 @@ class CommandGenerationBackend(GenerationBackend):
         profile: str,
         model: str = "sonnet",
         effort: Optional[str] = "low",
+        thinking: Optional[bool] = None,
         timeout_s: int = 300,
         sigterm_wait_s: float = 10.0,
     ) -> None:
@@ -1313,6 +1371,7 @@ class CommandGenerationBackend(GenerationBackend):
         self.profile = profile
         self.model = model
         self.effort = effort
+        self.thinking = thinking
         self.timeout_s = timeout_s
         self.sigterm_wait_s = sigterm_wait_s
 
@@ -1331,7 +1390,7 @@ class CommandGenerationBackend(GenerationBackend):
             "profile": self.profile,
             "model": self.model,
             "effort": self.effort,
-            "thinking": None,
+            "thinking": self.thinking,
             "web_search": False,
             "memory": False,
             "headless": False,
@@ -1456,6 +1515,7 @@ class CommandGenerationBackend(GenerationBackend):
             model_id = str(model_obs or model_req or self.model)
             elapsed = float(resp_json.get("elapsed_s", 0.0))
             backend_meta = {k: v for k, v in resp_json.items() if k != "text"}
+            backend_meta.setdefault("thinking_requested", self.thinking)
             return GenerationResult(
                 text=str(resp_json.get("text", "")),
                 model_id=model_id,
@@ -1519,6 +1579,7 @@ def run_generation_loop(
     adapter_profile: Optional[str] = None,
     adapter_model: str = "sonnet",
     adapter_effort: Optional[str] = "low",
+    adapter_thinking: str = "auto",
     adapter_timeout: int = 300,
     pause_s: float = 3.0,
     shard: Optional[str] = None,
@@ -1616,6 +1677,7 @@ def run_generation_loop(
                     profile=adapter_profile,
                     model=adapter_model,
                     effort=adapter_effort,
+                    thinking=parse_adapter_thinking(adapter_thinking),
                     timeout_s=adapter_timeout,
                 )
 
@@ -1999,6 +2061,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Effort tier for command adapter: low, medium, high, extra, max (default: low).",
     )
     parser.add_argument(
+        "--adapter-thinking",
+        type=str,
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Thinking mode control for command adapter: auto (null), on (true), off (false) (default: auto).",
+    )
+    parser.add_argument(
         "--adapter-timeout",
         type=int,
         default=300,
@@ -2103,6 +2172,7 @@ def main() -> int:
             cmd_parts.extend(["--adapter-profile", shlex.quote(prof)])
             cmd_parts.extend(["--adapter-model", shlex.quote(args.adapter_model)])
             cmd_parts.extend(["--adapter-effort", shlex.quote(str(args.adapter_effort))])
+            cmd_parts.extend(["--adapter-thinking", shlex.quote(str(args.adapter_thinking))])
             if args.adapter_timeout != 300:
                 cmd_parts.extend(["--adapter-timeout", str(args.adapter_timeout)])
             if args.pause_s != 3.0:
@@ -2231,6 +2301,7 @@ def main() -> int:
             print(f"Command string:        {args.command or '[not set]'}")
             print(f"Adapter profile:       {args.adapter_profile or '[not set]'}")
             print(f"Adapter model:         {args.adapter_model}")
+            print(f"Adapter thinking:      {args.adapter_thinking}")
             print(f"Serial duration:       {serial_duration:.1f} s (@ {COMMAND_BACKEND_SECONDS_PER_CALL:.1f}s/call)")
             if args.shard:
                 shard_i, shard_n = parse_shard_arg(args.shard)
@@ -2293,6 +2364,7 @@ def main() -> int:
         adapter_profile=args.adapter_profile,
         adapter_model=args.adapter_model,
         adapter_effort=args.adapter_effort,
+        adapter_thinking=args.adapter_thinking,
         adapter_timeout=args.adapter_timeout,
         pause_s=args.pause_s,
         shard=args.shard,
