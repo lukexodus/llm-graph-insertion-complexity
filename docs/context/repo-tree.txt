@@ -1,4 +1,7 @@
 .
+├── data
+│   └── synthetic
+│       └── cs_concept_names.json
 ├── docs
 │   ├── context
 │   │   ├── apc-bundle-quickref.md
@@ -40,12 +43,15 @@
 │   │   ├── FIX-014-gemini-finish-fix-013.md
 │   │   ├── FIX-015-gemini-adapter-thinking-and-fixture-repair.md
 │   │   ├── FIX-016-gemini-dry-run-planner.md
+│   │   ├── FIX-017-gemini-profile-provenance-and-supervisor-tests.md
 │   │   ├── INFRA-001-claude-code-graph-representation.md
 │   │   ├── INFRA-002-gemini-strategy-interface.md
 │   │   ├── INFRA-003-gemini-corpus-loader.md
 │   │   ├── INFRA-004-gemini-measurement-harness.md
 │   │   ├── INFRA-005-claude-code-null-strategy-e2e.md
 │   │   ├── INFRA-006-gemini-decision-step-llm-client.md
+│   │   ├── INFRA-007-gemini-strategy-wiring.md
+│   │   ├── INFRA-007-R-gemini.md
 │   │   ├── STRAT-001-A-claude-code.md
 │   │   ├── STRAT-001-gemini-brute-force.md
 │   │   ├── STRAT-001-review-opencode.md
@@ -77,6 +83,7 @@
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
 │   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
 │   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
+│   ├── 0001-INFRA-007-wire-four-strategies-parameters-run-direct.patch
 │   ├── 0001-STRAT-003-B-close-stale-cache-hole-in-Strategy-2-and.patch
 │   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
 │   ├── 0001-STRAT-004-A2-close-scoring-tie-break-and-bucket-size.patch
@@ -136,8 +143,10 @@
 │       │   ├── brute_force.py
 │       │   ├── embedding_threshold.py
 │       │   ├── __init__.py
-│       │   └── null.py
+│       │   ├── null.py
+│       │   └── registry.py
 │       ├── decision.py
+│       ├── embedding_minilm.py
 │       ├── embedding.py
 │       ├── graph_representation.py
 │       ├── harness.py
@@ -159,6 +168,7 @@
 │   ├── test_controllable_embedder.py
 │   ├── test_decision.py
 │   ├── test_dry_run_plan.py
+│   ├── test_embedding_minilm.py
 │   ├── test_embedding_threshold_strategy.py
 │   ├── test_generate_name_pool.py
 │   ├── test_graph_representation.py
@@ -170,8 +180,10 @@
 │   ├── test_name_pool_supervisor.py
 │   ├── test_null_strategy.py
 │   ├── test_pilot.py
+│   ├── test_run_experiment_cli.py
 │   ├── test_schedule.py
 │   ├── test_scoring.py
-│   └── test_strategy_interface.py
+│   ├── test_strategy_interface.py
+│   └── test_strategy_registry.py
 ├── AGENTS.md
 └── pyproject.toml
