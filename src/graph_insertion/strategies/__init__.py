@@ -13,6 +13,7 @@ __all__ = [
     "EmbeddingThresholdStrategy",
     "AnnRetrievalStrategy",
     "BoundedBucketStrategy",
+    "StubNarrowingStrategy",
     "STRATEGY_FACTORIES",
 ]
 
@@ -30,6 +31,9 @@ def __getattr__(name: str):  # noqa: ANN201 — lazy module-level exports
     if name == "BoundedBucketStrategy":
         from graph_insertion.strategies.bounded_bucket import BoundedBucketStrategy
         return BoundedBucketStrategy
+    if name == "StubNarrowingStrategy":
+        from graph_insertion.strategies.stub import StubNarrowingStrategy
+        return StubNarrowingStrategy
     if name == "STRATEGY_FACTORIES":
         from graph_insertion.strategies.registry import STRATEGY_FACTORIES
         return STRATEGY_FACTORIES

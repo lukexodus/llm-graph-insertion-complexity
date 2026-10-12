@@ -175,8 +175,9 @@ bash tests/test_apc_bundle.sh
 ### Deterministic Default Run Directories & Configuration Sidecar
 
 - When neither `--output-dir` nor `--run-id` is passed, the default output directory is `results/<mode>_<strategy>` (for `brute_force` at seed 42) or `results/<mode>_<strategy>_<slug>`, where `<slug>` encodes the strategy's keyed `config()` fields in fixed order (`_seed<seed>` is appended when `--seed != 42` for strategies with a seed). Explicit `--output-dir` or `--run-id` takes precedence unchanged.
-- Before the first trial on a fresh directory, the CLI writes `<output_dir>/strategy_config.json` containing `{"strategy", "config", "embedder", "mode", "command_line_params"}`.
-- On `--resume` (or any run into an existing directory containing `raw.jsonl`), the CLI compares the stored `strategy` and `config` in `strategy_config.json` with the current configuration and refuses with exit code `1` on mismatch. Older directories containing `raw.jsonl` without `strategy_config.json` emit a warning to `stderr` and proceed without overwriting.
+- `--dry-run` (both offline and `--live --dry-run`) prints the plan and resolved output directory without creating the output directory or any file on disk.
+- On a real run (`--confirm`) into a fresh directory, `<output_dir>/strategy_config.json` (containing `{"strategy", "config", "embedder", "mode", "command_line_params"}`) is written immediately after `manifest.json` and before the first trial begins, preserving clean `git_dirty` status in `manifest.json` while remaining crash-safe before trial execution.
+- On `--resume` (with an existing sidecar) or any run into an existing directory containing `raw.jsonl`, the CLI compares `strategy`, `config`, `mode`, and the `embedder` identity block (`type`, `model_name`, `dim`, `revision`, and installed `sentence_transformers_version` for `minilm`; `type`, `dim`, and `seed` for `fake`) in `strategy_config.json` with the current configuration and refuses with exit code `1` on mismatch. Older sidecars without `sentence_transformers_version` emit a single warning for that missing key and proceed; older directories containing `raw.jsonl` without `strategy_config.json` emit a warning to `stderr` and proceed without overwriting.
 
 ### Primary & Sensitivity Run Table (D-35, D-46, D-47, D-55, D-58, D-59, D-62)
 

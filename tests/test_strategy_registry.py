@@ -193,3 +193,41 @@ class TestStrategyRegistry:
         )
         assert derive_default_run_id("sweep", "null", {"k": 1, "seed": 42}) == "sweep_null_k1"
         assert derive_default_run_id("sweep", "stub", {"top_k": 5}) == "sweep_stub_k5"
+
+    def test_lazy_export_strategy_factories_kills_rm24(self) -> None:
+        """Kills R-M24: graph_insertion.strategies.STRATEGY_FACTORIES resolves via lazy export and matches registry."""
+        import graph_insertion.strategies as strats
+        from graph_insertion.strategies.registry import STRATEGY_FACTORIES as REG_FACTORIES
+
+        assert hasattr(strats, "STRATEGY_FACTORIES")
+        assert strats.STRATEGY_FACTORIES is REG_FACTORIES
+
+    def test_stub_isolated_import_and_no_scripts_dependency_kills_pm7(self) -> None:
+        """Kills P-M7: STRATEGY_FACTORIES['stub'] works from /tmp with PYTHONPATH=src only, and re-export from scripts.run_experiment still works."""
+        repo_root = Path(__file__).resolve().parent.parent
+        src_dir = repo_root / "src"
+        code = (
+            "import sys\n"
+            "from graph_insertion.strategies.registry import STRATEGY_FACTORIES\n"
+            "strat = STRATEGY_FACTORIES['stub'](42, None)\n"
+            "assert strat.name == 'stub_narrowing'\n"
+            "assert strat.config() == {'name': 'stub_narrowing', 'top_k': 5}\n"
+            "assert 'scripts' not in sys.modules\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd="/tmp",
+            env={"PYTHONPATH": str(src_dir)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, f"stderr: {proc.stderr}"
+
+        # Also verify re-export from scripts.run_experiment works from repo root
+        from graph_insertion.strategies.stub import StubNarrowingStrategy as LibStub
+        from scripts.run_experiment import StubNarrowingStrategy as ScriptStub
+
+        assert ScriptStub is LibStub
+        assert ScriptStub(top_k=3).config() == {"name": "stub_narrowing", "top_k": 3}
+

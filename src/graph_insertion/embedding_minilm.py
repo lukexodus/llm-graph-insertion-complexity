@@ -10,6 +10,8 @@ Decisions:
     version pinned.
   - [D-64]: Live runs of embedding strategies require ``--embedder minilm``;
     ``--embedder fake`` is refused for live embedding strategies.
+  - [D-66]: Version and model revision pins, runtime check against installed
+    package version, fail-closed on unset pins.
 """
 
 from __future__ import annotations
@@ -21,17 +23,13 @@ import numpy as np
 
 # ---------------------------------------------------------------------------
 # Pins — MUST be set to actual values before any live run.
-# If MODEL_REVISION_PIN is None the embedder refuses to initialise (fail-closed).
+# If either pin is None or blank, MiniLMEmbedder refuses to initialise (fail-closed).
 # ---------------------------------------------------------------------------
 
 # Pin: sentence-transformers package version installed in .venv-ann.
-# Cannot be determined offline (sentence-transformers is not installed).
-# Luke must supply this value.
 SENTENCE_TRANSFORMERS_VERSION_PIN: Optional[str] = None
 
 # Pin: Hugging Face model revision (commit hash) for all-MiniLM-L6-v2.
-# Cannot be determined offline (model is not cached locally).
-# Luke must supply this value.
 MODEL_REVISION_PIN: Optional[str] = None
 
 MODEL_NAME: str = "all-MiniLM-L6-v2"
@@ -50,7 +48,7 @@ class MiniLMEmbedder:
     Parameters
     ----------
     revision :
-        Model revision (commit hash).  Defaults to ``MODEL_REVISION_PIN``.
+        Model revision (commit hash). Defaults to ``MODEL_REVISION_PIN``.
         If ``None`` or empty at construction time, raises ``ValueError``
         (fail-closed).
 
@@ -62,29 +60,50 @@ class MiniLMEmbedder:
         Always 384.
     revision : str
         Pinned model revision hash.
+    installed_version : str
+        Installed version of sentence-transformers library.
     """
 
     model_name: str = MODEL_NAME
     dim: int = MODEL_DIM
 
     def __init__(self, revision: Any = _UNSET) -> None:
+        if (
+            not isinstance(SENTENCE_TRANSFORMERS_VERSION_PIN, str)
+            or not SENTENCE_TRANSFORMERS_VERSION_PIN.strip()
+        ):
+            raise ValueError(
+                "MiniLMEmbedder requires a pinned sentence-transformers package version. "
+                f"SENTENCE_TRANSFORMERS_VERSION_PIN is currently {SENTENCE_TRANSFORMERS_VERSION_PIN!r}. "
+                "Cannot proceed without a version pin (fail-closed)."
+            )
+
         actual_revision = MODEL_REVISION_PIN if revision is _UNSET else revision
         if not isinstance(actual_revision, str) or not actual_revision.strip():
             raise ValueError(
                 "MiniLMEmbedder requires a pinned model revision. "
-                "Set MODEL_REVISION_PIN in embedding_minilm.py or pass a non-empty "
-                "revision= string to the constructor. Cannot proceed without a pin (fail-closed)."
+                f"MODEL_REVISION_PIN is currently {MODEL_REVISION_PIN!r} (passed revision={revision!r}). "
+                "Cannot proceed without a revision pin (fail-closed)."
             )
         self.revision: str = actual_revision
 
         # Lazy import of sentence_transformers
         try:
+            import sentence_transformers
             from sentence_transformers import SentenceTransformer
         except ImportError:
             raise ImportError(
                 "sentence-transformers is not installed. "
                 "Install with: pip install -e \".[embed]\""
             ) from None
+
+        installed_ver = getattr(sentence_transformers, "__version__", None)
+        if installed_ver != SENTENCE_TRANSFORMERS_VERSION_PIN:
+            raise ValueError(
+                f"sentence-transformers version mismatch: installed={installed_ver!r} "
+                f"vs pinned={SENTENCE_TRANSFORMERS_VERSION_PIN!r}."
+            )
+        self.installed_version: str = str(installed_ver)
 
         self._model = SentenceTransformer(
             self.model_name,
@@ -122,6 +141,7 @@ class MiniLMEmbedder:
             "model_name": self.model_name,
             "dim": int(self.dim),
             "revision": self.revision,
+            "sentence_transformers_version": self.installed_version,
             "sentence_transformers_version_pin": SENTENCE_TRANSFORMERS_VERSION_PIN,
             "device": "cpu",
             "dtype": "float32",

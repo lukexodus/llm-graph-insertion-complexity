@@ -46,6 +46,7 @@ from graph_insertion.harness import (
     SyntheticNameSource,
     _load_existing_keys,
     accuracy_trial_key,
+    estimate_and_print_plan,
     run_experiment,
     sample_heldout_nodes,
     sweep_trial_key,
@@ -61,7 +62,6 @@ from graph_insertion.strategies.registry import (
     build_strategy_slug,
     check_applicability,
     derive_default_run_id,
-    register_stub,
 )
 from graph_insertion.strategy import (
     DecisionOutcome,
@@ -78,39 +78,7 @@ _SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 # Local Test Stubs
 # ===========================================================================
 
-class StubNarrowingStrategy:
-    """Minimal deterministic narrowing strategy for harness testing and dry runs."""
-
-    name: str = "stub_narrowing"
-    uses_embeddings: bool = False
-
-    def __init__(self, top_k: int = 5) -> None:
-        self.top_k = top_k
-        self._graph: Optional[ConceptGraph] = None
-        self._embedder: Optional[Embedder] = None
-
-    def setup(self, graph: ConceptGraph, embedder: Any) -> None:
-        self._graph = graph
-        self._embedder = None
-
-    def shortlist(self, new_name: str) -> Shortlist:
-        if not self._graph:
-            return Shortlist(candidates=())
-        nodes = sorted(self._graph.nodes())
-        candidates = tuple(nodes[: self.top_k])
-        return Shortlist(candidates=candidates)
-
-    def on_inserted(self, new_name: str, edges: tuple[tuple[str, str], ...]) -> None:
-        pass
-
-    def config(self) -> dict[str, Any]:
-        return {"name": self.name, "top_k": self.top_k}
-
-    def diagnostics(self) -> dict[str, Any]:
-        return {}
-
-    def max_candidates(self, n_existing: int) -> int:
-        return min(self.top_k, n_existing)
+from graph_insertion.strategies.stub import StubNarrowingStrategy
 
 
 class StubDecisionStep:
@@ -136,7 +104,6 @@ class StubDecisionStep:
 # Strategy Registry (INFRA-007)
 # ===========================================================================
 
-register_stub(StubNarrowingStrategy)
 STRATEGY_REGISTRY: dict[str, Callable[..., NarrowingStrategy]] = STRATEGY_FACTORIES
 
 
@@ -691,6 +658,148 @@ def build_sidecar_payload(
     return payload
 
 
+def get_current_embedder_info(
+    args: Any,
+    uses_embeddings: bool,
+    seed: int,
+) -> dict[str, Any]:
+    """Determine expected embedder information block without eagerly instantiating models."""
+    if not uses_embeddings or args.embedder == "fake":
+        return {
+            "type": "fake",
+            "uses_embeddings": uses_embeddings,
+            "dim": 32,
+            "seed": int(seed),
+        }
+    from graph_insertion.embedding_minilm import (
+        MODEL_DIM,
+        MODEL_NAME,
+        MODEL_REVISION_PIN,
+        SENTENCE_TRANSFORMERS_VERSION_PIN,
+    )
+    st_version = SENTENCE_TRANSFORMERS_VERSION_PIN
+    try:
+        import sentence_transformers
+        st_version = getattr(sentence_transformers, "__version__", SENTENCE_TRANSFORMERS_VERSION_PIN)
+    except Exception:
+        pass
+
+    return {
+        "type": "minilm",
+        "uses_embeddings": True,
+        "model_name": MODEL_NAME,
+        "dim": int(MODEL_DIM),
+        "revision": MODEL_REVISION_PIN,
+        "sentence_transformers_version": st_version,
+        "sentence_transformers_version_pin": SENTENCE_TRANSFORMERS_VERSION_PIN,
+        "device": "cpu",
+        "dtype": "float32",
+    }
+
+
+def check_resume_or_existing_directory_guard(
+    output_dir: Path,
+    raw_jsonl_path: Path,
+    sidecar_path: Path,
+    has_existing_raw: bool,
+    config_resume: bool,
+    current_strategy: str,
+    current_config: dict[str, Any],
+    current_mode: str,
+    current_embedder_info: dict[str, Any],
+) -> int:
+    """Check resume and existing-directory compatibility against sidecar."""
+    if not (has_existing_raw or (config_resume and sidecar_path.exists())):
+        return 0
+
+    if not sidecar_path.exists():
+        if has_existing_raw:
+            print(
+                f"WARNING: Existing {raw_jsonl_path} found without {sidecar_path}; "
+                "proceeding without sidecar mismatch check and not writing sidecar to non-fresh directory.",
+                file=sys.stderr,
+            )
+        return 0
+
+    try:
+        stored_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception as err:
+        print(
+            f"ERROR: Failed to parse existing {sidecar_path}: {err}",
+            file=sys.stderr,
+        )
+        return 1
+
+    stored_strategy = stored_sidecar.get("strategy")
+    stored_config = stored_sidecar.get("config")
+    if stored_strategy != current_strategy or stored_config != current_config:
+        print(
+            f"ERROR: Strategy configuration mismatch in {output_dir}: "
+            f"stored strategy={stored_strategy!r} config={stored_config} vs "
+            f"current strategy={current_strategy!r} config={current_config}",
+            file=sys.stderr,
+        )
+        return 1
+
+    stored_mode = stored_sidecar.get("mode")
+    if stored_mode is not None and stored_mode != current_mode:
+        print(
+            f"ERROR: Harness mode mismatch in {output_dir}: "
+            f"stored mode={stored_mode!r} vs current mode={current_mode!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    stored_embedder = stored_sidecar.get("embedder")
+    if stored_embedder is not None:
+        stored_type = stored_embedder.get("type")
+        current_type = current_embedder_info.get("type")
+
+        if stored_type != current_type:
+            print(
+                f"ERROR: Embedder type mismatch in {output_dir}: "
+                f"stored embedder={stored_embedder} vs current embedder={current_embedder_info}",
+                file=sys.stderr,
+            )
+            return 1
+
+        if current_type == "minilm":
+            keys_to_compare = ["model_name", "dim", "revision"]
+            for k in keys_to_compare:
+                if stored_embedder.get(k) != current_embedder_info.get(k):
+                    print(
+                        f"ERROR: Embedder configuration mismatch in {output_dir} (key {k!r}): "
+                        f"stored embedder={stored_embedder} vs current embedder={current_embedder_info}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            if "sentence_transformers_version" not in stored_embedder:
+                print(
+                    f"WARNING: Existing sidecar in {output_dir} does not record sentence_transformers_version; "
+                    "treating as legacy/unrecorded and proceeding.",
+                    file=sys.stderr,
+                )
+            else:
+                if stored_embedder.get("sentence_transformers_version") != current_embedder_info.get("sentence_transformers_version"):
+                    print(
+                        f"ERROR: Embedder configuration mismatch in {output_dir} (key 'sentence_transformers_version'): "
+                        f"stored embedder={stored_embedder} vs current embedder={current_embedder_info}",
+                        file=sys.stderr,
+                    )
+                    return 1
+        elif current_type == "fake":
+            for k in ["dim", "seed"]:
+                if stored_embedder.get(k) != current_embedder_info.get(k):
+                    print(
+                        f"ERROR: Embedder configuration mismatch in {output_dir} (key {k!r}): "
+                        f"stored embedder={stored_embedder} vs current embedder={current_embedder_info}",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -773,35 +882,22 @@ def main() -> int:
     sidecar_path = output_dir / "strategy_config.json"
     has_existing_raw = raw_jsonl_path.exists()
 
+    current_embedder_info = get_current_embedder_info(args, uses_embeddings, config.seed)
+
     # Configuration guard on --resume or any run into an existing directory with raw.jsonl
-    if has_existing_raw or (config.resume and sidecar_path.exists()):
-        if sidecar_path.exists():
-            try:
-                stored_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-            except Exception as err:
-                print(
-                    f"ERROR: Failed to parse existing {sidecar_path}: {err}",
-                    file=sys.stderr,
-                )
-                return 1
-            stored_strategy = stored_sidecar.get("strategy")
-            stored_config = stored_sidecar.get("config")
-            current_strategy = uninitialized_strategy.name
-            current_config = uninitialized_strategy.config()
-            if stored_strategy != current_strategy or stored_config != current_config:
-                print(
-                    f"ERROR: Strategy configuration mismatch in {output_dir}: "
-                    f"stored strategy={stored_strategy!r} config={stored_config} vs "
-                    f"current strategy={current_strategy!r} config={current_config}",
-                    file=sys.stderr,
-                )
-                return 1
-        elif has_existing_raw:
-            print(
-                f"WARNING: Existing {raw_jsonl_path} found without {sidecar_path}; "
-                "proceeding without sidecar mismatch check and not writing sidecar to non-fresh directory.",
-                file=sys.stderr,
-            )
+    guard_rc = check_resume_or_existing_directory_guard(
+        output_dir=output_dir,
+        raw_jsonl_path=raw_jsonl_path,
+        sidecar_path=sidecar_path,
+        has_existing_raw=has_existing_raw,
+        config_resume=config.resume,
+        current_strategy=uninitialized_strategy.name,
+        current_config=uninitialized_strategy.config(),
+        current_mode=config.mode,
+        current_embedder_info=current_embedder_info,
+    )
+    if guard_rc != 0:
+        return guard_rc
 
     # Corpora selection
     corpora = None
@@ -915,7 +1011,49 @@ def main() -> int:
         except ImportError:
             decision_step = StubDecisionStep()
 
-    # Embedder factory wiring
+    # Synthetic name source for sweep (C4, FIX-008)
+    name_source = None
+    if config.mode == "sweep":
+        max_size = max(config.sweep_sizes) if config.sweep_sizes else 2000
+        min_names_needed = max_size + 1
+
+        if args.names_file:
+            try:
+                names = load_and_validate_names_file(Path(args.names_file), min_names_needed)
+            except Exception as err:
+                print(f"Experiment execution failed: {err}", file=sys.stderr)
+                return 1
+            name_source = SyntheticNameSource(names=names, domain_context="computer science")
+        else:
+            total_names_needed = max_size + 100
+            placeholder_names = [f"synthetic_concept_{i:05d}" for i in range(total_names_needed)]
+            name_source = SyntheticNameSource(
+                names=placeholder_names,
+                domain_context="computer science",
+            )
+
+    # Offline dry-run: print plan and resolved output directory without creating any directory or file on disk
+    if config.dry_run:
+        estimate_and_print_plan(
+            config,
+            uninitialized_strategy,
+            corpora=corpora,
+            name_source=name_source,
+        )
+        print(f"Default/resolved output directory: {output_dir}")
+        print("Dry run complete.")
+        return 0
+
+    # Offline confirm check: abort before constructing expensive or download-triggering models
+    if not config.confirm:
+        print(
+            "Experiment execution failed: Live experiment runs require explicit confirmation "
+            "via config.confirm=True (or CLI flag --confirm) to prevent accidental API consumption.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Embedder factory wiring (constructed only when trials will actually execute)
     embedder_factory: Callable[[], Embedder]
     embedder_info: dict[str, Any]
     if not uses_embeddings or args.embedder == "fake":
@@ -927,55 +1065,19 @@ def main() -> int:
             "seed": int(config.seed),
         }
     else:
-        from graph_insertion.embedding_minilm import (
-            MODEL_DIM,
-            MODEL_NAME,
-            MODEL_REVISION_PIN,
-            SENTENCE_TRANSFORMERS_VERSION_PIN,
-            MiniLMEmbedder,
-        )
+        from graph_insertion.embedding_minilm import MiniLMEmbedder
 
-        if config.dry_run:
-            embedder_factory = lambda: FakeEmbedder(dim=MODEL_DIM, seed=config.seed)
-            embedder_info = {
-                "type": "minilm",
-                "uses_embeddings": True,
-                "model_name": MODEL_NAME,
-                "dim": int(MODEL_DIM),
-                "revision": MODEL_REVISION_PIN,
-                "sentence_transformers_version_pin": SENTENCE_TRANSFORMERS_VERSION_PIN,
-                "device": "cpu",
-                "dtype": "float32",
-            }
-        else:
-            try:
-                minilm_instance = MiniLMEmbedder()
-            except (ImportError, ValueError) as err:
-                print(f"ERROR: {err}", file=sys.stderr)
-                return 1
-            embedder_factory = lambda: minilm_instance
-            embedder_info = {
-                "type": "minilm",
-                "uses_embeddings": True,
-                **minilm_instance.identity(),
-            }
-
-    # Synthetic name source for sweep (C4, FIX-008)
-    name_source = None
-    if config.mode == "sweep":
-        max_size = max(config.sweep_sizes) if config.sweep_sizes else 2000
-        min_names_needed = max_size + 1
-
-        if args.names_file:
-            names = load_and_validate_names_file(Path(args.names_file), min_names_needed)
-            name_source = SyntheticNameSource(names=names, domain_context="computer science")
-        else:
-            total_names_needed = max_size + 100
-            placeholder_names = [f"synthetic_concept_{i:05d}" for i in range(total_names_needed)]
-            name_source = SyntheticNameSource(
-                names=placeholder_names,
-                domain_context="computer science",
-            )
+        try:
+            minilm_instance = MiniLMEmbedder()
+        except (ImportError, ValueError) as err:
+            print(f"ERROR: {err}", file=sys.stderr)
+            return 1
+        embedder_factory = lambda: minilm_instance
+        embedder_info = {
+            "type": "minilm",
+            "uses_embeddings": True,
+            **minilm_instance.identity(),
+        }
 
     # Progress reporter setup (call-driven heartbeat)
     progress_reporter = ProgressReporter(
@@ -1002,17 +1104,20 @@ def main() -> int:
     }
 
     try:
-        # Write sidecar strategy_config.json BEFORE the first trial on a fresh directory
-        if not has_existing_raw and (config.dry_run or config.confirm):
-            output_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_payload: Optional[dict[str, Any]] = None
+        if not has_existing_raw:
             sidecar_payload = build_sidecar_payload(
                 strategy=uninitialized_strategy,
                 embedder_info=embedder_info,
                 mode=config.mode,
                 command_line_params=command_line_params,
             )
-            with open(sidecar_path, "w", encoding="utf-8") as sf:
-                json.dump(sidecar_payload, sf, indent=2)
+
+        def _write_sidecar_before_trials() -> None:
+            if sidecar_payload is not None:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                with open(sidecar_path, "w", encoding="utf-8") as sf:
+                    json.dump(sidecar_payload, sf, indent=2)
 
         result = run_experiment(
             config=config,
@@ -1021,13 +1126,10 @@ def main() -> int:
             embedder_factory=embedder_factory,
             corpora=corpora,
             name_source=name_source,
+            warmup_fn=_write_sidecar_before_trials,
             progress_callback=progress_reporter.update,
         )
-        if config.dry_run:
-            print(f"Default/resolved output directory: {output_dir}")
-            print("Dry run complete. Plan recorded in manifest.json.")
-        else:
-            print(f"Experiment finished: status={result.get('status')} output={result.get('output_dir')}")
+        print(f"Experiment finished: status={result.get('status')} output={result.get('output_dir')}")
         return 0
     except Exception as e:
         print(f"Experiment execution failed: {e}", file=sys.stderr)

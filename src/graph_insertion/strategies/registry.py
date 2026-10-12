@@ -18,21 +18,7 @@ from typing import Any, Callable, Optional
 
 from graph_insertion.strategy import NarrowingStrategy
 
-_STUB_CLS: Optional[type] = None
-
-
-def register_stub(stub_cls: type) -> None:
-    """Register the StubNarrowingStrategy class from scripts/run_experiment.py."""
-    global _STUB_CLS
-    _STUB_CLS = stub_cls
-
-
-def _get_stub_cls() -> type:
-    global _STUB_CLS
-    if _STUB_CLS is None:
-        from scripts.run_experiment import StubNarrowingStrategy
-        _STUB_CLS = StubNarrowingStrategy
-    return _STUB_CLS
+from graph_insertion.strategies.stub import StubNarrowingStrategy
 
 
 def _factory_null(
@@ -67,11 +53,10 @@ def _factory_stub(
     n_bits: Optional[int] = None,
     **params: Any,
 ) -> NarrowingStrategy:
-    stub_cls = _get_stub_cls()
     actual_k = 5 if k is None else k
     if isinstance(actual_k, bool) or not isinstance(actual_k, int) or actual_k < 1:
         raise ValueError(f"k must be >= 1, got {actual_k}")
-    return stub_cls(top_k=actual_k)
+    return StubNarrowingStrategy(top_k=actual_k)
 
 
 def _factory_brute_force(

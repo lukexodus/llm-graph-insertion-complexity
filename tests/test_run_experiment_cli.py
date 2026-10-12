@@ -267,15 +267,12 @@ class TestRunDirectoryKeysAndSidecarGuard:
         slug_part = expected_sweep_dir.removeprefix("results/")
         assert re.fullmatch(r"[a-z0-9._-]+", slug_part) is not None
 
-        # Verify sidecar and manifest written to expected default directory inside tmp_path
+        # Dry run must not create output directory or sidecar file on disk (INFRA-007-P Step D)
         run_dir = tmp_path / expected_sweep_dir
-        sidecar_file = run_dir / "strategy_config.json"
-        assert sidecar_file.exists()
-        sidecar = json.loads(sidecar_file.read_text(encoding="utf-8"))
-        for k, v in expected_keyed_cfg.items():
-            assert sidecar["config"][k] == v
+        assert not run_dir.exists(), f"dry-run should not create {run_dir}"
+        assert list(tmp_path.iterdir()) == []
 
-        # Also check accuracy mode slug derivation
+        # Also check accuracy mode slug derivation and keyed strategy config
         parser = build_parser()
         args = parser.parse_args(["--mode", "accuracy", *cli_tokens])
         strat = STRATEGY_FACTORIES[args.strategy](
@@ -287,7 +284,10 @@ class TestRunDirectoryKeysAndSidecarGuard:
             s_max=args.s_max,
             n_bits=args.n_bits,
         )
-        acc_dir = f"results/{derive_default_run_id('accuracy', args.strategy, strat.config())}"
+        cfg = strat.config()
+        for k, v in expected_keyed_cfg.items():
+            assert cfg[k] == v
+        acc_dir = f"results/{derive_default_run_id('accuracy', args.strategy, cfg)}"
         assert acc_dir == expected_sweep_dir.replace("results/sweep_", "results/accuracy_", 1)
 
     @pytest.mark.parametrize(
@@ -332,6 +332,26 @@ class TestRunDirectoryKeysAndSidecarGuard:
         assert rc == 0
         out = capsys.readouterr().out
         assert f"Default/resolved output directory: {expected_dir}" in out
+        # Dry run must not create directory or sidecar (INFRA-007-P Step D)
+        assert not (tmp_path / expected_dir).exists()
+
+        # Real tiny run writes strategy_config.json with seed 99
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                *cli_tokens,
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
         sidecar = json.loads((tmp_path / expected_dir / "strategy_config.json").read_text())
         assert sidecar["config"]["seed"] == 99
 
@@ -343,7 +363,7 @@ class TestRunDirectoryKeysAndSidecarGuard:
     ) -> None:
         monkeypatch.chdir(tmp_path)
 
-        # 1. Explicit --run-id wins over default slug
+        # 1. Explicit --run-id wins over default slug; dry-run writes nothing to disk
         monkeypatch.setattr(
             "sys.argv",
             [
@@ -360,9 +380,9 @@ class TestRunDirectoryKeysAndSidecarGuard:
         assert main() == 0
         out1 = capsys.readouterr().out
         assert "Default/resolved output directory: results/custom_run_123" in out1
-        assert (tmp_path / "results" / "custom_run_123" / "manifest.json").exists()
+        assert not (tmp_path / "results" / "custom_run_123").exists()
 
-        # 2. Explicit --output-dir wins over both default slug and --run-id
+        # 2. Explicit --output-dir wins over both default slug and --run-id; dry-run writes nothing to disk
         explicit_dir = tmp_path / "my_explicit_dir"
         monkeypatch.setattr(
             "sys.argv",
@@ -382,7 +402,7 @@ class TestRunDirectoryKeysAndSidecarGuard:
         assert main() == 0
         out2 = capsys.readouterr().out
         assert f"Default/resolved output directory: {explicit_dir}" in out2
-        assert (explicit_dir / "manifest.json").exists()
+        assert not explicit_dir.exists()
 
     def test_sidecar_written_and_resume_mismatch_refused(
         self,
@@ -812,3 +832,481 @@ class TestEndToEndOfflineCLISmoke:
         assert all(r["strategy"] == strategy and r["status"] == "success" for r in acc_records)
         acc_sidecar = json.loads((acc_dir / "strategy_config.json").read_text(encoding="utf-8"))
         assert acc_sidecar["strategy"] == strategy
+
+
+class _CLIStubSentenceTransformer:
+    """Deterministic offline stub for sentence_transformers.SentenceTransformer in CLI tests."""
+
+    instances: list["_CLIStubSentenceTransformer"] = []
+
+    def __init__(
+        self,
+        model_name_or_path: str,
+        *,
+        revision: str | None = None,
+        device: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.model_name_or_path = model_name_or_path
+        self.revision = revision
+        self.device = device
+        self.kwargs = kwargs
+        self.encode_calls: int = 0
+        _CLIStubSentenceTransformer.instances.append(self)
+
+    def encode(self, sentences: Any, **kwargs: Any) -> Any:
+        import hashlib
+        import numpy as np
+
+        self.encode_calls += 1
+        if isinstance(sentences, str):
+            digest = hashlib.sha256(sentences.encode("utf-8")).digest()
+            rng = np.random.default_rng(int.from_bytes(digest[:8], "little"))
+            vec = rng.standard_normal(384).astype(np.float32)
+            return vec / (np.linalg.norm(vec) + 1e-12)
+        rows = []
+        for s in sentences:
+            digest = hashlib.sha256(str(s).encode("utf-8")).digest()
+            rng = np.random.default_rng(int.from_bytes(digest[:8], "little"))
+            vec = rng.standard_normal(384).astype(np.float32)
+            rows.append(vec / (np.linalg.norm(vec) + 1e-12))
+        return np.vstack(rows).astype(np.float32)
+
+
+def _install_stub_st(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str = "3.1.1",
+    revision_pin: str = "a" * 40,
+    version_pin: str = "3.1.1",
+) -> tuple[type[_CLIStubSentenceTransformer], Any]:
+    import types
+    import graph_insertion.embedding_minilm as minilm_mod
+
+    _CLIStubSentenceTransformer.instances.clear()
+    mod = types.ModuleType("sentence_transformers")
+    mod.SentenceTransformer = _CLIStubSentenceTransformer  # type: ignore[attr-defined]
+    mod.__version__ = version  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", mod)
+    monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", version_pin)
+    monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", revision_pin)
+    return _CLIStubSentenceTransformer, mod
+
+
+class TestINFRA007PAmendments:
+    """INFRA-007-P tests for resume-guard embedder/mode checks, minilm execution & timing, and dry-run/git_dirty."""
+
+    def test_resume_guard_embedder_identity_and_mode_and_non_resume_existing_raw(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Kills R-M11, P-M3, P-M4: guard checks embedder block, mode, and non-resume runs with existing raw.jsonl."""
+        stub_cls, st_mod = _install_stub_st(
+            monkeypatch,
+            version="3.1.1",
+            revision_pin="1" * 40,
+            version_pin="3.1.1",
+        )
+
+        # 1. Start a 'fake' embedder run
+        fake_dir = tmp_path / "run_fake_et"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "fake",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--output-dir",
+                str(fake_dir),
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+
+        # 1a. Resuming a 'fake' run with '--embedder minilm' is refused (exit 1, shows both blocks; kills P-M3)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--resume",
+                "--output-dir",
+                str(fake_dir),
+            ],
+        )
+        assert main() == 1
+        err_type = capsys.readouterr().err
+        assert "embedder" in err_type.lower() and "mismatch" in err_type.lower()
+        assert "'type': 'fake'" in err_type
+        assert "'type': 'minilm'" in err_type
+
+        # 1b. Non---resume run into a directory with raw.jsonl and mismatching sidecar is refused (kills R-M11)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--theta",
+                "0.4",
+                "--embedder",
+                "fake",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--output-dir",
+                str(fake_dir),
+            ],
+        )
+        assert main() == 1
+        err_no_resume = capsys.readouterr().err
+        assert "mismatch" in err_no_resume.lower()
+
+        # 1c. Mode change (sweep vs accuracy in the same directory) is refused (kills P-M4)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "accuracy",
+                "--corpus",
+                "DSA",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "fake",
+                "--max-llm-calls",
+                "1",
+                "--confirm",
+                "--resume",
+                "--output-dir",
+                str(fake_dir),
+            ],
+        )
+        assert main() == 1
+        err_mode = capsys.readouterr().err
+        assert "mode mismatch" in err_mode.lower()
+        assert "'sweep'" in err_mode and "'accuracy'" in err_mode
+
+        # 2. Start a 'minilm' embedder run
+        minilm_dir = tmp_path / "run_minilm_et"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--output-dir",
+                str(minilm_dir),
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+
+        # 2a. Matching resume with minilm passes
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--resume",
+                "--output-dir",
+                str(minilm_dir),
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+
+        # 2b. minilm revision change refused
+        import graph_insertion.embedding_minilm as minilm_mod
+
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "2" * 40)
+        assert main() == 1
+        err_rev = capsys.readouterr().err
+        assert "embedder configuration mismatch" in err_rev.lower()
+        assert "1" * 40 in err_rev and "2" * 40 in err_rev
+
+        # Restore revision, change installed sentence_transformers version -> refused
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "1" * 40)
+        st_mod.__version__ = "3.2.0"
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.2.0")
+        assert main() == 1
+        err_ver = capsys.readouterr().err
+        assert "sentence_transformers_version" in err_ver
+        assert "3.1.1" in err_ver and "3.2.0" in err_ver
+
+        # 2c. Legacy pre-INFRA-007-P sidecar without sentence_transformers_version key warns once and succeeds
+        st_mod.__version__ = "3.1.1"
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        sidecar_path = minilm_dir / "strategy_config.json"
+        sc_data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        del sc_data["embedder"]["sentence_transformers_version"]
+        sidecar_path.write_text(json.dumps(sc_data, indent=2), encoding="utf-8")
+
+        assert main() == 0
+        err_legacy = capsys.readouterr().err
+        assert "WARNING:" in err_legacy
+        assert "sentence_transformers_version" in err_legacy
+
+    def test_minilm_offline_execution_and_construction_timing_kills_rm19_and_pm5(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Kills R-M19 and P-M5: offline --embedder minilm runs end-to-end; never constructed without --confirm or on --dry-run."""
+        stub_rev = "abcdef0123456789abcdef0123456789abcdef01"
+        stub_cls, _ = _install_stub_st(
+            monkeypatch,
+            version="3.1.1",
+            revision_pin=stub_rev,
+            version_pin="3.1.1",
+        )
+
+        # 1. Without --confirm and without --dry-run: MiniLMEmbedder constructor is NEVER called (kills P-M5)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "12",
+                "--sweep-trials",
+                "1",
+                "--output-dir",
+                str(tmp_path / "no_confirm_dir"),
+            ],
+        )
+        assert main() == 1
+        err_nc = capsys.readouterr().err
+        assert "--confirm" in err_nc
+        assert len(stub_cls.instances) == 0
+
+        # 2. With --dry-run: MiniLMEmbedder constructor is NEVER called
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "12",
+                "--sweep-trials",
+                "1",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "dry_run_dir"),
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+        assert len(stub_cls.instances) == 0
+
+        # 3. End-to-end offline --embedder minilm --confirm for embedding_threshold and bounded_bucket (sizes (12, 30), 2 trials) (kills R-M19)
+        for strat_name in ("embedding_threshold", "bounded_bucket"):
+            stub_cls.instances.clear()
+            out_dir = tmp_path / f"minilm_e2e_{strat_name}"
+            monkeypatch.setattr(
+                "sys.argv",
+                [
+                    "run_experiment.py",
+                    "--mode",
+                    "sweep",
+                    "--strategy",
+                    strat_name,
+                    "--embedder",
+                    "minilm",
+                    "--sweep-sizes",
+                    "12",
+                    "30",
+                    "--sweep-trials",
+                    "2",
+                    "--confirm",
+                    "--output-dir",
+                    str(out_dir),
+                ],
+            )
+            assert main() == 0, f"Failed for {strat_name}: {capsys.readouterr().err}"
+            capsys.readouterr()
+
+            assert len(stub_cls.instances) == 1
+            assert stub_cls.instances[0].revision == stub_rev
+            assert stub_cls.instances[0].encode_calls == 8
+
+            sidecar = json.loads((out_dir / "strategy_config.json").read_text(encoding="utf-8"))
+            assert sidecar["embedder"]["type"] == "minilm"
+            assert sidecar["embedder"]["revision"] == stub_rev
+            assert sidecar["embedder"]["sentence_transformers_version"] == "3.1.1"
+            assert sidecar["embedder"]["dim"] == 384
+
+            records = [
+                json.loads(line)
+                for line in (out_dir / "raw.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            assert len(records) == 4
+            assert all(r["status"] == "success" and r["strategy"] == strat_name for r in records)
+            assert all(r["metrics"]["embedding_calls"] == 1 for r in records)
+
+    def test_dry_run_creates_nothing_and_real_run_sidecar_before_trial1_and_git_dirty_false_kills_rm26_and_pm6(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Kills R-M26 and P-M6: dry-run creates nothing on disk; real run records git_dirty==False and writes sidecar before trial 1."""
+        import subprocess
+        import graph_insertion.harness as harness_mod
+
+        # 1. Offline --dry-run creates nothing in tmp_path (kills P-M6)
+        empty_check_dir = tmp_path / "dry_run_workspace"
+        empty_check_dir.mkdir()
+        monkeypatch.chdir(empty_check_dir)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--dry-run",
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+        assert list(empty_check_dir.iterdir()) == []
+
+        # 2. Clean git repo under tmp_path: real offline --confirm run records git_dirty == False in manifest.json
+        clean_repo = tmp_path / "clean_git_repo"
+        clean_repo.mkdir()
+        subprocess.run(["git", "init"], cwd=clean_repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=clean_repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=clean_repo, check=True)
+        (clean_repo / "README.md").write_text("clean repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=clean_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=clean_repo, check=True, capture_output=True)
+
+        monkeypatch.chdir(clean_repo)
+        monkeypatch.setattr(harness_mod, "REPO_ROOT", clean_repo)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "null",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+
+        default_out = clean_repo / "results" / "sweep_null_k1"
+        manifest = json.loads((default_out / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["git_dirty"] is False
+        assert (default_out / "strategy_config.json").exists()
+
+        # 3. Ordering & crash-safety check: sidecar exists BEFORE the first trial starts (kills R-M26)
+        crash_dir = tmp_path / "crash_trial1_dir"
+        sidecar_existed_at_trial_1: list[bool] = []
+
+        import scripts.run_experiment as run_exp_mod
+
+        class _CrashOnTrial1DecisionStep:
+            PROMPT_VERSION = "v2"
+
+            def decide(
+                self,
+                new_name: str,
+                candidates: tuple[str, ...],
+                domain_context: str | None = None,
+            ) -> Any:
+                sidecar_existed_at_trial_1.append((crash_dir / "strategy_config.json").exists())
+                raise RuntimeError("simulated crash during trial 1")
+
+        monkeypatch.setattr(
+            run_exp_mod,
+            "PairwiseDecisionStep",
+            lambda client: _CrashOnTrial1DecisionStep(),
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "null",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--fail-fast",
+                "--output-dir",
+                str(crash_dir),
+            ],
+        )
+        assert main() == 1
+        capsys.readouterr()
+        assert sidecar_existed_at_trial_1 == [True]
+        assert (crash_dir / "strategy_config.json").exists()
+

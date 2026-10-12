@@ -1,5 +1,5 @@
-"""tests/test_embedding_minilm.py — INFRA-007
-==============================================
+"""tests/test_embedding_minilm.py — INFRA-007 / INFRA-007-P
+=========================================================
 Offline unit tests for ``graph_insertion.embedding_minilm.MiniLMEmbedder``.
 
 No network access, no model downloads, and no real ``sentence_transformers``
@@ -66,19 +66,21 @@ class _StubSentenceTransformer:
 
 
 @pytest.fixture
-def stub_st_module(monkeypatch: pytest.MonkeyPatch) -> type[_StubSentenceTransformer]:
-    """Inject stub ``sentence_transformers`` into ``sys.modules``."""
+def stub_st_module(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """Inject stub ``sentence_transformers`` into ``sys.modules`` with configurable version."""
     _StubSentenceTransformer.instances.clear()
     mod = types.ModuleType("sentence_transformers")
     mod.SentenceTransformer = _StubSentenceTransformer  # type: ignore[attr-defined]
+    mod.__version__ = "3.1.1"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sentence_transformers", mod)
-    return _StubSentenceTransformer
+    return mod
 
 
 class TestMiniLMEmbedderOffline:
     """Offline tests for MiniLMEmbedder using injected stub module."""
 
     def test_module_imports_lazily_without_sentence_transformers(self) -> None:
+        """Module loads cleanly without sentence_transformers present."""
         repo_root = Path(__file__).resolve().parent.parent
         src_dir = repo_root / "src"
         code = (
@@ -101,44 +103,87 @@ class TestMiniLMEmbedderOffline:
     def test_refuses_when_pin_is_none_or_empty(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stub_st_module: type[_StubSentenceTransformer],
+        stub_st_module: types.ModuleType,
     ) -> None:
-        # 1. Default when MODEL_REVISION_PIN is None -> raises ValueError
+        """Both version and revision pins fail-closed if None, blank, or empty."""
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
         monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", None)
         with pytest.raises(ValueError, match="pinned model revision"):
             MiniLMEmbedder()
-        assert len(stub_st_module.instances) == 0
+        assert len(_StubSentenceTransformer.instances) == 0
 
-        # 2. Explicit revision=None refused even when MODEL_REVISION_PIN is set (kills I-M13)
+        # Version pin None refused
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", None)
         monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "abc123456789")
+        with pytest.raises(ValueError, match="pinned sentence-transformers package version"):
+            MiniLMEmbedder()
+        assert len(_StubSentenceTransformer.instances) == 0
+
+        # Version pin empty string refused
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "   ")
+        with pytest.raises(ValueError, match="pinned sentence-transformers package version"):
+            MiniLMEmbedder()
+        assert len(_StubSentenceTransformer.instances) == 0
+
+        # Explicit revision=None refused even when pins are set (kills I-M13)
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
         with pytest.raises(ValueError, match="pinned model revision"):
             MiniLMEmbedder(revision=None)
-        assert len(stub_st_module.instances) == 0
+        assert len(_StubSentenceTransformer.instances) == 0
 
-        # 3. Empty/whitespace revision string refused
+        # Empty/whitespace revision string refused
         with pytest.raises(ValueError, match="pinned model revision"):
             MiniLMEmbedder(revision="   ")
-        assert len(stub_st_module.instances) == 0
+        assert len(_StubSentenceTransformer.instances) == 0
+
+    def test_version_mismatch_refused_and_match_passes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_st_module: types.ModuleType,
+    ) -> None:
+        """Version check validates installed library against pin."""
+        stub_st_module.__version__ = "3.1.1"  # type: ignore[attr-defined]
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "rev42")
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.2.0")
+
+        with pytest.raises(ValueError, match="sentence-transformers version mismatch: installed='3.1.1' vs pinned='3.2.0'"):
+            MiniLMEmbedder()
+        assert len(_StubSentenceTransformer.instances) == 0
+
+        # Passing an explicit revision= still never bypasses the version check
+        with pytest.raises(ValueError, match="sentence-transformers version mismatch: installed='3.1.1' vs pinned='3.2.0'"):
+            MiniLMEmbedder(revision="custom-rev-override")
+        assert len(_StubSentenceTransformer.instances) == 0
+
+        # Matching version succeeds
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        emb = MiniLMEmbedder()
+        assert emb.installed_version == "3.1.1"
+        assert len(_StubSentenceTransformer.instances) == 1
 
     def test_missing_sentence_transformers_raises_import_error_with_install_hint(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Missing library import error gives clear pip install instruction."""
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "test-rev-001")
         monkeypatch.setitem(sys.modules, "sentence_transformers", None)
         with pytest.raises(ImportError, match=r'pip install -e "\.\[embed\]"'):
-            MiniLMEmbedder(revision="test-rev-001")
+            MiniLMEmbedder()
 
     def test_embed_and_embed_many_shapes_dtypes_and_call_counts(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stub_st_module: type[_StubSentenceTransformer],
+        stub_st_module: types.ModuleType,
     ) -> None:
+        """Validates shapes, dtypes, and call delegation."""
         monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "rev-sha-42")
-        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.0.0-test")
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
 
         emb = MiniLMEmbedder()
         assert isinstance(emb, Embedder)
-        assert len(stub_st_module.instances) == 1
-        underlying = stub_st_module.instances[0]
+        assert len(_StubSentenceTransformer.instances) == 1
+        underlying = _StubSentenceTransformer.instances[0]
         assert underlying.model_name_or_path == MODEL_NAME
         assert underlying.revision == "rev-sha-42"
         assert underlying.device == "cpu"
@@ -183,17 +228,81 @@ class TestMiniLMEmbedderOffline:
     def test_identity_metadata_content_and_json_serializable(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stub_st_module: type[_StubSentenceTransformer],
+        stub_st_module: types.ModuleType,
     ) -> None:
+        """Identity records installed library version (not pin constant) and revision (kills P-M8)."""
+        stub_st_module.__version__ = "3.1.1"  # type: ignore[attr-defined]
         monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "default-pin-rev")
         emb = MiniLMEmbedder(revision="commit-hash-xyz")
         ident = emb.identity()
         assert ident == {
             "model_name": "all-MiniLM-L6-v2",
             "dim": 384,
             "revision": "commit-hash-xyz",
+            "sentence_transformers_version": "3.1.1",
             "sentence_transformers_version_pin": "3.1.1",
             "device": "cpu",
             "dtype": "float32",
         }
         assert json.loads(json.dumps(ident)) == ident
+
+        # Prove sentence_transformers_version comes from installed version, not SENTENCE_TRANSFORMERS_VERSION_PIN (kills P-M8)
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "9.9.9-changed-pin")
+        ident_after = emb.identity()
+        assert ident_after["sentence_transformers_version"] == "3.1.1"
+        assert ident_after["sentence_transformers_version_pin"] == "9.9.9-changed-pin"
+
+
+    def test_embed_many_single_item_reshape_kills_rm16(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_st_module: types.ModuleType,
+    ) -> None:
+        """Kills R-M16: single-text embed_many preserves 2-D shape (1, 384) even if encoder returns (384,)."""
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "rev42")
+        emb = MiniLMEmbedder()
+        underlying = _StubSentenceTransformer.instances[0]
+        # Monkeypatch encode to return a 1-D vector of shape (384,) for a single item list
+        underlying.encode = lambda texts, **kw: np.ones(384, dtype=np.float32)  # type: ignore[assignment]
+        res = emb.embed_many(["single item"])
+        assert res.shape == (1, 384)
+        assert res.dtype == np.float32
+
+    def test_embed_many_float64_casted_to_float32_kills_rm20(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_st_module: types.ModuleType,
+    ) -> None:
+        """Kills R-M20: float64 encoder output is explicitly cast to float32."""
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "rev42")
+        emb = MiniLMEmbedder()
+        underlying = _StubSentenceTransformer.instances[0]
+        # Monkeypatch encode to return float64
+        underlying.encode = lambda texts, **kw: np.ones((len(texts), 384), dtype=np.float64)  # type: ignore[assignment]
+        res = emb.embed_many(["text a", "text b"])
+        assert res.dtype == np.float32
+        assert res.shape == (2, 384)
+
+    def test_wrong_dimension_encoder_output_raises_value_error_kills_rm25(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_st_module: types.ModuleType,
+    ) -> None:
+        """Kills R-M25: wrong-dimension encoder output raises ValueError in embed and embed_many."""
+        monkeypatch.setattr(minilm_mod, "SENTENCE_TRANSFORMERS_VERSION_PIN", "3.1.1")
+        monkeypatch.setattr(minilm_mod, "MODEL_REVISION_PIN", "rev42")
+        emb = MiniLMEmbedder()
+        underlying = _StubSentenceTransformer.instances[0]
+
+        # embed with wrong dim
+        underlying.encode = lambda text, **kw: np.ones(128, dtype=np.float32)  # type: ignore[assignment]
+        with pytest.raises(ValueError, match=r"Expected 1-D embedding of shape \(384,\)"):
+            emb.embed("test text")
+
+        # embed_many with wrong dim
+        underlying.encode = lambda texts, **kw: np.ones((len(texts), 128), dtype=np.float32)  # type: ignore[assignment]
+        with pytest.raises(ValueError, match=r"Expected 2-D embedding matrix of shape \(1, 384\)"):
+            emb.embed_many(["test text"])
