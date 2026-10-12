@@ -22,6 +22,7 @@
 │   │   ├── DATA-004-claude-code-name-pool-generator.md
 │   │   ├── DATA-005-gemini-claude-web-backend.md
 │   │   ├── DATA-006-kiro_default-name-pool-shards.md
+│   │   ├── DATA-007-gemini-name-pool-supervisor.md
 │   │   ├── DOC-001-gemini-doc-sync.md
 │   │   ├── DOC-003-claude-code-agents-worktree-rule.md
 │   │   ├── FIX-001-gemini-infra-001-followup.md
@@ -38,6 +39,7 @@
 │   │   ├── FIX-013-gemini-repair-data-006.md
 │   │   ├── FIX-014-gemini-finish-fix-013.md
 │   │   ├── FIX-015-gemini-adapter-thinking-and-fixture-repair.md
+│   │   ├── FIX-016-gemini-dry-run-planner.md
 │   │   ├── INFRA-001-claude-code-graph-representation.md
 │   │   ├── INFRA-002-gemini-strategy-interface.md
 │   │   ├── INFRA-003-gemini-corpus-loader.md
@@ -55,7 +57,12 @@
 │   │   ├── STRAT-003-claude-code-ann-retrieval.md
 │   │   ├── STRAT-003-gemini-ann-retrieval.md
 │   │   ├── STRAT-003-review-gemini.md
+│   │   ├── STRAT-004-A2-gemini.md
+│   │   ├── STRAT-004-A-gemini.md
 │   │   ├── STRAT-004-D-gemini-design-note.md
+│   │   ├── STRAT-004-gemini-bounded-bucket.md
+│   │   ├── STRAT-004-R2-gemini.md
+│   │   ├── STRAT-004-R-gemini.md
 │   │   └── TOOL-001-claude-code-apc-bundle.md
 │   ├── rrl
 │   │   └── catalogue.md
@@ -66,9 +73,15 @@
 │       └── An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction.md
 ├── patch
 │   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
+│   ├── 0001-DATA-007-thesis-side-supervisor-for-sharded-name-poo.patch
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
+│   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
+│   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
 │   ├── 0001-STRAT-003-B-close-stale-cache-hole-in-Strategy-2-and.patch
 │   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
+│   ├── 0001-STRAT-004-A2-close-scoring-tie-break-and-bucket-size.patch
+│   ├── 0001-STRAT-004-A-amend-Strategy-4-decision-record-and-tes.patch
+│   ├── 0001-STRAT-004-implement-Strategy-4-bounded-bucket-retrie.patch
 │   ├── 0002-FIX-013-repair-and-test-DATA-006-shard-orchestration.patch
 │   ├── 0003-STRAT-001-A-close-test-coverage-gap-and-review-nits-.patch
 │   ├── 0004-STRAT-001-R-independent-review-of-Strategy-1-brute-f.patch
@@ -105,7 +118,9 @@
 │   ├── STRAT-002-R_code.patch
 │   ├── STRAT-002-V_code.patch
 │   ├── STRAT-003-B_code.patch
-│   └── STRAT-003-B.patch
+│   ├── STRAT-003-B.patch
+│   ├── STRAT-004_code.patch
+│   └── STRAT-004.patch
 ├── scripts
 │   ├── apc-bundle.sh
 │   ├── generate_name_pool.py
@@ -143,6 +158,7 @@
 │   ├── test_brute_force_strategy.py
 │   ├── test_controllable_embedder.py
 │   ├── test_decision.py
+│   ├── test_dry_run_plan.py
 │   ├── test_embedding_threshold_strategy.py
 │   ├── test_generate_name_pool.py
 │   ├── test_graph_representation.py
