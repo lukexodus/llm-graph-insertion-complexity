@@ -153,3 +153,47 @@ bash tests/test_apc_bundle.sh
 ```bash
 ./scripts/apc-bundle.sh full --list
 ```
+
+---
+
+## Experiment Runner CLI (`scripts/run_experiment.py`)
+
+`scripts/run_experiment.py` executes accuracy (leave-one-out on DSA and Metacademy) and cost-scaling sweep (D-35 matrix: sizes `50 100 200 500 1000 2000` × 10 trials) benchmarks across all registered candidate-narrowing strategies.
+
+### Registered Strategies & CLI Flags
+
+- **`--strategy {null,stub,brute_force,embedding_threshold,ann_retrieval,bounded_bucket}`**: Strategy to evaluate (default: `null`). Derived from `graph_insertion.strategies.registry.STRATEGY_FACTORIES`.
+- **`-k, --k INT`**: Candidate shortlist size $k$ (`null`, `stub`, `ann_retrieval`). Defaults to `None` (resolves to `1` for `null`, `5` for `stub`, `10` for `ann_retrieval`).
+- **`--theta FLOAT`**: Cosine similarity threshold $\theta$ (`embedding_threshold` only; default `0.6`).
+- **`--ef-search INT`**: FAISS HNSW `efSearch` query depth (`ann_retrieval` only; default `128`).
+- **`--s-min INT`**: Minimum segment size $s_{\min}$ (`bounded_bucket` only; default `5`).
+- **`--s-max INT`**: Maximum segment size $s_{\max}$ (`bounded_bucket` only; default `10`).
+- **`--n-bits INT`**: Number of LSH hyperplanes $n_{\text{bits}}$ (`bounded_bucket` only; default `12`).
+- **`--embedder {fake,minilm}`**: Embedding backend (default: `fake`). Live runs (`--live`) for any strategy with `uses_embeddings=True` (`embedding_threshold`, `ann_retrieval`, `bounded_bucket`) require `--embedder minilm` (pinned local `sentence-transformers` `all-MiniLM-L6-v2` on CPU per [D-35](4)); `--embedder fake` is refused with exit code `1`. Non-embedding strategies (`null`, `stub`, `brute_force`) ignore `--embedder`.
+- **Applicability & Range Validation**: Passing a strategy-specific flag to a strategy that does not accept it (e.g., `--theta` with `ann_retrieval`, `--s-max` with `brute_force`, `-k` with `bounded_bucket`) is rejected as a CLI usage error (`parser.error`, exit code `2`). Out-of-range parameter values raise the strategy's `ValueError`, printed as `ERROR: ...` with exit code `1` (no traceback).
+
+### Deterministic Default Run Directories & Configuration Sidecar
+
+- When neither `--output-dir` nor `--run-id` is passed, the default output directory is `results/<mode>_<strategy>` (for `brute_force` at seed 42) or `results/<mode>_<strategy>_<slug>`, where `<slug>` encodes the strategy's keyed `config()` fields in fixed order (`_seed<seed>` is appended when `--seed != 42` for strategies with a seed). Explicit `--output-dir` or `--run-id` takes precedence unchanged.
+- Before the first trial on a fresh directory, the CLI writes `<output_dir>/strategy_config.json` containing `{"strategy", "config", "embedder", "mode", "command_line_params"}`.
+- On `--resume` (or any run into an existing directory containing `raw.jsonl`), the CLI compares the stored `strategy` and `config` in `strategy_config.json` with the current configuration and refuses with exit code `1` on mismatch. Older directories containing `raw.jsonl` without `strategy_config.json` emit a warning to `stderr` and proceed without overwriting.
+
+### Primary & Sensitivity Run Table (D-35, D-46, D-47, D-55, D-58, D-59, D-62)
+
+Note: `n_bits = 12` for `bounded_bucket` is fixed a priori ($2^{12} = 4096 > 2000$) and has **no** sensitivity runs ([D-62](1)).
+
+| Role | Strategy | CLI Flags | Default Sweep Directory (`--mode sweep`) | Default Accuracy Directory (`--mode accuracy`) | D-35 Sweep Planned Calls Bound |
+| :--- | :--- | :--- | :--- | :--- | ---: |
+| **Primary (S1)** | `brute_force` | `--strategy brute_force` | `results/sweep_brute_force` | `results/accuracy_brute_force` | 38,500 |
+| **Primary (S2)** | `embedding_threshold` | `--strategy embedding_threshold` *(θ=0.6)* | `results/sweep_embedding_threshold_theta0.6` | `results/accuracy_embedding_threshold_theta0.6` | 38,500 |
+| **Primary (S3)** | `ann_retrieval` | `--strategy ann_retrieval` *(k=10, ef_search=128)* | `results/sweep_ann_retrieval_k10_ef128` | `results/accuracy_ann_retrieval_k10_ef128` | 600 |
+| **Primary (S4)** | `bounded_bucket` | `--strategy bounded_bucket` *(s_min=5, s_max=10, n_bits=12)* | `results/sweep_bounded_bucket_smin5_smax10_nb12` | `results/accuracy_bounded_bucket_smin5_smax10_nb12` | 600 |
+| **Sensitivity (S2)** | `embedding_threshold` | `--strategy embedding_threshold --theta 0.4` | `results/sweep_embedding_threshold_theta0.4` | `results/accuracy_embedding_threshold_theta0.4` | 38,500 |
+| **Sensitivity (S2)** | `embedding_threshold` | `--strategy embedding_threshold --theta 0.5` | `results/sweep_embedding_threshold_theta0.5` | `results/accuracy_embedding_threshold_theta0.5` | 38,500 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval -k 5` *(ef_search=128)* | `results/sweep_ann_retrieval_k5_ef128` | `results/accuracy_ann_retrieval_k5_ef128` | 300 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval -k 20` *(ef_search=128)* | `results/sweep_ann_retrieval_k20_ef128` | `results/accuracy_ann_retrieval_k20_ef128` | 1,200 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval --ef-search 64` *(k=10)* | `results/sweep_ann_retrieval_k10_ef64` | `results/accuracy_ann_retrieval_k10_ef64` | 600 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval --ef-search 256` *(k=10)* | `results/sweep_ann_retrieval_k10_ef256` | `results/accuracy_ann_retrieval_k10_ef256` | 600 |
+| **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 2 --s-max 5` *(n_bits=12)* | `results/sweep_bounded_bucket_smin2_smax5_nb12` | `results/accuracy_bounded_bucket_smin2_smax5_nb12` | 300 |
+| **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 10 --s-max 20` *(n_bits=12)* | `results/sweep_bounded_bucket_smin10_smax20_nb12` | `results/accuracy_bounded_bucket_smin10_smax20_nb12` | 1,200 |
+

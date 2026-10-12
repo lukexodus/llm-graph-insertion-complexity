@@ -53,7 +53,11 @@ Status: **open** (unblocked following Phase 1 completion; four parallel tracks r
 
 ## Phase 3 — Integration & Full Sweep
 
-Status: **not started** (blocked on Phase 2)
+Status: **in-progress** (unblocked following Phase 2 completion)
+
+| ID        | Task                                                                                                                                                                                                 | Status           | Notes / Report                                                                                                                                                                                                                                                                                                                                           |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INFRA-007 | Wire all four strategies into the experiment CLI (`strategies/registry.py`, CLI parameters and applicability checks, deterministic run-directory slugs and `strategy_config.json` guard, `MiniLMEmbedder` with fail-closed pins, and primary/sensitivity run table) ([D-64]). | **needs-review** | Completed by Gemini. 86 new tests (`tests/test_strategy_registry.py`, `tests/test_embedding_minilm.py`, `tests/test_run_experiment_cli.py`), 13/13 mutants `I-M1`..`I-M13` killed; full test suite 674 passing, 3 skipped. Awaiting `sentence-transformers` version and `all-MiniLM-L6-v2` revision pins from Luke. See report [`docs/reports/INFRA-007-gemini-strategy-wiring.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/INFRA-007-gemini-strategy-wiring.md). |
 
 ## Phase 4 — Analysis & Writeup
 

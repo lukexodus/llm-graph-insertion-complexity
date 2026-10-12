@@ -54,6 +54,15 @@ from graph_insertion.llm import resolve_model_alias
 from graph_insertion.loader import LoadedCorpus, discover_corpora, load_corpus
 from graph_insertion.schedule import format_peak_status, window_intersects_peak
 from graph_insertion.strategies.null import NullStrategy
+from graph_insertion.strategies.registry import (
+    PARAM_APPLICABILITY,
+    PARAM_CLI_FLAGS,
+    STRATEGY_FACTORIES,
+    build_strategy_slug,
+    check_applicability,
+    derive_default_run_id,
+    register_stub,
+)
 from graph_insertion.strategy import (
     DecisionOutcome,
     DecisionStep,
@@ -124,13 +133,11 @@ class StubDecisionStep:
 
 
 # ===========================================================================
-# Strategy Registry
+# Strategy Registry (INFRA-007)
 # ===========================================================================
 
-STRATEGY_REGISTRY: dict[str, Callable[[int, int], NarrowingStrategy]] = {
-    "null": lambda seed, k: NullStrategy(seed=seed, k=k),
-    "stub": lambda seed, k: StubNarrowingStrategy(top_k=k),
-}
+register_stub(StubNarrowingStrategy)
+STRATEGY_REGISTRY: dict[str, Callable[..., NarrowingStrategy]] = STRATEGY_FACTORIES
 
 
 # ===========================================================================
@@ -502,8 +509,44 @@ def build_parser() -> argparse.ArgumentParser:
         "-k",
         "--k",
         type=int,
-        default=1,
-        help="Candidate shortlist size k for null strategy (default: 1).",
+        default=None,
+        help="candidate shortlist size k: null, stub and ann_retrieval.",
+    )
+    parser.add_argument(
+        "--theta",
+        type=float,
+        default=None,
+        help="Cosine similarity threshold theta for embedding_threshold (default: 0.6).",
+    )
+    parser.add_argument(
+        "--ef-search",
+        type=int,
+        default=None,
+        help="HNSW efSearch query depth for ann_retrieval (default: 128).",
+    )
+    parser.add_argument(
+        "--s-min",
+        type=int,
+        default=None,
+        help="Minimum segment size s_min for bounded_bucket (default: 5).",
+    )
+    parser.add_argument(
+        "--s-max",
+        type=int,
+        default=None,
+        help="Maximum segment size s_max for bounded_bucket (default: 10).",
+    )
+    parser.add_argument(
+        "--n-bits",
+        type=int,
+        default=None,
+        help="Number of LSH hyperplanes n_bits for bounded_bucket (default: 12).",
+    )
+    parser.add_argument(
+        "--embedder",
+        choices=["fake", "minilm"],
+        default="fake",
+        help="Embedding backend: 'fake' (offline FakeEmbedder) or 'minilm' (pinned sentence-transformers all-MiniLM-L6-v2 on CPU).",
     )
     parser.add_argument(
         "--corpus",
@@ -515,7 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory to save experiment results (defaults to results/<run_id>).",
+        help="Directory to save experiment results (defaults to results/<mode>_<strategy>_<slug> or results/<run_id>).",
     )
     parser.add_argument(
         "--run-id",
@@ -629,14 +672,89 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_sidecar_payload(
+    strategy: NarrowingStrategy,
+    embedder_info: dict[str, Any],
+    mode: str,
+    command_line_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct JSON-serialisable strategy_config.json sidecar dictionary."""
+    payload = {
+        "strategy": strategy.name,
+        "config": strategy.config(),
+        "embedder": embedder_info,
+        "mode": mode,
+        "command_line_params": command_line_params,
+    }
+    # Verify JSON-safety eagerly
+    json.dumps(payload)
+    return payload
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # Check strategy existence
+    strat_factory_fn = STRATEGY_REGISTRY.get(args.strategy)
+    if strat_factory_fn is None:
+        print(f"Unknown strategy {args.strategy!r}. Choices: {list(STRATEGY_REGISTRY.keys())}", file=sys.stderr)
+        return 1
+
+    # Applicability check: reject flags that do not apply to the chosen strategy (exit 2)
+    for param_name in ("k", "theta", "ef_search", "s_min", "s_max", "n_bits"):
+        val = getattr(args, param_name, None)
+        if val is not None and not check_applicability(args.strategy, param_name):
+            flag_str = PARAM_CLI_FLAGS.get(param_name, f"--{param_name}")
+            parser.error(
+                f"argument {flag_str} is not applicable to strategy {args.strategy!r}"
+            )
+
+    strategy_params = {
+        "theta": args.theta,
+        "ef_search": args.ef_search,
+        "s_min": args.s_min,
+        "s_max": args.s_max,
+        "n_bits": args.n_bits,
+    }
+    strategy_factory = lambda: strat_factory_fn(args.seed, args.k, **strategy_params)
+
+    # Instantiate strategy once via factory without calling setup()
+    # Catches out-of-range ValueError and missing-faiss ImportError cleanly (exit 1, no traceback)
+    try:
+        uninitialized_strategy = strategy_factory()
+    except (ValueError, ImportError) as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 1
+
+    # Gate: --live with an embedding strategy refuses --embedder fake (D-35(4), D-64)
+    # Checked BEFORE any client construction, key check, or live dry-run estimate.
+    uses_embeddings = bool(getattr(uninitialized_strategy, "uses_embeddings", False))
+    if args.live and uses_embeddings and args.embedder == "fake":
+        print(
+            f"ERROR: Live execution for embedding strategy {uninitialized_strategy.name!r} "
+            "requires '--embedder minilm' (pinned sentence-transformers all-MiniLM-L6-v2 per D-35(4)); "
+            "'--embedder fake' is refused for live runs.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Derive deterministic default run_id and output_dir when neither --output-dir nor --run-id is given
+    default_run_id = derive_default_run_id(args.mode, args.strategy, uninitialized_strategy.config())
+    if args.output_dir:
+        resolved_run_id = args.run_id if args.run_id else default_run_id
+        resolved_output_dir = Path(args.output_dir)
+    elif args.run_id:
+        resolved_run_id = args.run_id
+        resolved_output_dir = Path("results") / args.run_id
+    else:
+        resolved_run_id = default_run_id
+        resolved_output_dir = Path("results") / default_run_id
+
     config = HarnessConfig(
         mode=args.mode,
-        run_id=args.run_id,
-        output_dir=Path(args.output_dir) if args.output_dir else None,
+        run_id=resolved_run_id,
+        output_dir=resolved_output_dir,
         seed=args.seed,
         repeats=args.repeats,
         metacademy_sample_size=args.metacademy_sample_size,
@@ -650,14 +768,40 @@ def main() -> int:
         fail_fast=args.fail_fast,
     )
 
-    # Strategy factory from registry
-    strat_factory_fn = STRATEGY_REGISTRY.get(args.strategy)
-    if strat_factory_fn is None:
-        print(f"Unknown strategy {args.strategy!r}. Choices: {list(STRATEGY_REGISTRY.keys())}", file=sys.stderr)
-        return 1
+    output_dir = Path(config.output_dir) if config.output_dir else Path("results") / config.run_id
+    raw_jsonl_path = output_dir / "raw.jsonl"
+    sidecar_path = output_dir / "strategy_config.json"
+    has_existing_raw = raw_jsonl_path.exists()
 
-    strategy_factory = lambda: strat_factory_fn(config.seed, args.k)
-    embedder_factory = lambda: FakeEmbedder(dim=32, seed=config.seed)
+    # Configuration guard on --resume or any run into an existing directory with raw.jsonl
+    if has_existing_raw or (config.resume and sidecar_path.exists()):
+        if sidecar_path.exists():
+            try:
+                stored_sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            except Exception as err:
+                print(
+                    f"ERROR: Failed to parse existing {sidecar_path}: {err}",
+                    file=sys.stderr,
+                )
+                return 1
+            stored_strategy = stored_sidecar.get("strategy")
+            stored_config = stored_sidecar.get("config")
+            current_strategy = uninitialized_strategy.name
+            current_config = uninitialized_strategy.config()
+            if stored_strategy != current_strategy or stored_config != current_config:
+                print(
+                    f"ERROR: Strategy configuration mismatch in {output_dir}: "
+                    f"stored strategy={stored_strategy!r} config={stored_config} vs "
+                    f"current strategy={current_strategy!r} config={current_config}",
+                    file=sys.stderr,
+                )
+                return 1
+        elif has_existing_raw:
+            print(
+                f"WARNING: Existing {raw_jsonl_path} found without {sidecar_path}; "
+                "proceeding without sidecar mismatch check and not writing sidecar to non-fresh directory.",
+                file=sys.stderr,
+            )
 
     # Corpora selection
     corpora = None
@@ -681,13 +825,6 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-
-    # Output dir & raw_jsonl_path for resume calculation
-    output_dir = Path(config.output_dir) if config.output_dir else Path("results") / config.run_id
-    raw_jsonl_path = output_dir / "raw.jsonl"
-
-    # Instantiate strategy once via factory without calling setup()
-    uninitialized_strategy = strategy_factory()
 
     # Compute planned calls upper bound (strategy-aware, resume-aware)
     planned_calls_bound = compute_planned_calls_upper_bound(
@@ -720,6 +857,10 @@ def main() -> int:
 
         print("=" * 65)
         print("LIVE EXPERIMENT PRE-FLIGHT ESTIMATE")
+        print(f"Strategy:                      {uninitialized_strategy.name}")
+        print(f"Strategy config:               {uninitialized_strategy.config()}")
+        print(f"Embedder:                      {args.embedder}")
+        print(f"Output directory:              {output_dir}")
         print(f"Model alias:                   {resolved_model}")
         print(f"Full-plan calls (upper bound): {full_plan_bound}")
         print(f"Remaining calls (upper bound): {est['planned_calls']}")
@@ -774,6 +915,51 @@ def main() -> int:
         except ImportError:
             decision_step = StubDecisionStep()
 
+    # Embedder factory wiring
+    embedder_factory: Callable[[], Embedder]
+    embedder_info: dict[str, Any]
+    if not uses_embeddings or args.embedder == "fake":
+        embedder_factory = lambda: FakeEmbedder(dim=32, seed=config.seed)
+        embedder_info = {
+            "type": "fake",
+            "uses_embeddings": uses_embeddings,
+            "dim": 32,
+            "seed": int(config.seed),
+        }
+    else:
+        from graph_insertion.embedding_minilm import (
+            MODEL_DIM,
+            MODEL_NAME,
+            MODEL_REVISION_PIN,
+            SENTENCE_TRANSFORMERS_VERSION_PIN,
+            MiniLMEmbedder,
+        )
+
+        if config.dry_run:
+            embedder_factory = lambda: FakeEmbedder(dim=MODEL_DIM, seed=config.seed)
+            embedder_info = {
+                "type": "minilm",
+                "uses_embeddings": True,
+                "model_name": MODEL_NAME,
+                "dim": int(MODEL_DIM),
+                "revision": MODEL_REVISION_PIN,
+                "sentence_transformers_version_pin": SENTENCE_TRANSFORMERS_VERSION_PIN,
+                "device": "cpu",
+                "dtype": "float32",
+            }
+        else:
+            try:
+                minilm_instance = MiniLMEmbedder()
+            except (ImportError, ValueError) as err:
+                print(f"ERROR: {err}", file=sys.stderr)
+                return 1
+            embedder_factory = lambda: minilm_instance
+            embedder_info = {
+                "type": "minilm",
+                "uses_embeddings": True,
+                **minilm_instance.identity(),
+            }
+
     # Synthetic name source for sweep (C4, FIX-008)
     name_source = None
     if config.mode == "sweep":
@@ -803,7 +989,31 @@ def main() -> int:
     if metered_client is not None and hasattr(metered_client, "set_on_call"):
         metered_client.set_on_call(progress_reporter.on_llm_call)
 
+    command_line_params = {
+        "strategy": args.strategy,
+        "k": args.k,
+        "theta": args.theta,
+        "ef_search": args.ef_search,
+        "s_min": args.s_min,
+        "s_max": args.s_max,
+        "n_bits": args.n_bits,
+        "seed": args.seed,
+        "embedder": args.embedder,
+    }
+
     try:
+        # Write sidecar strategy_config.json BEFORE the first trial on a fresh directory
+        if not has_existing_raw and (config.dry_run or config.confirm):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            sidecar_payload = build_sidecar_payload(
+                strategy=uninitialized_strategy,
+                embedder_info=embedder_info,
+                mode=config.mode,
+                command_line_params=command_line_params,
+            )
+            with open(sidecar_path, "w", encoding="utf-8") as sf:
+                json.dump(sidecar_payload, sf, indent=2)
+
         result = run_experiment(
             config=config,
             strategy_factory=strategy_factory,
@@ -814,6 +1024,7 @@ def main() -> int:
             progress_callback=progress_reporter.update,
         )
         if config.dry_run:
+            print(f"Default/resolved output directory: {output_dir}")
             print("Dry run complete. Plan recorded in manifest.json.")
         else:
             print(f"Experiment finished: status={result.get('status')} output={result.get('output_dir')}")
