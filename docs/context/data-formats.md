@@ -59,7 +59,7 @@ Ten files confirmed present in `repositories/dataset/EKG-Dataset/`:
 - `MEKG_with_21_nodes(ML).txt`
 - `MEKG_with_35_nodes(ML1).txt`
 
-*(Note exact filenames: 7 of the 10 files contain `with_<n>_nodes` with underscores).*
+*(Note exact filenames: 9 of the 10 files contain `with_<n>_nodes` with underscores).*
 
 - **Format:** **All 10 files are semicolon-delimited (`;`)**, matching DSA. None are space-delimited.
 - **Directionality / Semantics (CRITICAL — REVERSED FROM D-15):** in **all 10 files without exception**, `concept1.txt;concept2.txt;1` means **`concept1` is a prerequisite of `concept2`** (i.e. Column 1 is the prerequisite, Column 2 is the dependent concept). This is **unanimously reversed** from the DSA and Metacademy convention ([D-15]), where Column 2 was the prerequisite. Verified systematically across all 10 files in task DATA-002 (see report `docs/reports/DATA-002-gemini-mekg-directionality.md` and decision-log [D-19]).

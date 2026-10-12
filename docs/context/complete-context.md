@@ -103,9 +103,10 @@ In brief (full detail in `data-formats.md`):
   Do not use these for the size sweep.
 - `concept_descriptions/` folder — inspected and confirmed unusable for
   DSA/Metacademy: contains 152 elementary math texts matching the CSV files,
-  with 0% overlap with DSA or Metacademy ([D-17]). Where build-phase source text
-  will come from remains an open question (see `docs/tasks/status.md` and
-  `docs/decisions/decision-log.md` for current state).
+  with 0% overlap with DSA or Metacademy ([D-17]). Build-phase source text
+  question is resolved by [D-21]: nodes consist of concept names only (no
+  per-node source text or generated definitions), with one graph-level domain
+  context string provided in the decision prompt.
 
 ## 5. Project structure and where things live
 
@@ -176,17 +177,15 @@ instance) means reading only what moved, not re-diffing a wall of unchanged
 text by eye.  
 
 ## 7. Open items — things that are genuinely unresolved right now
-
+ 
 - **Active/Open task status**: See `docs/tasks/status.md` for live task states
-  (DATA-001 and DATA-002 are complete).
-- **Graph representation choice**: not yet locked. Default lean (not yet
-  confirmed as a decision) is NetworkX, given Python, small data size, and
-  built-in directed-graph support — but this has not been formally decided
-  per the decision-log convention and should be before Phase 1's interface
-  spec is finalized.
+  (Phases 0, 1, and 2 are complete; Phase 3 integration and experimental sweep
+  in progress).
+- **Graph representation choice**: locked as NetworkX (`nx.DiGraph`) wrapped in
+  domain-specific `ConceptGraph` class per [D-22]; canonical internal edge
+  direction locked as prerequisite -> dependent per [D-23].
 - **Reference [8]** in the thesis reference list is an open citation slot
-  (see decision-log D-11) — unrelated to the coding work, but worth knowing
-  about if any agent is asked to touch the thesis document itself.
+  (see decision-log D-11) — general citation for "LLMs can extract structured
+  knowledge from text" to be resolved before final submission.
 - **Citation style** (IEEE, per D-09) is a working default pending adviser
-  confirmation — again, only relevant if the thesis document itself is being
-  edited, not for code/data work.
+  confirmation — mechanical reformatting pass if APA or ACM is required.
