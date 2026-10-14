@@ -199,3 +199,100 @@ Note: `n_bits = 12` for `bounded_bucket` is fixed a priori ($2^{12} = 4096 > 200
 | **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 2 --s-max 5` *(n_bits=12)* | `results/sweep_bounded_bucket_smin2_smax5_nb12` | `results/accuracy_bounded_bucket_smin2_smax5_nb12` | 300 |
 | **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 10 --s-max 20` *(n_bits=12)* | `results/sweep_bounded_bucket_smin10_smax20_nb12` | `results/accuracy_bounded_bucket_smin10_smax20_nb12` | 1,200 |
 
+### Run plan (D-68)
+
+#### 1. Total Runs and Verified Upper-Bound Calls (24 Runs)
+
+Every one of the 12 configurations (4 primary + 8 sensitivity per the table above and [D-64](4)) is evaluated across **both** `--mode sweep` and `--mode accuracy` (24 distinct experimental runs). Synthetic concept names carry no ground-truth edges and isolate cost-scaling curves (thesis §3.3.2, RQ1); accuracy mode evaluates placement precision, recall, $F_1$, and candidate shortlist recall against gold-standard graphs (RQ2); evaluating both modes allows side-by-side comparison across all primary and sensitivity conditions (RQ3).
+
+The table below summarizes the verified planned upper-bound LLM call counts per configuration for both modes (confirmed offline via `--dry-run`):
+
+| Role | Strategy | CLI Flags | Sweep Upper Bound | Accuracy Upper Bound |
+| :--- | :--- | :--- | ---: | ---: |
+| **Primary (S1)** | `brute_force` | `--strategy brute_force` | 38,500 | 5,012 |
+| **Primary (S2)** | `embedding_threshold` | `--strategy embedding_threshold` *(θ=0.6)* | 38,500 | 5,012 |
+| **Primary (S3)** | `ann_retrieval` | `--strategy ann_retrieval` *(k=10, ef_search=128)* | 600 | 590 |
+| **Primary (S4)** | `bounded_bucket` | `--strategy bounded_bucket` *(s_min=5, s_max=10, n_bits=12)* | 600 | 590 |
+| **Sensitivity (S2)** | `embedding_threshold` | `--strategy embedding_threshold --theta 0.4` | 38,500 | 5,012 |
+| **Sensitivity (S2)** | `embedding_threshold` | `--strategy embedding_threshold --theta 0.5` | 38,500 | 5,012 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval -k 5` *(ef_search=128)* | 300 | 295 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval -k 20` *(ef_search=128)* | 1,200 | 1,180 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval --ef-search 64` *(k=10)* | 600 | 590 |
+| **Sensitivity (S3)** | `ann_retrieval` | `--strategy ann_retrieval --ef-search 256` *(k=10)* | 600 | 590 |
+| **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 2 --s-max 5` *(n_bits=12)* | 300 | 295 |
+| **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 10 --s-max 20` *(n_bits=12)* | 1,200 | 1,180 |
+| **Total** | | | **159,400** | **25,358** |
+
+*Note on Strategy 2 bounds:* Strategy B does not cap candidate shortlists (`max_candidates` returns $n_{\text{existing}}$), so its bounds (38,500 sweep, 5,012 accuracy) represent theoretical worst-case guard ceilings. In practice, cosine filtering will prune candidate lists substantially.
+
+Combined upper-bound total across all 24 runs: **184,758 LLM calls**.
+
+#### 2. Run Order and Phasing
+
+1. **Plumbing Pilot First:** Strategy 3 primary on DSA in accuracy mode, into an isolated throwaway output directory outside `results/`:
+   ```bash
+   .venv-ann/bin/python scripts/run_experiment.py \
+     --mode accuracy \
+     --strategy ann_retrieval \
+     --corpus DSA \
+     --embedder minilm \
+     --live \
+     --confirm \
+     --output-dir /tmp/pilot-s3-dsa
+   ```
+   *Verified bound:* 29 trials (DSA graph), at most 10 candidates each = **290 LLM calls** (estimated ~4.8 min, ~$0.0070 USD). Output is plumbing verification only (exercising live API client, pins, MiniLM, and FAISS together); it is not part of benchmark results and no parameters may change because of it ([D-35](5)).
+2. **OpenMP / PyTorch Thread Check:** Run the diagnostic benchmark below prior to executing any non-pilot live run of an embedding strategy (Strategies 2, 3, 4).
+3. **Accuracy Runs First:** Execute all 12 accuracy configurations before any sweep runs, in order:
+   - Strategy 3 (`ann_retrieval`, 5 configurations: primary, $k \in \{5, 20\}$, $\text{efSearch} \in \{64, 256\}$)
+   - Strategy 4 (`bounded_bucket`, 3 configurations: primary, $(2, 5)$, $(10, 20)$)
+   - Strategy 2 (`embedding_threshold`, 3 configurations: $\theta \in \{0.6, 0.5, 0.4\}$)
+   - Strategy 1 (`brute_force`, primary)
+   *Rationale:* Accuracy mode is computationally small (25,358 total calls max); cheap strategies run first so any API or budget issues surface early before launching long sweep runs (`docs/tasks/high-level-tasks.md` Phase 3 step 3).
+4. **Sweep Runs Second:** Execute all 12 cost-scaling sweep configurations:
+   - Strategy 3 (`ann_retrieval`, 5 configurations)
+   - Strategy 4 (`bounded_bucket`, 3 configurations)
+   - Strategy 2 (`embedding_threshold`, 3 configurations: $\theta \in \{0.6, 0.5, 0.4\}$)
+   - Strategy 1 (`brute_force`, primary) last.
+   *Rationale:* Strategy 2 is uncapped by design and may approach brute-force cost for $\theta = 0.4$; brute force is exact (38,500 calls, ~10.7 h) and has no dependency on the OpenMP check.
+
+#### 3. Off-Peak Scheduling Rules
+
+Per [D-37](1) (correcting [D-36](3)), DeepSeek peak hours are **01:00–04:00 UTC** and **06:00–10:00 UTC** Monday through Friday. All other times (weekends, weekdays 00:00–01:00, 04:00–06:00, and 10:00–24:00 UTC) are off-peak.
+The CLI pre-flight guard assumes 1.0 s per call and strictly refuses live execution if the planned duration window intersects peak hours.
+- A brute-force sweep run requires 38,500 calls (estimated 10.7 hours continuous). It must be launched **at or after 10:00 UTC (18:00 PHT)** on a weekday (which provides a 15-hour off-peak window until 01:00 UTC next day), or on a weekend.
+- Strategy 2 sweeps (especially $\theta=0.4$) can approach the same duration and must follow the same scheduling window.
+
+#### 4. OpenMP / PyTorch Thread Check Snippet
+
+`faiss.omp_set_num_threads(1)` is called by `ann_retrieval.py` to ensure deterministic index construction and queries. If FAISS and PyTorch share an OpenMP runtime, `embed_s` in Strategy 3 could run single-threaded while Strategies 2 and 4 run multi-threaded.
+
+Luke runs this snippet on the host environment:
+
+```bash
+for mode in default omp1 default omp1 default omp1; do
+.venv-ann/bin/python - "$mode" <<'EOF'
+import sys, time, statistics as st
+import torch, faiss
+from graph_insertion.embedding_minilm import MiniLMEmbedder
+mode = sys.argv[1]
+emb = MiniLMEmbedder()
+for i in range(20): emb.embed(f"warmup_{i}")
+if mode == "omp1": faiss.omp_set_num_threads(1)
+ts = []
+for i in range(200):
+    t0 = time.perf_counter(); emb.embed(f"concept_name_{i:04d}"); ts.append((time.perf_counter()-t0)*1000)
+print(f"{mode:8s} torch_threads={torch.get_num_threads()} median={st.median(ts):.3f} ms p95={sorted(ts)[190]:.3f} ms")
+EOF
+done
+```
+
+**Pre-fixed Decision Rule (D-68):**
+- **Procedure:** 3 fresh processes per condition (`default` vs `omp1`), interleaved.
+- **Statistic:** The median of the three per-process medians of 200 single-name `embed()` calls for each condition.
+- **Materiality Threshold:** The effect is **material** if:
+  1. `torch.get_num_threads()` differs between the two conditions; **OR**
+  2. The `omp1` median differs from `default` by more than 10% **AND** by more than the largest within-condition spread ($\max - \min$ of the three medians).
+- **Consequence:**
+  - *If not material:* Document the result as an operational note/limitation; no code change; proceed with runs.
+  - *If material:* A follow-up task sets the PyTorch thread count explicitly and identically across all embedding strategies, while preserving FAISS's single-thread setting ([D-47]). Live runs of Strategies 2, 3, and 4 wait for this determination; brute force does not.
+
