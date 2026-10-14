@@ -223,7 +223,7 @@ The table below summarizes the verified planned upper-bound LLM call counts per 
 | **Sensitivity (S4)** | `bounded_bucket` | `--strategy bounded_bucket --s-min 10 --s-max 20` *(n_bits=12)* | 1,200 | 1,180 |
 | **Total** | | | **159,400** | **25,358** |
 
-*Note on Strategy 2 bounds:* Strategy B does not cap candidate shortlists (`max_candidates` returns $n_{\text{existing}}$), so its bounds (38,500 sweep, 5,012 accuracy) represent theoretical worst-case guard ceilings. In practice, cosine filtering will prune candidate lists substantially.
+*Note on Strategy 2 bounds:* Strategy B does not cap candidate shortlists (`max_candidates` returns $n_{\text{existing}}$), so its bounds (38,500 sweep, 5,012 accuracy) represent theoretical worst-case guard ceilings. Realised calls depend on how many existing concepts exceed θ, are not known before the run, and for the lower θ values may approach the brute-force count.
 
 Combined upper-bound total across all 24 runs: **184,758 LLM calls**.
 
