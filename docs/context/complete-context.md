@@ -177,15 +177,14 @@ instance) means reading only what moved, not re-diffing a wall of unchanged
 text by eye.  
 
 ## 7. Open items — things that are genuinely unresolved right now
- 
-- **Active/Open task status**: See `docs/tasks/status.md` for live task states
-  (Phases 0, 1, and 2 are complete; Phase 3 integration and experimental sweep
-  in progress).
+
+- **Active/Open task status**: See `docs/tasks/status.md` for live task states.
 - **Graph representation choice**: locked as NetworkX (`nx.DiGraph`) wrapped in
   domain-specific `ConceptGraph` class per [D-22]; canonical internal edge
   direction locked as prerequisite -> dependent per [D-23].
 - **Reference [8]** in the thesis reference list is an open citation slot
-  (see decision-log D-11) — general citation for "LLMs can extract structured
-  knowledge from text" to be resolved before final submission.
+  (see decision-log D-11) — unrelated to the coding work, but worth knowing
+  about if any agent is asked to touch the thesis document itself.
 - **Citation style** (IEEE, per D-09) is a working default pending adviser
-  confirmation — mechanical reformatting pass if APA or ACM is required.
+  confirmation — again, only relevant if the thesis document itself is being
+  edited, not for code/data work.
