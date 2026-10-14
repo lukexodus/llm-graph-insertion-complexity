@@ -31,6 +31,11 @@
 │   │   ├── DOC-002-B-gemini.md
 │   │   ├── DOC-002-gemini.md
 │   │   ├── DOC-003-claude-code-agents-worktree-rule.md
+│   │   ├── DOC-004-gemini-thesis-proposed.diff
+│   │   ├── DOC-004-gemini-thesis-sync.md
+│   │   ├── DOC-005-A-gemini-erratum.md
+│   │   ├── DOC-005-gemini-run-plan.md
+│   │   ├── DOC-006-gemini.md
 │   │   ├── FIX-001-gemini-infra-001-followup.md
 │   │   ├── FIX-002-gemini-infra-002-hardening.md
 │   │   ├── FIX-003-gemini-driver-followup.md
@@ -85,6 +90,9 @@
 ├── patch
 │   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
 │   ├── 0001-DATA-007-thesis-side-supervisor-for-sharded-name-poo.patch
+│   ├── 0001-DOC-004-proposed-thesis-sync-after-strategy-track-re.patch
+│   ├── 0001-DOC-005-A-erratum-for-DOC-005-report-correct-Strateg.patch
+│   ├── 0001-DOC-005-record-run-plan-decisions-and-README-run-pla.patch
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
 │   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
 │   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
