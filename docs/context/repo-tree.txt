@@ -27,6 +27,9 @@
 │   │   ├── DATA-006-kiro_default-name-pool-shards.md
 │   │   ├── DATA-007-gemini-name-pool-supervisor.md
 │   │   ├── DOC-001-gemini-doc-sync.md
+│   │   ├── DOC-002-A-gemini.md
+│   │   ├── DOC-002-B-gemini.md
+│   │   ├── DOC-002-gemini.md
 │   │   ├── DOC-003-claude-code-agents-worktree-rule.md
 │   │   ├── FIX-001-gemini-infra-001-followup.md
 │   │   ├── FIX-002-gemini-infra-002-hardening.md
@@ -51,6 +54,8 @@
 │   │   ├── INFRA-005-claude-code-null-strategy-e2e.md
 │   │   ├── INFRA-006-gemini-decision-step-llm-client.md
 │   │   ├── INFRA-007-gemini-strategy-wiring.md
+│   │   ├── INFRA-007-P-gemini.md
+│   │   ├── INFRA-007-Q-gemini.md
 │   │   ├── INFRA-007-R-gemini.md
 │   │   ├── STRAT-001-A-claude-code.md
 │   │   ├── STRAT-001-gemini-brute-force.md
@@ -83,6 +88,9 @@
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
 │   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
 │   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
+│   ├── 0001-INFRA-007-P-pins-and-runtime-check-embedder-identity.patch
+│   ├── 0001-INFRA-007-Q-pin-sentence-transformers-and-MiniLM-rev.patch
+│   ├── 0001-INFRA-007-R-independent-review-of-strategy-wiring-D-.patch
 │   ├── 0001-INFRA-007-wire-four-strategies-parameters-run-direct.patch
 │   ├── 0001-STRAT-003-B-close-stale-cache-hole-in-Strategy-2-and.patch
 │   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
@@ -144,7 +152,8 @@
 │       │   ├── embedding_threshold.py
 │       │   ├── __init__.py
 │       │   ├── null.py
-│       │   └── registry.py
+│       │   ├── registry.py
+│       │   └── stub.py
 │       ├── decision.py
 │       ├── embedding_minilm.py
 │       ├── embedding.py
@@ -186,4 +195,7 @@
 │   ├── test_strategy_interface.py
 │   └── test_strategy_registry.py
 ├── AGENTS.md
+├── DOC-002.patch
+├── INFRA-007-P.patch
+├── INFRA-007-Q.patch
 └── pyproject.toml
