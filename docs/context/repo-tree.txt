@@ -203,7 +203,4 @@
 │   ├── test_strategy_interface.py
 │   └── test_strategy_registry.py
 ├── AGENTS.md
-├── DOC-002.patch
-├── INFRA-007-P.patch
-├── INFRA-007-Q.patch
 └── pyproject.toml
