@@ -15,7 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=9.0", "pytest-cov"]
 ann = ["faiss-cpu==1.15.1"]
-embed = ["sentence-transformers"]  # TODO(INFRA-007): pin ==<version> once supplied by Luke (see SENTENCE_TRANSFORMERS_VERSION_PIN)
+embed = ["sentence-transformers==6.1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

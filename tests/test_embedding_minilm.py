@@ -306,3 +306,28 @@ class TestMiniLMEmbedderOffline:
         underlying.encode = lambda texts, **kw: np.ones((len(texts), 128), dtype=np.float32)  # type: ignore[assignment]
         with pytest.raises(ValueError, match=r"Expected 2-D embedding matrix of shape \(1, 384\)"):
             emb.embed_many(["test text"])
+
+    def test_shipped_pins_well_formed_and_match_pyproject(self) -> None:
+        """Prove shipped pins in embedding_minilm are well-formed and match pyproject.toml."""
+        import re
+        import tomllib
+
+        # Revision matches 40 lowercase hex characters
+        assert isinstance(minilm_mod.MODEL_REVISION_PIN, str)
+        assert re.fullmatch(r"^[0-9a-f]{40}$", minilm_mod.MODEL_REVISION_PIN) is not None
+
+        # Version is a non-empty string without whitespace
+        assert isinstance(minilm_mod.SENTENCE_TRANSFORMERS_VERSION_PIN, str)
+        assert len(minilm_mod.SENTENCE_TRANSFORMERS_VERSION_PIN) > 0
+        assert not any(c.isspace() for c in minilm_mod.SENTENCE_TRANSFORMERS_VERSION_PIN)
+
+        # pyproject.toml embed extra matches sentence-transformers==<VERSION> exactly
+        repo_root = Path(__file__).resolve().parent.parent
+        pyproject_path = repo_root / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+        embed_extra = pyproject["project"]["optional-dependencies"]["embed"]
+        assert embed_extra == [
+            f"sentence-transformers=={minilm_mod.SENTENCE_TRANSFORMERS_VERSION_PIN}"
+        ]
+

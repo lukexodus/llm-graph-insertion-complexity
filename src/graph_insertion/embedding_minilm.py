@@ -22,15 +22,15 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Pins — MUST be set to actual values before any live run.
+# Pins — locked per [D-67] for live experiment runs.
 # If either pin is None or blank, MiniLMEmbedder refuses to initialise (fail-closed).
 # ---------------------------------------------------------------------------
 
 # Pin: sentence-transformers package version installed in .venv-ann.
-SENTENCE_TRANSFORMERS_VERSION_PIN: Optional[str] = None
+SENTENCE_TRANSFORMERS_VERSION_PIN: Optional[str] = "6.1.0"
 
 # Pin: Hugging Face model revision (commit hash) for all-MiniLM-L6-v2.
-MODEL_REVISION_PIN: Optional[str] = None
+MODEL_REVISION_PIN: Optional[str] = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 
 MODEL_NAME: str = "all-MiniLM-L6-v2"
 MODEL_DIM: int = 384
