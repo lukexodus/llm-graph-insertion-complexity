@@ -31,6 +31,9 @@
 │   │   ├── DOC-002-B-gemini.md
 │   │   ├── DOC-002-gemini.md
 │   │   ├── DOC-003-claude-code-agents-worktree-rule.md
+│   │   ├── DOC-004-A-gemini-thesis-core.diff
+│   │   ├── DOC-004-A-gemini-thesis-gated.diff
+│   │   ├── DOC-004-A-gemini-thesis-sync-amend.md
 │   │   ├── DOC-004-gemini-thesis-proposed.diff
 │   │   ├── DOC-004-gemini-thesis-sync.md
 │   │   ├── DOC-005-A-gemini-erratum.md
@@ -62,6 +65,8 @@
 │   │   ├── INFRA-007-P-gemini.md
 │   │   ├── INFRA-007-Q-gemini.md
 │   │   ├── INFRA-007-R-gemini.md
+│   │   ├── INFRA-008-gemini-openmp-timing-check.md
+│   │   ├── INFRA-009-gemini-cpu-thread-pinning.md
 │   │   ├── STRAT-001-A-claude-code.md
 │   │   ├── STRAT-001-gemini-brute-force.md
 │   │   ├── STRAT-001-review-opencode.md
@@ -90,9 +95,11 @@
 ├── patch
 │   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
 │   ├── 0001-DATA-007-thesis-side-supervisor-for-sharded-name-poo.patch
+│   ├── 0001-DOC-004-A-amend-DOC-004-thesis-sync-proposal-with-co.patch
 │   ├── 0001-DOC-004-proposed-thesis-sync-after-strategy-track-re.patch
 │   ├── 0001-DOC-005-A-erratum-for-DOC-005-report-correct-Strateg.patch
 │   ├── 0001-DOC-005-record-run-plan-decisions-and-README-run-pla.patch
+│   ├── 0001-DOC-006-close-DOC-002-record-D-69-narrow-data-format.patch
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
 │   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
 │   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
@@ -100,6 +107,8 @@
 │   ├── 0001-INFRA-007-Q-pin-sentence-transformers-and-MiniLM-rev.patch
 │   ├── 0001-INFRA-007-R-independent-review-of-strategy-wiring-D-.patch
 │   ├── 0001-INFRA-007-wire-four-strategies-parameters-run-direct.patch
+│   ├── 0001-INFRA-008-record-OpenMP-thread-check-outcome-effect-.patch
+│   ├── 0001-INFRA-009-pin-PyTorch-CPU-threads-to-1-for-all-embed.patch
 │   ├── 0001-STRAT-003-B-close-stale-cache-hole-in-Strategy-2-and.patch
 │   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
 │   ├── 0001-STRAT-004-A2-close-scoring-tie-break-and-bucket-size.patch
@@ -162,6 +171,7 @@
 │       │   ├── null.py
 │       │   ├── registry.py
 │       │   └── stub.py
+│       ├── cpu_threads.py
 │       ├── decision.py
 │       ├── embedding_minilm.py
 │       ├── embedding.py
@@ -183,6 +193,7 @@
 │   ├── test_bounded_bucket_strategy.py
 │   ├── test_brute_force_strategy.py
 │   ├── test_controllable_embedder.py
+│   ├── test_cpu_threads.py
 │   ├── test_decision.py
 │   ├── test_dry_run_plan.py
 │   ├── test_embedding_minilm.py
