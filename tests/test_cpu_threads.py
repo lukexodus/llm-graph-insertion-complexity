@@ -49,13 +49,19 @@ class TestPinCPUThreadsHelper:
 class TestSubprocessThreadOrdering:
     """Subprocess tests verifying ordering with real libraries."""
 
-    def test_ordering_with_faiss(self) -> None:
-        code = """
+    @pytest.mark.parametrize("order", ["torch_first", "faiss_first"])
+    def test_ordering_with_faiss(self, order: str) -> None:
+        pytest.importorskip("torch")
+        pytest.importorskip("faiss")
+
+        code = f"""
 import sys
-try:
-    import torch, faiss
-except ImportError:
-    sys.exit(0)
+if "{order}" == "torch_first":
+    import torch
+    import faiss
+else:
+    import faiss
+    import torch
 
 from graph_insertion.cpu_threads import pin_cpu_threads
 
@@ -69,8 +75,8 @@ pin_cpu_threads(1)
 faiss.omp_set_num_threads(1)
 after_threads = torch.get_num_threads()
 
-assert after_threads == 1, f"Expected 1, got {after_threads}"
-print(f"CONTROL: default={default_threads} -> control={control_threads}; INVARIANT: after={after_threads}")
+assert after_threads == 1, f"Expected 1, got {{after_threads}}"
+print(f"ORDER: {order} | CONTROL: default={{default_threads}} -> control={{control_threads}} | INVARIANT: after={{after_threads}}")
 """
         proc = subprocess.run(
             [sys.executable, "-c", code],
@@ -79,6 +85,7 @@ print(f"CONTROL: default={default_threads} -> control={control_threads}; INVARIA
             check=True,
         )
         assert "INVARIANT: after=1" in proc.stdout
+        print(proc.stdout.strip())
 
     def test_fake_embedder_does_not_import_torch(self) -> None:
         code = """

@@ -2,12 +2,15 @@
 ==================================
 Deterministic CPU thread-count pinning for PyTorch inference.
 
-Under [D-71] (INFRA-008), calling faiss.omp_set_num_threads(1) changes PyTorch's
-intra-op thread count from default (physical cores, e.g. 4) down to 1 due to a shared
-OpenMP runtime thread setting across the process. Under [D-72], PyTorch intra-op
-CPU threads are pinned to CPU_THREAD_PIN (1) for every execution that constructs
+In the INFRA-008 measurement ([D-71]), calling faiss.omp_set_num_threads(1)
+was observed to lower torch.get_num_threads() from default (4 on the reference host)
+down to 1. The precise underlying mechanism was not identified (inspection of
+process mappings showed two distinct OpenMP library files loaded: one bundled with
+faiss-cpu and one with PyTorch). Under [D-72], PyTorch intra-op CPU threads are
+explicitly pinned to CPU_THREAD_PIN (1) for every execution that constructs
 MiniLMEmbedder (covering Strategies 2, 3, and 4), eliminating cross-strategy
-embedding latency bias while keeping FAISS single-threaded ([D-47]).
+embedding latency bias while keeping FAISS single-threaded ([D-47]) regardless of
+how OpenMP symbols or runtimes interact.
 """
 
 from __future__ import annotations

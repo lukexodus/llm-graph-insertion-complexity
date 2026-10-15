@@ -1397,3 +1397,209 @@ class TestINFRA007PAmendments:
         err = capsys.readouterr().err
         assert "key 'cpu_threads'" in err
 
+
+class TestCPUThreadsMainWiring:
+    """INFRA-009-A: Tests verifying pin_cpu_threads wiring through main()."""
+
+    def test_minilm_real_execution_calls_pin_exactly_once_after_construction(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Kills M1, M5, M9, M10: pin called exactly once, after MiniLM construction, and passed to harness."""
+        stub_cls, _ = _install_stub_st(
+            monkeypatch,
+            version="3.1.1",
+            revision_pin="a" * 40,
+            version_pin="3.1.1",
+        )
+
+        event_order: list[str] = []
+        captured_harness_calls: list[dict[str, Any]] = []
+
+        # Spy on MiniLM construction order
+        orig_init = stub_cls.__init__
+        def _tracking_init(self: Any, *args: Any, **kwargs: Any) -> None:
+            event_order.append("minilm_init")
+            orig_init(self, *args, **kwargs)
+        monkeypatch.setattr(stub_cls, "__init__", _tracking_init)
+
+        # Spy on pin_cpu_threads
+        import graph_insertion.cpu_threads as cpu_threads_mod
+        def _spy_pin(n: int = 1) -> dict[str, int]:
+            event_order.append("pin_cpu_threads")
+            # Distinct observed value (100) vs requested (1) to kill M10
+            return {"requested": n, "torch_threads": 100}
+        monkeypatch.setattr(cpu_threads_mod, "pin_cpu_threads", _spy_pin)
+
+        # Intercept run_experiment in scripts.run_experiment
+        import scripts.run_experiment as run_exp_mod
+        orig_run_exp = run_exp_mod.run_experiment
+        def _spy_run_experiment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            factory = kwargs.get("embedder_factory")
+            created_embedder = factory() if factory else None
+            # Extract sidecar / embedder info
+            out_dir = Path(kwargs["config"].output_dir)
+            sidecar_path = out_dir / "strategy_config.json"
+            kwargs.get("warmup_fn", lambda: None)()
+            sidecar_data = json.loads(sidecar_path.read_text(encoding="utf-8")) if sidecar_path.exists() else {}
+            captured_harness_calls.append({
+                "sidecar_embedder": sidecar_data.get("embedder"),
+                "embedder_instance": created_embedder,
+            })
+            return {"status": "ok", "output_dir": str(out_dir)}
+        monkeypatch.setattr(run_exp_mod, "run_experiment", _spy_run_experiment)
+
+        out_dir = tmp_path / "minilm_wire_test"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--output-dir",
+                str(out_dir),
+            ],
+        )
+        assert main() == 0
+        err = capsys.readouterr().err
+        assert "CPU thread pin applied: requested=1, torch_threads=100" in err
+
+        # Exactly once, and after construction
+        assert event_order == ["minilm_init", "pin_cpu_threads"]
+        assert len(captured_harness_calls) == 1
+        sidecar_emb = captured_harness_calls[0]["sidecar_embedder"]
+        assert sidecar_emb["cpu_threads"] == 1
+        assert sidecar_emb["torch_threads"] == 100
+
+    def test_pin_runtime_error_aborts_main_with_exit_1(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Kills M4, M11: RuntimeError in pin_cpu_threads causes main() to return 1 with ERROR line."""
+        _install_stub_st(
+            monkeypatch,
+            version="3.1.1",
+            revision_pin="a" * 40,
+            version_pin="3.1.1",
+        )
+
+        import graph_insertion.cpu_threads as cpu_threads_mod
+        def _failing_pin(n: int = 1) -> dict[str, int]:
+            raise RuntimeError("simulated read-back mismatch: requested 1, observed 4")
+        monkeypatch.setattr(cpu_threads_mod, "pin_cpu_threads", _failing_pin)
+
+        # Ensure no harness run occurs
+        import scripts.run_experiment as run_exp_mod
+        harness_called = []
+        monkeypatch.setattr(run_exp_mod, "run_experiment", lambda *a, **kw: harness_called.append(True))
+
+        out_dir = tmp_path / "minilm_fail_test"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--confirm",
+                "--output-dir",
+                str(out_dir),
+            ],
+        )
+        assert main() == 1
+        err = capsys.readouterr().err
+        assert "ERROR: simulated read-back mismatch" in err
+        assert harness_called == []
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_fake_embedder_never_calls_pin(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        dry_run: bool,
+    ) -> None:
+        """Kills M2: --embedder fake (both real execution and dry-run) never calls pin_cpu_threads."""
+        import graph_insertion.cpu_threads as cpu_threads_mod
+        pin_called = []
+        monkeypatch.setattr(cpu_threads_mod, "pin_cpu_threads", lambda *a, **kw: pin_called.append(True))
+
+        args = [
+            "run_experiment.py",
+            "--mode",
+            "sweep",
+            "--strategy",
+            "null",
+            "--embedder",
+            "fake",
+            "--sweep-sizes",
+            "6",
+            "--sweep-trials",
+            "1",
+            "--output-dir",
+            str(tmp_path / "fake_test"),
+        ]
+        if dry_run:
+            args.append("--dry-run")
+        else:
+            args.append("--confirm")
+
+        monkeypatch.setattr("sys.argv", args)
+        assert main() == 0
+        capsys.readouterr()
+        assert pin_called == []
+
+    def test_minilm_dry_run_never_calls_pin(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Verify --embedder minilm --dry-run does not construct MiniLM or call pin_cpu_threads."""
+        import graph_insertion.cpu_threads as cpu_threads_mod
+        pin_called = []
+        monkeypatch.setattr(cpu_threads_mod, "pin_cpu_threads", lambda *a, **kw: pin_called.append(True))
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "run_experiment.py",
+                "--mode",
+                "sweep",
+                "--strategy",
+                "embedding_threshold",
+                "--embedder",
+                "minilm",
+                "--sweep-sizes",
+                "6",
+                "--sweep-trials",
+                "1",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "minilm_dry"),
+            ],
+        )
+        assert main() == 0
+        capsys.readouterr()
+        assert pin_called == []
+
