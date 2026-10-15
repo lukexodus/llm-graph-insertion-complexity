@@ -262,11 +262,11 @@ The CLI pre-flight guard assumes 1.0 s per call and strictly refuses live execut
 - A brute-force sweep run requires 38,500 calls (estimated 10.7 hours continuous). It must be launched **at or after 10:00 UTC (18:00 PHT)** on a weekday (which provides a 15-hour off-peak window until 01:00 UTC next day), or on a weekend.
 - Strategy 2 sweeps (especially $\theta=0.4$) can approach the same duration and must follow the same scheduling window.
 
-#### 4. OpenMP / PyTorch Thread Check Snippet
+#### 4. OpenMP / PyTorch Thread Check Outcome & Pinning Policy (D-71, D-72)
 
-`faiss.omp_set_num_threads(1)` is called by `ann_retrieval.py` to ensure deterministic index construction and queries. If FAISS and PyTorch share an OpenMP runtime, `embed_s` in Strategy 3 could run single-threaded while Strategies 2 and 4 run multi-threaded.
+`faiss.omp_set_num_threads(1)` is called by `ann_retrieval.py` to ensure deterministic index construction and queries. Because FAISS and PyTorch share an OpenMP thread setting in-process, `embed_s` in Strategy 3 would run single-threaded while Strategies 2 and 4 would run on 4 threads.
 
-Luke runs this snippet on the host environment:
+The diagnostic benchmark specified below was executed on Luke's host environment under **INFRA-008** (`docs/reports/INFRA-008-gemini-openmp-timing-check.md`):
 
 ```bash
 for mode in default omp1 default omp1 default omp1; do
@@ -286,13 +286,15 @@ EOF
 done
 ```
 
-**Pre-fixed Decision Rule (D-68):**
-- **Procedure:** 3 fresh processes per condition (`default` vs `omp1`), interleaved.
-- **Statistic:** The median of the three per-process medians of 200 single-name `embed()` calls for each condition.
-- **Materiality Threshold:** The effect is **material** if:
-  1. `torch.get_num_threads()` differs between the two conditions; **OR**
-  2. The `omp1` median differs from `default` by more than 10% **AND** by more than the largest within-condition spread ($\max - \min$ of the three medians).
-- **Consequence:**
-  - *If not material:* Document the result as an operational note/limitation; no code change; proceed with runs.
-  - *If material:* A follow-up task sets the PyTorch thread count explicitly and identically across all embedding strategies, while preserving FAISS's single-thread setting ([D-47]). Live runs of Strategies 2, 3, and 4 wait for this determination; brute force does not.
+**Observed Outcome & Materiality Determination ([D-71]):**
+- `default`: `torch.get_num_threads() = 4`, condition median $M_{\text{default}} = 16.856$ ms, spread 1.810 ms.
+- `omp1`: `torch.get_num_threads() = 1`, condition median $M_{\text{omp1}} = 24.362$ ms, spread 0.970 ms.
+- Shift: $+7.506$ ms ($+44.53\%$, $> 10\%$ threshold and $> 1.810$ ms spread).
+- Both pre-fixed criteria in [D-68](5) were triggered: the effect is declared **material**.
+
+**Pinning Policy & Implementation ([D-72], INFRA-009):**
+- PyTorch intra-op CPU threads are pinned to `CPU_THREAD_PIN = 1` for every execution constructing `MiniLMEmbedder` via `graph_insertion.cpu_threads.pin_cpu_threads(1)` called in `scripts/run_experiment.py`.
+- Recorded in `strategy_config.json` sidecar embedder block as `"cpu_threads": 1`. Resume guard checks for matching `cpu_threads` in existing sidecars (legacy-tolerant).
+- Consequence: Strategies 2, 3, and 4 all execute CPU inference single-threaded (~24 ms per embedding on the reference host), ensuring completely fair, unconfounded cross-strategy latency comparisons.
+- The diagnostic snippet does not need to be re-run.
 

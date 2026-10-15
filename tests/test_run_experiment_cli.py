@@ -1310,3 +1310,90 @@ class TestINFRA007PAmendments:
         assert sidecar_existed_at_trial_1 == [True]
         assert (crash_dir / "strategy_config.json").exists()
 
+    def test_cpu_threads_in_minilm_sidecar_and_resume_guard(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verify cpu_threads is recorded for minilm, legacy sidecars are accepted, and mismatches refused."""
+        from scripts.run_experiment import (
+            build_parser,
+            check_resume_or_existing_directory_guard,
+            get_current_embedder_info,
+        )
+
+        parser = build_parser()
+        args = parser.parse_args(["--strategy", "embedding_threshold", "--embedder", "minilm"])
+        info = get_current_embedder_info(args, uses_embeddings=True, seed=42)
+
+        assert info["type"] == "minilm"
+        assert info["cpu_threads"] == 1
+
+        out_dir = tmp_path / "sidecar_test"
+        out_dir.mkdir(parents=True)
+        raw_path = out_dir / "raw.jsonl"
+        raw_path.write_text("{\"key\": 1}\n", encoding="utf-8")
+        sidecar_path = out_dir / "strategy_config.json"
+
+        # 1. Matching sidecar with cpu_threads=1 -> accepted (rc=0)
+        matching_payload = {
+            "strategy": "embedding_threshold",
+            "config": {"theta": 0.6, "seed": 42},
+            "mode": "sweep",
+            "embedder": dict(info),
+        }
+        sidecar_path.write_text(json.dumps(matching_payload), encoding="utf-8")
+        rc = check_resume_or_existing_directory_guard(
+            output_dir=out_dir,
+            raw_jsonl_path=raw_path,
+            sidecar_path=sidecar_path,
+            has_existing_raw=True,
+            config_resume=True,
+            current_strategy="embedding_threshold",
+            current_config={"theta": 0.6, "seed": 42},
+            current_mode="sweep",
+            current_embedder_info=info,
+        )
+        assert rc == 0
+
+        # 2. Legacy sidecar without cpu_threads key -> accepted (rc=0)
+        legacy_embedder = dict(info)
+        del legacy_embedder["cpu_threads"]
+        legacy_payload = dict(matching_payload)
+        legacy_payload["embedder"] = legacy_embedder
+        sidecar_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+        rc_legacy = check_resume_or_existing_directory_guard(
+            output_dir=out_dir,
+            raw_jsonl_path=raw_path,
+            sidecar_path=sidecar_path,
+            has_existing_raw=True,
+            config_resume=True,
+            current_strategy="embedding_threshold",
+            current_config={"theta": 0.6, "seed": 42},
+            current_mode="sweep",
+            current_embedder_info=info,
+        )
+        assert rc_legacy == 0
+
+        # 3. Mismatched sidecar with cpu_threads=4 -> refused (rc=1)
+        mismatched_embedder = dict(info)
+        mismatched_embedder["cpu_threads"] = 4
+        mismatched_payload = dict(matching_payload)
+        mismatched_payload["embedder"] = mismatched_embedder
+        sidecar_path.write_text(json.dumps(mismatched_payload), encoding="utf-8")
+        rc_mismatch = check_resume_or_existing_directory_guard(
+            output_dir=out_dir,
+            raw_jsonl_path=raw_path,
+            sidecar_path=sidecar_path,
+            has_existing_raw=True,
+            config_resume=True,
+            current_strategy="embedding_threshold",
+            current_config={"theta": 0.6, "seed": 42},
+            current_mode="sweep",
+            current_embedder_info=info,
+        )
+        assert rc_mismatch == 1
+        err = capsys.readouterr().err
+        assert "key 'cpu_threads'" in err
+

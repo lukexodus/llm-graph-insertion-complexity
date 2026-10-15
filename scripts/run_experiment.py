@@ -671,6 +671,7 @@ def get_current_embedder_info(
             "dim": 32,
             "seed": int(seed),
         }
+    from graph_insertion.cpu_threads import CPU_THREAD_PIN
     from graph_insertion.embedding_minilm import (
         MODEL_DIM,
         MODEL_NAME,
@@ -692,6 +693,7 @@ def get_current_embedder_info(
         "revision": MODEL_REVISION_PIN,
         "sentence_transformers_version": st_version,
         "sentence_transformers_version_pin": SENTENCE_TRANSFORMERS_VERSION_PIN,
+        "cpu_threads": CPU_THREAD_PIN,
         "device": "cpu",
         "dtype": "float32",
     }
@@ -783,6 +785,15 @@ def check_resume_or_existing_directory_guard(
                 if stored_embedder.get("sentence_transformers_version") != current_embedder_info.get("sentence_transformers_version"):
                     print(
                         f"ERROR: Embedder configuration mismatch in {output_dir} (key 'sentence_transformers_version'): "
+                        f"stored embedder={stored_embedder} vs current embedder={current_embedder_info}",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+            if "cpu_threads" in stored_embedder:
+                if stored_embedder.get("cpu_threads") != current_embedder_info.get("cpu_threads"):
+                    print(
+                        f"ERROR: Embedder configuration mismatch in {output_dir} (key 'cpu_threads'): "
                         f"stored embedder={stored_embedder} vs current embedder={current_embedder_info}",
                         file=sys.stderr,
                     )
@@ -1065,11 +1076,17 @@ def main() -> int:
             "seed": int(config.seed),
         }
     else:
+        from graph_insertion.cpu_threads import CPU_THREAD_PIN, pin_cpu_threads
         from graph_insertion.embedding_minilm import MiniLMEmbedder
 
         try:
             minilm_instance = MiniLMEmbedder()
-        except (ImportError, ValueError) as err:
+            pin_result = pin_cpu_threads(CPU_THREAD_PIN)
+            print(
+                f"CPU thread pin applied: requested={pin_result['requested']}, torch_threads={pin_result['torch_threads']}",
+                file=sys.stderr,
+            )
+        except (ImportError, ValueError, RuntimeError) as err:
             print(f"ERROR: {err}", file=sys.stderr)
             return 1
         embedder_factory = lambda: minilm_instance
@@ -1077,6 +1094,8 @@ def main() -> int:
             "type": "minilm",
             "uses_embeddings": True,
             **minilm_instance.identity(),
+            "cpu_threads": CPU_THREAD_PIN,
+            "torch_threads": pin_result["torch_threads"],
         }
 
     # Progress reporter setup (call-driven heartbeat)
