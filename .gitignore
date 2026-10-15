@@ -16,5 +16,5 @@ patch/
 *.egg-info/
 .env
 
-results/datagen/
+results/
 *.log
