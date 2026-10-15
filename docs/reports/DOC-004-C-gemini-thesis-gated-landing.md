@@ -60,9 +60,12 @@ a59843b89ef6fb5de9991a0a1bf77d825c741b4f
 #### Input Files in `~/Downloads` (Section 1)
 ```text
 8ee54b82d8a0ca7a1940e7b851a873d61a5ef9aabf305d0e1a88ce4f77fcbeba  /home/lukexodus/Downloads/DOC-004-C-thesis-gated-amended.diff
-41802a20e081a121293b8e0efd73a66a40537f7bdbaa3c3a0c951acda689113f  /home/lukexodus/Downloads/D-77-entry.md
+41802a20e081a121293b8e0efd73a66a40537f7bdbaa3c3a0c951acda689113f  /home/lukexodus/Downloads/D-76-entry.md
 fb88059c1fa70792f21cd8fbd89be9f892908fff5892a2aee936dbf907d59c77  /home/lukexodus/Downloads/DOC-004-C-apply-line81.py
 ```
+
+*Note on `D-76-entry.md`: The input file was supplied as `/home/lukexodus/Downloads/D-76-entry.md` and hashed before renumbering to `[D-77]`.
+
 
 #### Copied Diff in `docs/reports/` (Step 1)
 ```text
@@ -109,7 +112,7 @@ replacing line 81
 | Item / Metric | Expected | Observed | Match? |
 | :--- | :--- | :--- | :--- |
 | `DOC-004-C-thesis-gated-amended.diff` sha256 | `8ee54b82d8a0ca7a1940e7b851a873d61a5ef9aabf305d0e1a88ce4f77fcbeba` | `8ee54b82d8a0ca7a1940e7b851a873d61a5ef9aabf305d0e1a88ce4f77fcbeba` | YES |
-| `D-77-entry.md` sha256 | `41802a20e081a121293b8e0efd73a66a40537f7bdbaa3c3a0c951acda689113f` | `41802a20e081a121293b8e0efd73a66a40537f7bdbaa3c3a0c951acda689113f` | YES |
+| `D-76-entry.md` sha256 (prior to D-77 renumbering) | `41802a20e081a121293b8e0efd73a66a40537f7bdbaa3c3a0c951acda689113f` | `41802a20e081a121293b8e0efd73a66a40537f7bdbaa3c3a0c951acda689113f` | YES |
 | `DOC-004-C-apply-line81.py` sha256 | `fb88059c1fa70792f21cd8fbd89be9f892908fff5892a2aee936dbf907d59c77` | `fb88059c1fa70792f21cd8fbd89be9f892908fff5892a2aee936dbf907d59c77` | YES |
 | Precondition thesis `git hash-object` | `7ba3c035e86006aae82918d0d37aa8925f69f2da` | `7ba3c035e86006aae82918d0d37aa8925f69f2da` | YES |
 | Precondition thesis sha256 | `66c50724c071b12d09cd5a3148a8a682d888a7cc2810d73bb142d4d754b30705` | `66c50724c071b12d09cd5a3148a8a682d888a7cc2810d73bb142d4d754b30705` | YES |
