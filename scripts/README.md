@@ -264,7 +264,7 @@ The CLI pre-flight guard assumes 1.0 s per call and strictly refuses live execut
 
 #### 4. OpenMP / PyTorch Thread Check Outcome & Pinning Policy (D-71, D-72)
 
-`faiss.omp_set_num_threads(1)` is called by `ann_retrieval.py` to ensure deterministic index construction and queries. Because FAISS and PyTorch share an OpenMP thread setting in-process, `embed_s` in Strategy 3 would run single-threaded while Strategies 2 and 4 would run on 4 threads.
+`faiss.omp_set_num_threads(1)` is called by `ann_retrieval.py` to ensure deterministic index construction and queries. In the torch-first import order FAISS and PyTorch were observed to share one OpenMP thread setting ([D-71]); in the faiss-first order that real Strategy 3 runs use, no such coupling was observed ([D-73]). Whether a cross-strategy latency confound arose in real runs is unestablished.
 
 The diagnostic benchmark specified below was executed on Luke's host environment under **INFRA-008** (`docs/reports/INFRA-008-gemini-openmp-timing-check.md`):
 
@@ -295,6 +295,6 @@ done
 **Pinning Policy & Implementation ([D-72], INFRA-009):**
 - PyTorch intra-op CPU threads are pinned to `CPU_THREAD_PIN = 1` for every execution constructing `MiniLMEmbedder` via `graph_insertion.cpu_threads.pin_cpu_threads(1)` called in `scripts/run_experiment.py`.
 - Recorded in `strategy_config.json` sidecar embedder block as `"cpu_threads": 1`. Resume guard checks for matching `cpu_threads` in existing sidecars (legacy-tolerant).
-- Consequence: Strategies 2, 3, and 4 all execute CPU inference single-threaded (~24 ms per embedding on the reference host), ensuring completely fair, unconfounded cross-strategy latency comparisons.
+- Consequence: Strategies 2, 3, and 4 all execute CPU inference single-threaded (~24 ms per embedding on the reference host), so embedding times are uniform across strategies and independent of import order (single-threaded by protocol).
 - The diagnostic snippet does not need to be re-run.
 
