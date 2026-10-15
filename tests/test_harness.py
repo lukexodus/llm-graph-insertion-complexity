@@ -708,3 +708,122 @@ class TestHarnessHardeningAndEnrichment:
         # Number of trials is still 4 because the duplicate was deduped (last record wins)
         assert int(rows[0]["num_trials"]) == 4
 
+
+# ===========================================================================
+# INFRA-010 / D-74: Library Versions and Manifest Tests
+# ===========================================================================
+
+class TestLibraryVersionsAndManifest:
+    """Tests for get_library_versions defaults, error handling, and manifest integration."""
+
+    def test_get_library_versions_default_packages_tuple(self):
+        import inspect
+        from graph_insertion.harness import get_library_versions
+
+        sig = inspect.signature(get_library_versions)
+        default_pkgs = sig.parameters["packages"].default
+        expected = (
+            "networkx",
+            "pytest",
+            "httpx",
+            "numpy",
+            "torch",
+            "faiss-cpu",
+            "sentence-transformers",
+        )
+        assert default_pkgs == expected
+        assert "torch" in default_pkgs
+        assert "faiss-cpu" in default_pkgs
+        assert "sentence-transformers" in default_pkgs
+
+    def test_get_library_versions_mocked_versions(self, monkeypatch):
+        import importlib.metadata
+        from graph_insertion.harness import get_library_versions
+
+        mock_versions = {
+            "networkx": "3.2.1",
+            "pytest": "9.0.0",
+            "httpx": "0.27.0",
+            "numpy": "1.26.4",
+            "torch": "2.14.1+cu130",
+            "faiss-cpu": "1.15.1",
+            "sentence-transformers": "6.1.0",
+        }
+        monkeypatch.setattr(
+            importlib.metadata, "version", lambda pkg: mock_versions[pkg]
+        )
+        result = get_library_versions()
+        assert result == mock_versions
+        assert result["torch"] == "2.14.1+cu130"
+        assert result["faiss-cpu"] == "1.15.1"
+        assert result["sentence-transformers"] == "6.1.0"
+
+    def test_get_library_versions_package_not_found_handled(self, monkeypatch):
+        import importlib.metadata
+        from graph_insertion.harness import get_library_versions
+
+        def mock_version(pkg: str) -> str:
+            if pkg in ("torch", "faiss-cpu"):
+                raise importlib.metadata.PackageNotFoundError(pkg)
+            return "1.0.0"
+
+        monkeypatch.setattr(importlib.metadata, "version", mock_version)
+        result = get_library_versions()
+        assert "torch" not in result
+        assert "faiss-cpu" not in result
+        assert result["networkx"] == "1.0.0"
+        assert result["sentence-transformers"] == "1.0.0"
+
+    def test_write_manifest_records_expanded_libraries(self, tmp_path, monkeypatch):
+        import importlib.metadata
+        from graph_insertion.harness import write_manifest
+
+        mock_versions = {
+            "networkx": "3.0.0",
+            "pytest": "9.1.0",
+            "httpx": "0.27.0",
+            "numpy": "1.26.0",
+            "torch": "2.14.1+cu130",
+            "faiss-cpu": "1.15.1",
+            "sentence-transformers": "6.1.0",
+        }
+        monkeypatch.setattr(
+            importlib.metadata, "version", lambda pkg: mock_versions[pkg]
+        )
+
+        config = HarnessConfig(
+            mode="accuracy",
+            run_id="test_manifest_run",
+            output_dir=tmp_path,
+        )
+
+        class DummyStep:
+            PROMPT_VERSION = "v2"
+
+            class InnerClient:
+                model = "test-model"
+                base_url = "https://example.com"
+
+            llm_client = InnerClient()
+
+        write_manifest(
+            output_dir=tmp_path,
+            config=config,
+            strategy_config={"name": "test_strat"},
+            decision_step=DummyStep(),
+        )
+
+        manifest_path = tmp_path / "manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert "libraries" in manifest
+        libs = manifest["libraries"]
+        assert libs["torch"] == "2.14.1+cu130"
+        assert libs["faiss-cpu"] == "1.15.1"
+        assert libs["sentence-transformers"] == "6.1.0"
+        assert libs["networkx"] == "3.0.0"
+        assert libs["pytest"] == "9.1.0"
+        assert libs["httpx"] == "0.27.0"
+        assert libs["numpy"] == "1.26.0"
+
+

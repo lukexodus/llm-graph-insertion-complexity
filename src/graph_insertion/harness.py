@@ -201,7 +201,15 @@ def get_git_info(cwd: Optional[Path] = None) -> dict[str, Any]:
 
 
 def get_library_versions(
-    packages: Sequence[str] = ("networkx", "pytest", "httpx", "numpy")
+    packages: Sequence[str] = (
+        "networkx",
+        "pytest",
+        "httpx",
+        "numpy",
+        "torch",
+        "faiss-cpu",
+        "sentence-transformers",
+    )
 ) -> dict[str, str]:
     """Retrieve installed versions of core project dependencies."""
     versions = {}

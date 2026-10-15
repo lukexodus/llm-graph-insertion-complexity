@@ -129,7 +129,192 @@ Appended `**[D-73]**` recording the import-order finding, preserving [D-71] as t
 
 ---
 
-## 5. Found But Not Changed
-- `scripts/run_experiment.py`: Maintained strictly read-only; no code changes.
-- `src/graph_insertion/strategies/*`: All strategies remained read-only.
-- `src/graph_insertion/cpu_threads.py`: Unmodified in Part A.
+## 5. Part B: Record Library Versions in Manifest (D-74)
+
+### 5.1 Design & Implementation
+Per `[D-74]`, `manifest.json`'s `libraries` dictionary records installed package versions for `"torch"`, `"faiss-cpu"`, and `"sentence-transformers"` in addition to `"networkx"`, `"pytest"`, `"httpx"`, and `"numpy"`.
+In `src/graph_insertion/harness.py`:
+- Only line 204 was modified, updating the default `packages` parameter of `get_library_versions` from:
+  `("networkx", "pytest", "httpx", "numpy")`
+  to:
+  `("networkx", "pytest", "httpx", "numpy", "torch", "faiss-cpu", "sentence-transformers")`
+- No other changes were made to `harness.py`.
+
+### 5.2 Dependency Requirement Check
+Inspection of installed package metadata via `importlib.metadata.requires("sentence-transformers")`:
+- `sentence-transformers==6.1.0` requires `torch>=2.2`.
+- It does not pin a specific build, CUDA tag, or upper bound for PyTorch.
+- `pyproject.toml` pins `sentence-transformers==6.1.0` and `faiss-cpu==1.15.1`, but does not pin `torch`.
+- On the reference host, the installed version is `torch==2.14.1+cu130`.
+
+### 5.3 Test Coverage
+Added `TestLibraryVersionsAndManifest` to `tests/test_harness.py`:
+1. `test_get_library_versions_default_packages_tuple`: Asserts signature default packages tuple contains all seven expected packages in exact order.
+2. `test_get_library_versions_mocked_versions`: Asserts distinct mock versions returned for all seven packages.
+3. `test_get_library_versions_package_not_found_handled`: Verifies `PackageNotFoundError` is silently caught and absent packages omitted without error.
+4. `test_write_manifest_records_expanded_libraries`: Validates that `write_manifest` serializes the expanded `libraries` dictionary into `manifest.json`.
+
+### 5.4 Test Code Diff
+```diff
+diff --git i/tests/test_harness.py w/tests/test_harness.py
+index 9297b6b..6171e00 100644
+--- i/tests/test_harness.py
++++ w/tests/test_harness.py
+@@ -708,3 +708,122 @@ class TestHarnessHardeningAndEnrichment:
+         # Number of trials is still 4 because the duplicate was deduped (last record wins)
+         assert int(rows[0]["num_trials"]) == 4 
+ 
++
++# ===========================================================================
++# INFRA-010 / D-74: Library Versions and Manifest Tests
++# ===========================================================================
++
++class TestLibraryVersionsAndManifest:
++    """Tests for get_library_versions defaults, error handling, and manifest integration."""
++
++    def test_get_library_versions_default_packages_tuple(self):
++        import inspect
++        from graph_insertion.harness import get_library_versions
++
++        sig = inspect.signature(get_library_versions)
++        default_pkgs = sig.parameters["packages"].default
++        expected = (
++            "networkx",
++            "pytest",
++            "httpx",
++            "numpy",
++            "torch",
++            "faiss-cpu",
++            "sentence-transformers",
++        )
++        assert default_pkgs == expected
++        assert "torch" in default_pkgs
++        assert "faiss-cpu" in default_pkgs
++        assert "sentence-transformers" in default_pkgs
++
++    def test_get_library_versions_mocked_versions(self, monkeypatch):
++        import importlib.metadata
++        from graph_insertion.harness import get_library_versions
++
++        mock_versions = {
++            "networkx": "3.2.1",
++            "pytest": "9.0.0",
++            "httpx": "0.27.0",
++            "numpy": "1.26.4",
++            "torch": "2.14.1+cu130",
++            "faiss-cpu": "1.15.1",
++            "sentence-transformers": "6.1.0",
++        }
++        monkeypatch.setattr(
++            importlib.metadata, "version", lambda pkg: mock_versions[pkg]
++        )
++        result = get_library_versions()
++        assert result == mock_versions
++        assert result["torch"] == "2.14.1+cu130"
++        assert result["faiss-cpu"] == "1.15.1"
++        assert result["sentence-transformers"] == "6.1.0"
++
++    def test_get_library_versions_package_not_found_handled(self, monkeypatch):
++        import importlib.metadata
++        from graph_insertion.harness import get_library_versions
++
++        def mock_version(pkg: str) -> str:
++            if pkg in ("torch", "faiss-cpu"):
++                raise importlib.metadata.PackageNotFoundError(pkg)
++            return "1.0.0"
++
++        monkeypatch.setattr(importlib.metadata, "version", mock_version)
++        result = get_library_versions()
++        assert "torch" not in result
++        assert "faiss-cpu" not in result
++        assert result["networkx"] == "1.0.0"
++        assert result["sentence-transformers"] == "1.0.0"
++
++    def test_write_manifest_records_expanded_libraries(self, tmp_path, monkeypatch):
++        import importlib.metadata
++        from graph_insertion.harness import write_manifest
++
++        mock_versions = {
++            "networkx": "3.0.0",
++            "pytest": "9.1.0",
++            "httpx": "0.27.0",
++            "numpy": "1.26.0",
++            "torch": "2.14.1+cu130",
++            "faiss-cpu": "1.15.1",
++            "sentence-transformers": "6.1.0",
++        }
++        monkeypatch.setattr(
++            importlib.metadata, "version", lambda pkg: mock_versions[pkg]
++        )
++
++        config = HarnessConfig(
++            mode="accuracy",
++            run_id="test_manifest_run",
++            output_dir=tmp_path,
++        )
++
++        class DummyStep:
++            PROMPT_VERSION = "v2"
++
++            class InnerClient:
++                model = "test-model"
++                base_url = "https://example.com"
++
++            llm_client = InnerClient()
++
++        write_manifest(
++            output_dir=tmp_path,
++            config=config,
++            strategy_config={"name": "test_strat"},
++            decision_step=DummyStep(),
++        )
++
++        manifest_path = tmp_path / "manifest.json"
++        assert manifest_path.exists()
++        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++        assert "libraries" in manifest
++        libs = manifest["libraries"]
++        assert libs["torch"] == "2.14.1+cu130"
++        assert libs["faiss-cpu"] == "1.15.1"
++        assert libs["sentence-transformers"] == "6.1.0"
++        assert libs["networkx"] == "3.0.0"
++        assert libs["pytest"] == "9.1.0"
++        assert libs["httpx"] == "0.27.0"
++        assert libs["numpy"] == "1.26.0"
+```
+
+---
+
+## 6. Executed Mutation Table
+
+Executed on an isolated `/tmp` clone (`git clone -q --local --no-hardlinks`) with `PYTHONPATH` strictly pointing to clone directories.
+- **Baseline Control Command:** `.venv-ann/bin/pytest -q -p no:cacheprovider --tb=short tests/test_harness.py -k TestLibraryVersionsAndManifest`
+- **Baseline Control Result:** `rc=0`, `4 passed, 16 deselected in 0.36s` (PASSED).
+
+| Mutant ID | Description | Exact Change in `src/graph_insertion/harness.py` | Test Command | Result | Verbatim Failing Line / Assertion |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **M1** | Tuple missing `torch` | Removed `"torch",\n` from `packages` default tuple | `.venv-ann/bin/pytest tests/test_harness.py -k TestLibraryVersionsAndManifest` | **KILLED** (`rc=1`) | `E AssertionError: assert ('networkx', ...transformers') == ('networkx', ...iss-cpu', ...)`<br>`E At index 4 diff: 'faiss-cpu' != 'torch'`<br>`E Right contains one more item: 'sentence-transformers'` |
+| **M2** | Tuple missing `faiss-cpu` | Removed `"faiss-cpu",\n` from `packages` default tuple | `.venv-ann/bin/pytest tests/test_harness.py -k TestLibraryVersionsAndManifest` | **KILLED** (`rc=1`) | `E AssertionError: assert ('networkx', ...transformers') == ('networkx', ...iss-cpu', ...)`<br>`E At index 5 diff: 'sentence-transformers' != 'faiss-cpu'`<br>`E Right contains one more item: 'sentence-transformers'` |
+| **M3** | Tuple missing `sentence-transformers` | Removed `"sentence-transformers",\n` from `packages` default tuple | `.venv-ann/bin/pytest tests/test_harness.py -k TestLibraryVersionsAndManifest` | **KILLED** (`rc=1`) | `E AssertionError: assert ('networkx', ..., 'faiss-cpu') == ('networkx', ...iss-cpu', ...)`<br>`E Right contains one more item: 'sentence-transformers'` |
+| **M4** | `PackageNotFoundError` no longer caught | Replaced `except importlib.metadata.PackageNotFoundError:` with `except KeyError:` | `.venv-ann/bin/pytest tests/test_harness.py -k TestLibraryVersionsAndManifest` | **KILLED** (`rc=1`) | `E importlib.metadata.PackageNotFoundError: No package metadata was found for torch`<br>`FAILED tests/test_harness.py::TestLibraryVersionsAndManifest::test_get_library_versions_package_not_found_handled` |
+| **M5** | Versions recorded under wrong key | Replaced `versions[pkg] = importlib.metadata.version(pkg)` with `versions[f"pkg_{pkg}"] = importlib.metadata.version(pkg)` | `.venv-ann/bin/pytest tests/test_harness.py -k TestLibraryVersionsAndManifest` | **KILLED** (`rc=1`) | `E AssertionError: assert {'pkg_network...'1.26.4', ...} == {'networkx': ...'1.26.4', ...}`<br>`E Left contains 7 more items:`<br>`E {'pkg_faiss-cpu': '1.15.1', 'pkg_httpx': '0.27.0', ...}` |
+
+---
+
+## 7. Full Test Suite Execution
+
+Executed full test suite once via `.venv-ann/bin/pytest -q | tail -3`:
+
+```text
+tests/test_strategy_registry.py ..........                               [100%]
+
+================== 699 passed, 3 skipped in 164.32s (0:02:44) ==================
+```
+
+---
+
+## 8. Found But Not Changed
+- `scripts/run_experiment.py`: Read-only.
+- `src/graph_insertion/strategies/*`: All strategies read-only.
+- `src/graph_insertion/cpu_threads.py`: Read-only.
+- `pyproject.toml`: Read-only; did not add torch pin to `[project.optional-dependencies] embed` (left as open question in [D-74]).
