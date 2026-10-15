@@ -72,6 +72,7 @@
 │   │   ├── INFRA-009-A-gemini-test-gaps-and-mutations.md
 │   │   ├── INFRA-009-gemini-cpu-thread-pinning.md
 │   │   ├── INFRA-010-gemini-import-order-and-manifest-libraries.md
+│   │   ├── INFRA-011-gemini-closeout.md
 │   │   ├── STRAT-001-A-claude-code.md
 │   │   ├── STRAT-001-gemini-brute-force.md
 │   │   ├── STRAT-001-review-opencode.md
