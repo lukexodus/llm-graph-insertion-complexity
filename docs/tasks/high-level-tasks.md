@@ -78,7 +78,7 @@ This is where the four independently-built strategies get run together, for real
 
 - Plot insertion cost (wall-clock and call count separately — the handoff's own point that separating these tells you "LLM is slow" from "algorithm makes too many calls") against n, one line per strategy, log-scale n.
 - Plot placement accuracy against n, same structure.
-- **Directly compare the bucket-capped strategy's empirical curve against EraRAG's Theorem 4's predicted shape** — this is the actual thesis contribution landing: does the measured curve look like what the theorem promises, or does it diverge, and either answer is a real finding.
+- **Compare the bucket-capped strategy's single-insertion cost curve against the structural premise of EraRAG's Theorem 4** — each sweep trial is one insertion after the graph is built, with no multi-insertion or amortised-cost benchmark ([D-68](1), [D-75](3)(a)), so the amortised bound itself is not tested; the question is whether the measured cost stays flat as the graph grows or diverges, and either answer is a real finding.
 - Write the results section around whichever outcome actually occurred (convergence or divergence across strategies), using the framing already locked in Phase 0 so the writeup isn't scrambling to justify results after the fact.
 
 ---
