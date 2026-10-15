@@ -1,5 +1,7 @@
 # INFRA-008 — OpenMP / PyTorch Thread-Timing Check Outcome and Analysis
 
+§A-2 conclusion amended under INFRA-010 (2026-10-15).
+
 - **Task ID:** INFRA-008
 - **Date:** 2026-10-14 19:20 PH (UTC+8) (Amended 2026-10-15 under INFRA-009)
 - **Agent / Model:** Gemini (Antigravity, Gemini 3.8 Flash (Medium))
@@ -94,7 +96,7 @@ Per the pre-fixed decision rule defined in `[D-68](5)`:
 
 **Verdict:** The side-effect is **MATERIAL**. The measurement shows that calling `faiss.omp_set_num_threads(1)` changes PyTorch's thread count, which is consistent with FAISS and PyTorch sharing one OpenMP thread setting in this process. This reduces PyTorch thread concurrency to a single thread and increases CPU sentence embedding latency by ~44.5%.
 
-Inspection of `/proc/self/maps` reveals that both `faiss_cpu.libs/libgomp-e985bcbb.so.1.0.0` and `torch/lib/libgomp.so.1` are loaded into memory. While multiple dynamic OpenMP library files are mapped, global OpenMP runtime thread control symbols or vendor interop resolve to a shared thread setting across the process.
+Both `faiss_cpu.libs/libgomp-*.so` and `torch/lib/libgomp.so.1` are mapped into process memory. `faiss.omp_set_num_threads(1)` lowered `torch.get_num_threads()` from 4 to 1 in the measured import order (`torch` then `faiss`); INFRA-009-A's controls show it did not in the reverse order. The mechanism is unidentified. See D-73.
 
 ---
 
