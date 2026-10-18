@@ -2,7 +2,7 @@
 """
 validate_runs.py — Independent Validation Gate for Experiment Runs
 ===================================================================
-Implements Section 2 of the Phase 4 Analysis Plan (TASK ANALYSIS-001).
+Implements Section 2 of the Phase 4 Analysis Plan (TASK ANALYSIS-001 / ANALYSIS-001-F).
 
 Checks performed:
 1. Exact trial count enforcement:
@@ -11,28 +11,34 @@ Checks performed:
    - Legacy DSA-only fixture: 29 trials (DSA only).
 2. Planned call bound verification:
    - Keyed directly by sidecar strategy and config (README run table D-68).
-   - Directory slug cross-checked.
+   - Directory name matched against manifest.json run_id and strategy_config.json canonical slug.
 3. Independent recomputation from raw.jsonl vs summary.csv:
    - Micro and Macro P, R, F1, Shortlist Recall (macro excludes undefined/zero-neighbour nodes).
    - Mean and median total_s (median via statistics.median for even-n correctness).
    - Mean and sum of LLM calls.
    - Recomputation agreement checked within floating-point tolerance.
+   - Integer summary fields safely converted, failing closed on non-integer values.
 4. Manifest and provenance checks:
    - git_dirty is strictly False (boolean).
-   - git_commit identical across all runs.
+   - git_commit identical within each mode (accuracy, sweep).
+   - Across modes, differing git_commit accepted only with explicit --src-diff-clean argument.
    - libraries block contains all 7 required libraries and is identical across all runs.
 5. Embedder thread and identity checks:
    - For all embedding strategies (embedding_threshold, ann_retrieval, bounded_bucket):
      embedder block must be present in sidecar, with cpu_threads == 1, torch_threads == 1,
      and identical model_name and revision across runs (fail-closed, not gated on uses_embeddings).
    - For brute_force: must not have an active embedding model or thread pin in sidecar.
-6. Resume detection:
-   - Duplicate trial keys in raw.jsonl are flagged as resumed (re-run failed keys).
-   - Agreement between summary trial count and raw trial count.
-7. Failed trials and retries:
-   - Counted and explicitly listed, never imputed.
+6. Resume detection & duplicate-key validity:
+   - Any duplicate trial key where an earlier record was a success is rejected as corrupt
+     (harness skips successful keys on resume).
+   - Failed-then-succeeded keys are separated from still-failed keys.
+   - Runs with retried/recovered failures are flagged as PASS (resumed).
+7. External file hashes check:
+   - Optional --hashes argument verifies raw.jsonl, summary.csv, manifest.json, and
+     strategy_config.json sha256 against machine-written hash lists.
 8. Table T3 inventory:
    - Deterministic per-file and composite directory SHA256 hashing.
+   - Failed-then-succeeded and still-failed counts reported explicitly.
    - Output as formatted CSV.
 """
 
@@ -109,6 +115,73 @@ def compute_directory_sha256(run_dir: Path) -> str:
     return h.hexdigest()
 
 
+def parse_hashes_file(hashes_path: Path) -> Dict[str, str]:
+    """Parse sha256sum format file into lookup dictionary."""
+    hashes: Dict[str, str] = {}
+    with open(hashes_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                sha, filepath_str = parts[0], parts[1].lstrip("*").strip()
+                hashes[filepath_str] = sha
+                p = Path(filepath_str)
+                if len(p.parts) >= 2:
+                    hashes[f"{p.parts[-2]}/{p.parts[-1]}"] = sha
+                if len(p.parts) >= 3:
+                    hashes[f"{p.parts[-3]}/{p.parts[-2]}/{p.parts[-1]}"] = sha
+    return hashes
+
+
+def build_strategy_slug(strategy_name: str, config_dict: Dict[str, Any]) -> str:
+    """Build deterministic configuration slug matching canonical run directory naming.
+
+    Encodes ONLY the keyed config() fields in fixed order and spelling:
+      - embedding_threshold: theta<theta> (e.g. theta0.6)
+      - ann_retrieval: k<k>_ef<ef_search> (e.g. k10_ef128)
+      - bounded_bucket: smin<s_min>_smax<s_max>_nb<n_bits> (e.g. smin5_smax10_nb12)
+      - null / stub: k<k> (e.g. k1, k5)
+      - brute_force: "" (empty unless seed != 42)
+    Appends _seed<seed> whenever seed != 42 for strategies with a seed.
+    """
+    parts: List[str] = []
+    if strategy_name == "embedding_threshold":
+        parts.append(f"theta{config_dict.get('theta')}")
+    elif strategy_name == "ann_retrieval":
+        parts.append(f"k{config_dict.get('k')}")
+        parts.append(f"ef{config_dict.get('ef_search')}")
+    elif strategy_name == "bounded_bucket":
+        parts.append(f"smin{config_dict.get('s_min')}")
+        parts.append(f"smax{config_dict.get('s_max')}")
+        nb = config_dict.get("n_bits", 12)
+        parts.append(f"nb{nb}")
+    elif strategy_name == "null":
+        parts.append(f"k{config_dict.get('k')}")
+    elif strategy_name == "stub":
+        k_val = config_dict.get("top_k", config_dict.get("k"))
+        parts.append(f"k{k_val}")
+    elif strategy_name == "brute_force":
+        pass
+    else:
+        raise ValueError(f"Unknown strategy for slug derivation: '{strategy_name}'")
+
+    if "seed" in config_dict and config_dict["seed"] != 42:
+        parts.append(f"seed{config_dict['seed']}")
+
+    return "_".join(parts)
+
+
+def derive_expected_run_id(mode: str, strategy_name: str, config_dict: Dict[str, Any]) -> str:
+    """Derive canonical run ID `<mode>_<strategy>` or `<mode>_<strategy>_<slug>`."""
+    base_mode = "accuracy" if mode in ("accuracy", "accuracy_dsa") else mode
+    slug = build_strategy_slug(strategy_name, config_dict)
+    if slug:
+        return f"{base_mode}_{strategy_name}_{slug}"
+    return f"{base_mode}_{strategy_name}"
+
+
 def get_planned_call_bound(strategy: str, config: Dict[str, Any], mode: str) -> int:
     """Derive planned upper bound on LLM calls strictly from strategy and config.
 
@@ -179,10 +252,11 @@ def parse_sidecar(sidecar_path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def parse_raw_jsonl(raw_path: Path) -> Tuple[List[Dict[str, Any]], bool, Dict[str, int]]:
-    """Parse raw.jsonl, tracking line order, duplicate keys, and per-key counts."""
+def parse_raw_jsonl(raw_path: Path) -> Tuple[List[Dict[str, Any]], bool, Dict[str, int], Dict[str, List[Dict[str, Any]]]]:
+    """Parse raw.jsonl, tracking line order, duplicate keys, per-key counts, and record history."""
     records = []
     key_counts: Dict[str, int] = {}
+    key_history: Dict[str, List[Dict[str, Any]]] = {}
     has_duplicates = False
     with open(raw_path, "r", encoding="utf-8") as f:
         for idx, line in enumerate(f):
@@ -194,8 +268,9 @@ def parse_raw_jsonl(raw_path: Path) -> Tuple[List[Dict[str, Any]], bool, Dict[st
             key_counts[k] = key_counts.get(k, 0) + 1
             if key_counts[k] > 1:
                 has_duplicates = True
+            key_history.setdefault(k, []).append(rec)
             records.append(rec)
-    return records, has_duplicates, key_counts
+    return records, has_duplicates, key_counts, key_history
 
 
 def parse_summary_csv(csv_path: Path) -> List[Dict[str, str]]:
@@ -320,7 +395,10 @@ def recompute_metrics(records: List[Dict[str, Any]], mode: str) -> Dict[str, Dic
     return recomputed
 
 
-def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]:
+def validate_single_run(
+    run_dir: Path,
+    expected_hashes: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, List[str], Dict[str, Any]]:
     """Validate all artifacts in a single run directory against Phase 4 Section 2 requirements."""
     errors: List[str] = []
     info: Dict[str, Any] = {"run_dir": str(run_dir.name)}
@@ -348,6 +426,35 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
     info["raw_sha256"] = compute_file_sha256(raw_p)
     info["summary_sha256"] = compute_file_sha256(summary_p)
     info["dir_sha256"] = compute_directory_sha256(run_dir)
+
+    # Optional hashes list comparison (--hashes FILE)
+    if expected_hashes is not None:
+        for p, name in [
+            (manifest_p, "manifest.json"),
+            (sidecar_p, "strategy_config.json"),
+            (raw_p, "raw.jsonl"),
+            (summary_p, "summary.csv"),
+        ]:
+            lookup_keys = [
+                str(p.resolve()),
+                str(p),
+                f"{run_dir.name}/{name}",
+                f"results/{run_dir.name}/{name}",
+            ]
+            matched_hash = None
+            for cand in lookup_keys:
+                if cand in expected_hashes:
+                    matched_hash = expected_hashes[cand]
+                    break
+            if matched_hash is None:
+                errors.append(f"Missing expected hash entry for '{run_dir.name}/{name}' in hashes file")
+            else:
+                actual_sha = compute_file_sha256(p)
+                if actual_sha.lower() != matched_hash.lower():
+                    errors.append(
+                        f"File SHA256 mismatch for '{run_dir.name}/{name}': "
+                        f"computed '{actual_sha}' != expected '{matched_hash}'"
+                    )
 
     # 1. Manifest Checks (Fail closed)
     try:
@@ -381,6 +488,13 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
     info["libraries"] = libs
     info["libraries_hash"] = hashlib.sha256(json.dumps(libs, sort_keys=True).encode("utf-8")).hexdigest()
 
+    # Directory name vs manifest.json run_id
+    manifest_run_id = manifest.get("run_id")
+    if manifest_run_id != run_dir.name:
+        errors.append(
+            f"Directory name '{run_dir.name}' does not match manifest.json run_id '{manifest_run_id}'"
+        )
+
     # 2. Sidecar Checks (Fail closed)
     try:
         sidecar = parse_sidecar(sidecar_p)
@@ -399,6 +513,26 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
         errors.append("Sidecar strategy_config.json missing 'config' dictionary")
         strat_cfg = {}
     info["config"] = strat_cfg
+
+    if "mode" in sidecar and sidecar["mode"] != mode:
+        errors.append(
+            f"Sidecar strategy_config.json mode '{sidecar.get('mode')}' does not match manifest mode '{mode}'"
+        )
+
+    # Directory name vs canonical strategy/config slug
+    if strat != "unknown":
+        try:
+            expected_slug = derive_expected_run_id(mode or "unknown", strat, strat_cfg)
+            if run_dir.name != expected_slug:
+                errors.append(
+                    f"Directory name '{run_dir.name}' does not match expected strategy/config slug '{expected_slug}'"
+                )
+            if manifest_run_id != expected_slug:
+                errors.append(
+                    f"Manifest run_id '{manifest_run_id}' does not match expected strategy/config slug '{expected_slug}'"
+                )
+        except Exception as e:
+            errors.append(f"Failed to derive expected strategy/config slug for strategy '{strat}': {e}")
 
     embedder = sidecar.get("embedder")
     is_embedding_strategy = strat in ("embedding_threshold", "ann_retrieval", "bounded_bucket")
@@ -437,19 +571,44 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
 
     # 3. Raw Traces & Resume Detection
     try:
-        raw_records, has_duplicates, key_counts = parse_raw_jsonl(raw_p)
+        raw_records, has_duplicates, key_counts, key_history = parse_raw_jsonl(raw_p)
     except Exception as e:
         errors.append(f"Invalid JSON/format in raw.jsonl: {e}")
         return False, errors, info
 
-    is_resumed = has_duplicates
+    # Enforce duplicate-key validity: earlier record must NOT be a success
+    # (Confirmed from harness.py: _load_existing_keys skips successful keys on resume)
+    for k, history in key_history.items():
+        if len(history) > 1:
+            for idx_prev, prev_rec in enumerate(history[:-1]):
+                if prev_rec.get("status") == "success":
+                    errors.append(
+                        f"Invalid duplicate trial key '{k}': earlier record at index {idx_prev} "
+                        f"has status 'success' (harness skips successful keys on resume)"
+                    )
+
+    # Separate failed-then-succeeded keys from still-failed keys
+    failed_then_succeeded_keys: List[str] = []
+    still_failed_keys: List[str] = []
+    for k, history in key_history.items():
+        had_failure = any(r.get("status") in ("failed", "error") for r in history)
+        latest_status = history[-1].get("status")
+        if had_failure:
+            if latest_status == "success":
+                failed_then_succeeded_keys.append(k)
+            else:
+                still_failed_keys.append(k)
+        elif latest_status != "success":
+            still_failed_keys.append(k)
+
+    is_resumed = has_duplicates or bool(failed_then_succeeded_keys)
     info["resumed"] = is_resumed
 
-    # Track failed trials and retries
+    # Track failed trial details and retries
     failed_trials_list = []
     total_retries_count = 0
     for r in raw_records:
-        if r.get("status") == "failed":
+        if r.get("status") in ("failed", "error"):
             failed_trials_list.append({
                 "key": r.get("key"),
                 "error_type": r.get("error_type"),
@@ -457,18 +616,23 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
             })
         total_retries_count += r.get("retries", 0)
 
-    info["failed_trials_count"] = len(failed_trials_list)
+    info["failed_trials_count"] = len(still_failed_keys)
+    info["failed_then_succeeded_count"] = len(failed_then_succeeded_keys)
+    info["failed_then_succeeded_keys"] = sorted(failed_then_succeeded_keys)
+    info["still_failed_count"] = len(still_failed_keys)
+    info["still_failed_keys"] = sorted(still_failed_keys)
+    info["total_failed_records"] = len(failed_trials_list)
     info["failed_trials_details"] = failed_trials_list
     info["total_retries"] = total_retries_count
 
     # 4. Trial Count Enforcement (Derived per-group and total)
-    # Determine mode key for trial count checking
     trial_mode_key = mode
     unique_trial_keys = len(key_counts)
     if mode == "accuracy" and unique_trial_keys == 29:
         trial_mode_key = "accuracy_dsa"
 
     spec = PLANNED_TRIAL_COUNTS.get(trial_mode_key)
+    recomputed = {}
     if spec is None:
         errors.append(f"Unrecognized trial count mode: '{mode}'")
     else:
@@ -516,13 +680,16 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
         errors.append(f"Failed to parse summary.csv: {e}")
         summary_rows = []
 
-    # Consistency of trial counts in summary.csv vs raw
-    summary_trials_sum = sum(int(row.get("num_trials", 0)) for row in summary_rows)
-    if summary_trials_sum != unique_trial_keys:
-        errors.append(
-            f"Trial count disagreement between summary.csv ({summary_trials_sum}) "
-            f"and raw.jsonl unique keys ({unique_trial_keys})"
-        )
+    # Consistency of trial counts in summary.csv vs raw (safe int conversion)
+    try:
+        summary_trials_sum = sum(int(row.get("num_trials", 0)) for row in summary_rows)
+        if summary_trials_sum != unique_trial_keys:
+            errors.append(
+                f"Trial count disagreement between summary.csv ({summary_trials_sum}) "
+                f"and raw.jsonl unique keys ({unique_trial_keys})"
+            )
+    except ValueError as e:
+        errors.append(f"Invalid integer value in summary.csv num_trials: {e}")
 
     tol = 1e-4
     for s_row in summary_rows:
@@ -533,9 +700,15 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
 
         rec = recomputed[grp]
 
-        # Integer count comparisons
+        # Integer count comparisons (catching unhandled ValueError)
         for cnt_field in ["num_trials", "num_success", "num_failed", "n_with_retries", "llm_calls_sum"]:
-            s_val = int(s_row.get(cnt_field, 0))
+            try:
+                s_val = int(s_row.get(cnt_field, 0))
+            except ValueError as e:
+                errors.append(
+                    f"Invalid integer value '{s_row.get(cnt_field)}' for field '{cnt_field}' in summary.csv: {e}"
+                )
+                continue
             r_val = rec[cnt_field]
             if s_val != r_val:
                 errors.append(f"{cnt_field} mismatch for group '{grp}': summary={s_val} vs raw={r_val}")
@@ -543,21 +716,27 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
         # Timing comparisons (mean & median total_s)
         for t_field in ["total_s_mean", "total_s_median"]:
             if t_field in s_row:
-                s_val = float(s_row[t_field])
-                r_val = float(rec[t_field])
-                if not math.isclose(s_val, r_val, rel_tol=1e-3, abs_tol=0.01):
-                    errors.append(
-                        f"{t_field} mismatch for group '{grp}': summary={s_val:.4f} vs raw={r_val:.4f}"
-                    )
+                try:
+                    s_val = float(s_row[t_field])
+                    r_val = float(rec[t_field])
+                    if not math.isclose(s_val, r_val, rel_tol=1e-3, abs_tol=0.01):
+                        errors.append(
+                            f"{t_field} mismatch for group '{grp}': summary={s_val:.4f} vs raw={r_val:.4f}"
+                        )
+                except ValueError as e:
+                    errors.append(f"Invalid float value for '{t_field}' in summary.csv: {e}")
 
         # Mean calls
         if "llm_calls_mean" in s_row:
-            s_val = float(s_row["llm_calls_mean"])
-            r_val = float(rec["llm_calls_mean"])
-            if not math.isclose(s_val, r_val, abs_tol=tol):
-                errors.append(
-                    f"llm_calls_mean mismatch for group '{grp}': summary={s_val:.4f} vs raw={r_val:.4f}"
-                )
+            try:
+                s_val = float(s_row["llm_calls_mean"])
+                r_val = float(rec["llm_calls_mean"])
+                if not math.isclose(s_val, r_val, abs_tol=tol):
+                    errors.append(
+                        f"llm_calls_mean mismatch for group '{grp}': summary={s_val:.4f} vs raw={r_val:.4f}"
+                    )
+            except ValueError as e:
+                errors.append(f"Invalid float value for 'llm_calls_mean' in summary.csv: {e}")
 
         # Accuracy metrics in accuracy mode
         if mode in ("accuracy", "accuracy_dsa"):
@@ -571,11 +750,14 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
                     if r_val is not None:
                         errors.append(f"{acc_field} mismatch for '{grp}': summary has None/empty, raw has {r_val}")
                 else:
-                    s_val = float(s_str)
-                    if r_val is None:
-                        errors.append(f"{acc_field} mismatch for '{grp}': summary has {s_val}, raw has None")
-                    elif not math.isclose(s_val, r_val, abs_tol=tol):
-                        errors.append(f"{acc_field} mismatch for '{grp}': summary={s_val:.6f} vs raw={r_val:.6f}")
+                    try:
+                        s_val = float(s_str)
+                        if r_val is None:
+                            errors.append(f"{acc_field} mismatch for '{grp}': summary has {s_val}, raw has None")
+                        elif not math.isclose(s_val, r_val, abs_tol=tol):
+                            errors.append(f"{acc_field} mismatch for '{grp}': summary={s_val:.6f} vs raw={r_val:.6f}")
+                    except ValueError as e:
+                        errors.append(f"Invalid float value for '{acc_field}' in summary.csv: {e}")
 
     info["trials"] = unique_trial_keys
     info["total_records"] = len(raw_records)
@@ -583,37 +765,46 @@ def validate_single_run(run_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]
     return is_valid, errors, info
 
 
-def validate_all_runs(results_dir: Path) -> Tuple[bool, List[Dict[str, Any]], str]:
+def validate_all_runs(
+    results_dir: Path,
+    src_diff_clean: bool = False,
+    hashes_path: Optional[Path] = None,
+) -> Tuple[bool, List[Dict[str, Any]], str]:
     """Validate all run directories in results_dir and enforce cross-run uniformity.
 
     Returns:
         (overall_passed, results_list, table_t3_csv_string)
     """
-    run_dirs = sorted([d for d in results_dir.iterdir() if d.is_dir() and (d / "manifest.json").exists()])
+    if (results_dir / "manifest.json").is_file():
+        run_dirs = [results_dir]
+    else:
+        run_dirs = sorted([d for d in results_dir.iterdir() if d.is_dir() and (d / "manifest.json").exists()])
     if not run_dirs:
         return False, [], "No run directories found"
 
+    expected_hashes: Optional[Dict[str, str]] = None
+    if hashes_path is not None:
+        if not hashes_path.is_file():
+            return False, [], f"Specified hashes file does not exist: {hashes_path}"
+        expected_hashes = parse_hashes_file(hashes_path)
+
     overall_passed = True
-    base_commit: Optional[str] = None
     base_libs: Optional[Dict[str, str]] = None
     base_embedder_model: Optional[str] = None
     base_embedder_revision: Optional[str] = None
     base_embedder_run: Optional[str] = None
 
+    mode_commits: Dict[str, Set[str]] = {}
     run_results: List[Dict[str, Any]] = []
 
     for r_dir in run_dirs:
-        passed, errors, info = validate_single_run(r_dir)
+        passed, errors, info = validate_single_run(r_dir, expected_hashes=expected_hashes)
 
-        # Cross-run checks
+        # Track git_commit by mode
+        m = info.get("mode") or "unknown"
         commit = info.get("git_commit")
-        if base_commit is None:
-            base_commit = commit
-        elif commit and commit != base_commit:
-            errors.append(
-                f"Cross-run git_commit mismatch: first run had '{base_commit}', this run has '{commit}'"
-            )
-            passed = False
+        if commit:
+            mode_commits.setdefault(m, set()).add(commit)
 
         libs = info.get("libraries")
         if base_libs is None:
@@ -650,11 +841,35 @@ def validate_all_runs(results_dir: Path) -> Tuple[bool, List[Dict[str, Any]], st
         info["errors"] = errors
         run_results.append(info)
 
+    # 1. Intra-mode commit checks: git_commit must be identical within each mode
+    for m, commits in mode_commits.items():
+        if len(commits) > 1:
+            for r in run_results:
+                if r.get("mode") == m:
+                    r["errors"].append(
+                        f"Intra-mode git_commit mismatch within mode '{m}': found multiple commits {sorted(commits)}"
+                    )
+                    r["passed"] = False
+            overall_passed = False
+
+    # 2. Across modes commit check: differing commits require --src-diff-clean
+    all_commits = set.union(*mode_commits.values()) if mode_commits else set()
+    if len(all_commits) > 1:
+        if not src_diff_clean:
+            for r in run_results:
+                r["errors"].append(
+                    f"Cross-mode git_commit mismatch: commits differ across modes "
+                    f"{ {mod: sorted(cs) for mod, cs in mode_commits.items()} }. "
+                    f"Must pass --src-diff-clean to accept differing commits across modes."
+                )
+                r["passed"] = False
+            overall_passed = False
+
     # Generate Table T3 CSV
     t3_rows = []
     fieldnames = [
         "run", "strategy", "config", "mode", "commit", "libraries_hash",
-        "trials", "calls", "failed", "retries", "status",
+        "trials", "calls", "failed", "failed_then_succeeded", "still_failed", "retries", "status",
         "manifest_sha256", "config_sha256", "raw_sha256", "summary_sha256", "dir_sha256"
     ]
     for r in run_results:
@@ -668,7 +883,9 @@ def validate_all_runs(results_dir: Path) -> Tuple[bool, List[Dict[str, Any]], st
             "libraries_hash": r.get("libraries_hash", ""),
             "trials": r.get("trials", 0),
             "calls": r.get("total_calls", 0),
-            "failed": r.get("failed_trials_count", 0),
+            "failed": r.get("still_failed_count", 0),
+            "failed_then_succeeded": r.get("failed_then_succeeded_count", 0),
+            "still_failed": r.get("still_failed_count", 0),
             "retries": r.get("total_retries", 0),
             "status": status_label,
             "manifest_sha256": r.get("manifest_sha256", ""),
@@ -692,6 +909,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate experimental run directories.")
     parser.add_argument("results_dir", type=Path, help="Path to results directory containing run folders")
     parser.add_argument("--t3-csv", type=Path, default=None, help="Optional output path to save Table T3 CSV")
+    parser.add_argument(
+        "--src-diff-clean",
+        action="store_true",
+        default=False,
+        help="Accept differing git commits across modes if src, scripts/run_experiment.py, and pyproject.toml have zero diff against 3323bfb.",
+    )
+    parser.add_argument(
+        "--hashes",
+        type=Path,
+        default=None,
+        help="Optional path to machine-written sha256 hashes list to compare against.",
+    )
     args = parser.parse_args()
 
     results_dir = args.results_dir.resolve()
@@ -699,13 +928,24 @@ def main() -> int:
     print(f"RUN VALIDATION GATE: {results_dir}")
     print("=" * 80)
 
-    overall_passed, run_results, t3_csv = validate_all_runs(results_dir)
+    overall_passed, run_results, t3_csv = validate_all_runs(
+        results_dir,
+        src_diff_clean=args.src_diff_clean,
+        hashes_path=args.hashes,
+    )
 
     for r in run_results:
         status_label = "PASS (resumed)" if (r.get("passed") and r.get("resumed")) else ("PASS" if r.get("passed") else "FAIL")
         print(f"[{status_label}] {r.get('run_dir')}")
         print(f"       Strategy: {r.get('strategy')} | Mode: {r.get('mode')} | Commit: {str(r.get('git_commit'))[:7]} | git_dirty: {r.get('git_dirty')}")
-        print(f"       Calls:    {r.get('total_calls')} / {r.get('call_bound', 'N/A')} bound | Trials: {r.get('trials')} (failed={r.get('failed_trials_count')}, retries={r.get('total_retries')})")
+        print(
+            f"       Calls:    {r.get('total_calls')} / {r.get('call_bound', 'N/A')} bound | "
+            f"Trials: {r.get('trials')} (failed_then_succeeded={r.get('failed_then_succeeded_count')}, still_failed={r.get('still_failed_count')}, retries={r.get('total_retries')})"
+        )
+        if r.get("failed_then_succeeded_keys"):
+            print(f"       Failed-then-succeeded keys ({len(r['failed_then_succeeded_keys'])}): {', '.join(r['failed_then_succeeded_keys'])}")
+        if r.get("still_failed_keys"):
+            print(f"       Still-failed keys ({len(r['still_failed_keys'])}): {', '.join(r['still_failed_keys'])}")
         print(f"       SHA256:   {r.get('dir_sha256')}")
         if not r.get("passed"):
             for err in r.get("errors", []):
