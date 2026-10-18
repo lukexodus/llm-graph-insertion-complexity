@@ -105,3 +105,8 @@ Every figure is saved as vector (PDF) and as the CSV it was drawn from. Fonts, c
 1. **Clarification of Primary Accuracy Columns (§3.1)**: Confirmed against thesis Section 3.3.1; the parenthetical check note is settled (non-sensitivity columns are primary; sensitivity variants and unjudged totals are isolated in T4).
 2. **Resumed Run Accounting (§2)**: Clarified that a resumed run is identified by duplicate trial keys in `raw.jsonl` (failed trial record followed by retried success record); failed trials and retries are tracked directly without imputation.
 
+### Amendment 2 (2026-10-19):
+1. **Commit gate (§2)**: `git_commit` must be identical within a mode; across modes, accept differing commits only when a documented argument (e.g. `--src-diff-clean`, with the zero-diff command output of `src`, `scripts/run_experiment.py` and `pyproject.toml` against `3323bfb`, supplied by Luke) is given; otherwise fail closed.
+2. **Directory name and configuration slug (§2)**: Directory name must match `manifest.json` `run_id` and the canonical strategy/config slug derived from `strategy_config.json`; mismatch fails.
+3. **Duplicate keys and failure accounting (§2)**: Confirmed from `harness.py` that successful keys are skipped on resume; a duplicate trial key whose earlier record is a success fails validation as corrupt. Failed-then-succeeded keys are listed separately from still-failed keys, and Table T3 reports both counts.
+
