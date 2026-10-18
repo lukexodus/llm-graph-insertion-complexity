@@ -4,6 +4,8 @@
 │       └── cs_concept_names.json
 ├── docs
 │   ├── context
+│   │   ├── adviser-briefing-d1-d6.md
+│   │   ├── analysis-plan.md
 │   │   ├── apc-bundle-quickref.md
 │   │   ├── apc-handoff-template.md
 │   │   ├── complete-context.md
@@ -19,6 +21,7 @@
 │   │   ├── to-be-shared
 │   │   │   ├── llm-graph-insertion-complexity-thesis.md
 │   │   │   └── thesis-orientation.md
+│   │   ├── ANALYSIS-001-validator-report.md
 │   │   ├── DATA-001-gemini-verify-file-formats.md
 │   │   ├── DATA-002-gemini-mekg-directionality.md
 │   │   ├── DATA-003-gemini-source-text-evidence.md
@@ -75,6 +78,7 @@
 │   │   ├── INFRA-009-gemini-cpu-thread-pinning.md
 │   │   ├── INFRA-010-gemini-import-order-and-manifest-libraries.md
 │   │   ├── INFRA-011-gemini-closeout.md
+│   │   ├── RUN-001-accuracy-stage-docs.md
 │   │   ├── STRAT-001-A-claude-code.md
 │   │   ├── STRAT-001-gemini-brute-force.md
 │   │   ├── STRAT-001-review-opencode.md
@@ -166,6 +170,9 @@
 │   ├── STRAT-004_code.patch
 │   └── STRAT-004.patch
 ├── scripts
+│   ├── analysis
+│   │   ├── __init__.py
+│   │   └── validate_runs.py
 │   ├── apc-bundle.sh
 │   ├── generate_name_pool.py
 │   ├── name_pool_supervisor.py
@@ -200,6 +207,7 @@
 │   ├── controllable_embedder.py
 │   ├── __init__.py
 │   ├── stub_prompt_adapter.py
+│   ├── test_analysis_validate_runs.py
 │   ├── test_ann_retrieval_strategy.py
 │   ├── test_apc_bundle.sh
 │   ├── test_bounded_bucket_strategy.py
