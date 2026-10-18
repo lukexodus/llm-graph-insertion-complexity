@@ -66,7 +66,11 @@ Status: **in-progress** (unblocked following Phase 2 completion)
 
 ## Phase 4 — Analysis & Writeup
 
-Status: **not started** (blocked on Phase 3)
+Status: **in-progress**
+
+| ID | Task | Status | Notes / Report |
+| --- | --- | --- | --- |
+| ANALYSIS-001 | Implement independent run-validation gate (`scripts/analysis/validate_runs.py`), unit and mutation test suite, and Table T3 generation ([D-80]). | **done** | Implemented by Gemini; standard library only; fail-closed gate covering all 8 checks (manifest fields, directory slugs, trial counts, bound limits keyed by strategy/config, summary recomputation with `statistics.median`, thread pins, brute force embedder absence, resume detection via duplicate trial keys). 17 synthetic unit/mutation tests in `tests/test_analysis_validate_runs.py`. Passed full repository test suite (716 passed, 3 skipped). See report [`docs/reports/ANALYSIS-001-validator-report.md`](file:///home/lukexodus/projects/llm-graph-insertion-complexity/docs/reports/ANALYSIS-001-validator-report.md). |
 
 ## Thesis document status (separate track from the code work above)
 
