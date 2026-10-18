@@ -98,3 +98,10 @@ Every figure is saved as vector (PDF) and as the CSV it was drawn from. Fonts, c
 1. Luke confirms D1 to D6 as written in Section 0; the adviser confirms D2 and D3.
 2. The plan is committed under `docs/` and its sha256 is recorded in a decision-log entry **before** any sweep `raw.jsonl` is opened.
 3. Later changes are made only by a dated amendment entry that states what changed and why, never by editing the frozen text.
+
+## 8. Dated Amendments
+
+### Amendment 1 (2026-10-19):
+1. **Clarification of Primary Accuracy Columns (§3.1)**: Confirmed against thesis Section 3.3.1; the parenthetical check note is settled (non-sensitivity columns are primary; sensitivity variants and unjudged totals are isolated in T4).
+2. **Resumed Run Accounting (§2)**: Clarified that a resumed run is identified by duplicate trial keys in `raw.jsonl` (failed trial record followed by retried success record); failed trials and retries are tracked directly without imputation.
+
