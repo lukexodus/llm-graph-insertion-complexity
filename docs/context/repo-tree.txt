@@ -16,11 +16,17 @@
 │   ├── decisions
 │   │   └── decision-log.md
 │   ├── guide
+│   │   ├── COLLABORATOR-GUIDE.md
 │   │   └── Name-pool generation runbook.md
+│   ├── prompts
+│   │   ├── STANDALONE-ADOPTION-PROMPT.md
+│   │   └── STANDALONE-PROMPT-TEMPLATE.md
 │   ├── reports
 │   │   ├── to-be-shared
 │   │   │   ├── llm-graph-insertion-complexity-thesis.md
 │   │   │   └── thesis-orientation.md
+│   │   ├── ANALYSIS-001-F-gemini-report.md
+│   │   ├── ANALYSIS-001-G-gemini-review.md
 │   │   ├── ANALYSIS-001-R-gemini-review.md
 │   │   ├── ANALYSIS-001-validator-report.md
 │   │   ├── DATA-001-gemini-verify-file-formats.md
@@ -98,6 +104,7 @@
 │   │   ├── STRAT-004-gemini-bounded-bucket.md
 │   │   ├── STRAT-004-R2-gemini.md
 │   │   ├── STRAT-004-R-gemini.md
+│   │   ├── TASK-TEMPLATE.md
 │   │   └── TOOL-001-claude-code-apc-bundle.md
 │   ├── rrl
 │   │   └── catalogue.md
@@ -177,10 +184,13 @@
 │   │   └── validate_runs.py
 │   ├── apc-bundle.sh
 │   ├── generate_name_pool.py
+│   ├── manage-decisions.py
 │   ├── name_pool_supervisor.py
 │   ├── pilot_dsa_zero_shot.py
 │   ├── README.md
-│   └── run_experiment.py
+│   ├── run_experiment.py
+│   ├── task-worktree.sh
+│   └── validate-report.py
 ├── src
 │   └── graph_insertion
 │       ├── strategies

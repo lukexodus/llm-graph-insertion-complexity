@@ -229,6 +229,32 @@ else
   fail_count=$((fail_count + 1))
 fi
 
+# --- Test Case 7 ---
+echo "Running Case 7: --tokens computes estimated tokens and exits 0 without archive..."
+c7_fail=0
+set +e
+tokens_out=$(./scripts/apc-bundle.sh core --tokens 2>&1)
+tokens_rc=$?
+set -e
+
+if [[ $tokens_rc -ne 0 ]]; then
+  echo "  FAIL: Expected exit code 0 for --tokens, got $tokens_rc" >&2
+  c7_fail=1
+fi
+
+if ! echo "$tokens_out" | grep -q "Estimated token count for profile 'core':"; then
+  echo "  FAIL: --tokens output missing expected format string: $tokens_out" >&2
+  c7_fail=1
+fi
+
+if [[ $c7_fail -eq 0 ]]; then
+  echo "PASS: Case 7 (--tokens computed tokens and exited 0)"
+  pass_count=$((pass_count + 1))
+else
+  echo "FAIL: Case 7 (--tokens failed)"
+  fail_count=$((fail_count + 1))
+fi
+
 echo ""
 echo "=== Test Results: $pass_count passed, $fail_count failed ==="
 

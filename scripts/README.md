@@ -53,6 +53,7 @@ Usage: scripts/apc-bundle.sh [PROFILE] [OPTIONS]
 
 - **`[PROFILE]`** *(positional)*: Name of the profile to package (`core`, `strat`, `strat-design`, `fix`, `full`). Defaults to `core`.
 - **`--list`**: Prints all resolved files and their sizes in bytes to `stdout` and exits `0` without creating an archive.
+- **`--tokens`**: Computes and prints estimated token count of resolved files in the bundle (~1 token per 4 chars) and exits `0` without creating an archive.
 - **`--discover`**: Searches `src/` for definitions of core symbols (`Shortlist`, `MeteredEmbedder`, `ConceptGraph`, `FakeEmbedder`, `embed_text`, `insert_node`, `candidate_upper_bound`) and prints matching files. Does not modify or create an archive.
 - **`--add PATH`** *(repeatable)*: Adds an ad hoc file to the bundle. Path must exist, be a regular file, and pass secret guards.
 - **`--exclude GLOB`** *(repeatable)*: Excludes files matching a glob or filename from the bundle (e.g. `--exclude 'AGENTS.md'` or `--exclude '*.py'`).
@@ -297,4 +298,71 @@ done
 - Recorded in `strategy_config.json` sidecar embedder block as `"cpu_threads": 1`. Resume guard checks for matching `cpu_threads` in existing sidecars (legacy-tolerant).
 - Consequence: Strategies 2, 3, and 4 all execute CPU inference single-threaded (~24 ms per embedding on the reference host), so embedding times are uniform across strategies and independent of import order (single-threaded by protocol).
 - The diagnostic snippet does not need to be re-run.
+
+---
+
+## Operational Tooling
+
+In addition to `apc-bundle.sh`, this directory provides workflow automation scripts that enforce the APC + Local Agent operational protocol:
+
+### `task-worktree.sh` — Worktree Lifecycle Helper
+
+Enforces worktree isolation when running multiple local agents or tasks in parallel.
+
+```bash
+# Create an isolated task worktree and branch
+./scripts/task-worktree.sh start ANALYSIS-002
+
+# Inspect active worktrees
+./scripts/task-worktree.sh list
+
+# Review status inside a worktree
+./scripts/task-worktree.sh status ANALYSIS-002
+
+# Generate clean git diff from a worktree
+./scripts/task-worktree.sh diff ANALYSIS-002
+
+# Validate worktree state before operator commit
+./scripts/task-worktree.sh handoff ANALYSIS-002
+
+# Clean up worktree after merge
+./scripts/task-worktree.sh remove ANALYSIS-002
+```
+
+### `validate-report.py` — Report Linter & Verification
+
+Verifies that local agent task reports conform to the required schema, match `docs/tasks/status.md`, link a patch file in `patch/`, and contain valid unified git diffs.
+
+```bash
+# Validate the most recently written report:
+./scripts/validate-report.py
+
+# Validate a specific report file:
+./scripts/validate-report.py docs/reports/DATA-005-gemini-sample-extraction.md
+
+# Validate with strict patch file enforcement:
+./scripts/validate-report.py docs/reports/DATA-005-gemini-sample-extraction.md --require-patch
+
+# Validate all reports in docs/reports/:
+./scripts/validate-report.py --all
+```
+
+### `manage-decisions.py` — Decision ID Allocator & Log Inspector
+
+Prevents decision ID collisions when multiple parallel worktrees operate concurrently.
+
+```bash
+# Show next available Decision ID:
+./scripts/manage-decisions.py next
+
+# List all recorded decision IDs:
+./scripts/manage-decisions.py list
+
+# Check if a specific ID is available:
+./scripts/manage-decisions.py check --id 84
+
+# Reserve an ID in decision-log.md for an upcoming task:
+./scripts/manage-decisions.py reserve --title "Select evaluation benchmark configuration"
+```
+
 

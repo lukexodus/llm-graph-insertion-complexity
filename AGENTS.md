@@ -117,33 +117,44 @@ mostly-unchanged text.
   These documents are the project's shared memory; an uncorrected error in
   them will mislead every future agent and APC session that reads them.
 
-## After finishing any task
+## After finishing any task (The 4 Unit-of-Work Deliverables)
 
-**Write a report file.** This is not optional, even for a task that found
-nothing noteworthy — "nothing noteworthy" is itself useful information to a
-future session that might otherwise re-check the same thing.
+For every completed unit of work, you must produce four concrete deliverables:
 
-- **Location:** `docs/reports/<task-id>-<agent-name>-<short-slug>.md`
-  - `<task-id>` matches the ID in `docs/tasks/status.md` (e.g., `DATA-001`)
-  - `<agent-name>` is whichever of `claude-code`, `gemini`, `opencode` you are
-  - `<short-slug>` is a few words, hyphenated, describing the task
-  - Example: `docs/reports/DATA-001-claude-code-verify-file-formats.md`
-- **Never append to another agent's report file or to a shared log.** One
-  file per completed task, written once by the agent that did it. If you
-  revisit a task later, write a new report file rather than editing an old
-  one, and reference the earlier one by filename.
-- **What to include:** what you were asked to do, what you actually did,
-  what you found (including anything that contradicted an existing
-  assumption), and anything explicitly flagged for the APC AI's attention
-  or a future agent's attention.
-- **Update `docs/tasks/status.md`** to reflect your task's new status
-  (done / blocked / needs-followup) as part of finishing — don't leave the
-  tracker stale.
-- **If you made a non-trivial decision** (chose a library, chose a
-  threshold, chose a data format to standardize on) that isn't already in
-  `docs/decisions/decision-log.md`, add an entry. Keep it to the same
-  format as existing entries: decision, one-line reasoning, what it
-  affects.
+1. **Commit your changes:**
+   - Stage and commit all task changes on your task branch/worktree with a concise, conventional message:
+     ```bash
+     git add <modified/new files>
+     git commit -m "<type>(<task-id>): <concise description of work>"
+     ```
+   - Never leave your worktree or branch with uncommitted changes upon task completion.
+
+2. **Generate the patch file (in `patch/`):**
+   - Export a standalone patch file representing the unit of work:
+     ```bash
+     mkdir -p patch
+     git diff HEAD~1 > patch/<task-id>-<agent-name>-<short-slug>.patch
+     ```
+   - This provides an inspectable, portable patch file stored directly in the repository.
+
+3. **Write the report file (`docs/reports/`):**
+   - **Location:** `docs/reports/<task-id>-<agent-name>-<short-slug>.md`
+     - `<task-id>` matches the ID in `docs/tasks/status.md` (e.g., `DATA-001`)
+     - `<agent-name>` is whichever of `claude-code`, `gemini`, `opencode` you are
+     - `<short-slug>` is a few words, hyphenated, describing the task
+     - Example: `docs/reports/DATA-001-claude-code-verify-file-formats.md`
+   - **Never append to another agent's report file or to a shared log.** One file per completed task, written once by the agent that did it. If you revisit a task later, write a new report file rather than editing an old one, and reference the earlier one by filename.
+   - **What to include:** Executive summary, implementation details, test outputs/verification, unified git diff, patch file reference, and items flagged for the APC AI's attention or a future agent's attention.
+   - **Update `docs/tasks/status.md`** to reflect your task's new status (`done`, `blocked`, or `needs-followup` / `needs-review`) with a link to your report file.
+   - **Record decisions in `docs/decisions/decision-log.md`** under the reserved ID. If an unplanned non-trivial decision was made, allocate a new ID using `./scripts/manage-decisions.py --next`.
+   - **Validate your report:** Run `./scripts/validate-report.py docs/reports/<your-report>.md --require-patch` to ensure your report file passes structural checks, diff checks, and status alignment before handoff.
+
+4. **Build a fresh bundle if needed:**
+   - If this task modified shared contracts, context documents, multiple files, or if requested by the APC AI, package an updated snapshot:
+     ```bash
+     ./scripts/apc-bundle.sh [profile]
+     ```
+   - This ensures the external APC AI can be refreshed with live file state upon receiving the handoff.
 
 ## Recommended (not mandatory) agent-role split
 
@@ -175,3 +186,9 @@ them to point you to specific files in this repo (especially
 than re-explaining everything inline. If a prompt seems to assume context
 you don't have and can't find in this repo, say so in your report rather
 than guessing.
+
+**Prompt archiving:** Whenever prompt files are provided or detected (e.g.
+deposited in `~/Downloads` or pasted into chat), immediately move/save them into
+`docs/prompts/<TASK-ID>-PROMPT.md` so they remain permanent reference
+artifacts within the repository.
+

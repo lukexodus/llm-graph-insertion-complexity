@@ -30,6 +30,7 @@ Profiles are bash arrays inside the script and can be edited (comment/uncomment 
 ## Options
 
 - `--list` — print resolved files + byte sizes, no archive (use to preview)
+- `--tokens` — print estimated token count of resolved files (~1 token per 4 chars), no archive
 - `--add PATH` — include an ad hoc file (repeat per file)
 - `--exclude GLOB` — drop a file by path or filename (repeatable)
 - `--with-reports` — include active `OPTIONAL_REPORTS` entries

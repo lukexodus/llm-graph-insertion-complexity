@@ -89,6 +89,7 @@ Options:
   --add PATH        Add an ad hoc file (repeatable)
   --with-reports    Include active entries from OPTIONAL_REPORTS
   --list            Print resolved file list with sizes and exit 0
+  --tokens          Estimate token count (~4 chars/token heuristic) and exit 0
   --discover        Print files defining core symbols and exit 0
   -h, --help        Show this help message and exit
 EOF
@@ -137,6 +138,7 @@ is_secret_or_forbidden() {
 PROFILE=""
 WITH_REPORTS=0
 LIST_ONLY=0
+TOKENS_ONLY=0
 DISCOVER_ONLY=0
 EXCLUDES=()
 ADDS=()
@@ -149,6 +151,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --list)
     LIST_ONLY=1
+    shift
+    ;;
+  --tokens)
+    TOKENS_ONLY=1
     shift
     ;;
   --discover)
@@ -341,6 +347,19 @@ if [[ $LIST_ONLY -eq 1 ]]; then
   done
   exit 0
 fi
+
+# If --tokens mode, estimate tokens and exit 0
+if [[ $TOKENS_ONLY -eq 1 ]]; then
+  total_chars=0
+  for f in "${RESOLVED_FILES[@]}"; do
+    chars=$(wc -m <"$f" | tr -d ' ')
+    total_chars=$((total_chars + chars))
+  done
+  est_tokens=$((total_chars / 4))
+  echo "Estimated token count for profile '$PROFILE': ~${est_tokens} tokens (${total_chars} characters across ${#RESOLVED_FILES[@]} files)."
+  exit 0
+fi
+
 
 # Packaging
 OUT="apc-bundle-${PROFILE}-$(date +%Y%m%d-%H%M).tar.gz"
