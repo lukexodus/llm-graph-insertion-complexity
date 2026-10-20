@@ -17,10 +17,13 @@ try:
     from .style import apply_thesis_style, export_figure, STRATEGY_PALETTE, STRATEGY_LABELS, STRATEGY_MARKERS
     from .stats import evaluate_dominance
     from .bootstrap import compute_series_stats
+    from .tables import export_markdown_table, write_csv
 except ImportError:
     from style import apply_thesis_style, export_figure, STRATEGY_PALETTE, STRATEGY_LABELS, STRATEGY_MARKERS
     from stats import evaluate_dominance
     from bootstrap import compute_series_stats
+    from tables import export_markdown_table, write_csv
+
 
 
 def plot_f4_accuracy_comparison(
@@ -236,7 +239,9 @@ def plot_f6_cost_vs_accuracy(
 ) -> None:
     """Figure F6: Cost beside accuracy for each strategy and corpus (calls against F1).
 
-    Evaluates Pareto dominance mechanics per Decisions D3 and D5.
+    Evaluates Pareto dominance mechanics per Decisions D3, D5, and Rule R2.
+    Pairwise labels are written to F6_dominance.csv and .md (not into the figure CSV)
+    and rendered in a text box on each panel.
     """
     apply_thesis_style()
 
@@ -249,7 +254,8 @@ def plot_f6_cost_vs_accuracy(
         return
 
     fig, axes = plt.subplots(1, len(corpora), figsize=(7.0 * len(corpora), 5.5), squeeze=False)
-    csv_data = []
+    csv_data: List[Dict[str, Any]] = []
+    dominance_rows: List[Dict[str, Any]] = []
 
     for c_idx, corpus in enumerate(corpora):
         ax = axes[0][c_idx]
@@ -285,20 +291,35 @@ def plot_f6_cost_vs_accuracy(
                 "f1": f1,
             })
 
-        # Evaluate dominance pairs
+        # Evaluate dominance pairs per Rule R2
         strat_names = list(points.keys())
+        text_lines: List[str] = []
         for i in range(len(strat_names)):
             for j in range(i + 1, len(strat_names)):
                 s_a, s_b = strat_names[i], strat_names[j]
                 dom = evaluate_dominance(points[s_a], points[s_b])
-                csv_data.append({
+                dominance_rows.append({
                     "corpus": corpus,
-                    "strategy": f"{s_a} vs {s_b}",
-                    "variant": "dominance_evaluation",
-                    "calls": 0.0,
-                    "f1": 0.0,
-                    "dominance_result": dom,
+                    "strategy_a": s_a,
+                    "strategy_b": s_b,
+                    "calls_a": points[s_a]["calls"],
+                    "calls_b": points[s_b]["calls"],
+                    "f1_a": points[s_a]["f1"],
+                    "f1_b": points[s_b]["f1"],
+                    "f1_diff": points[s_a]["f1"] - points[s_b]["f1"],
+                    "dominance": dom,
                 })
+                text_lines.append(f"{s_a} vs {s_b}: {dom}")
+
+        if text_lines:
+            ax.text(
+                0.03, 0.97, "\n".join(text_lines),
+                transform=ax.transAxes,
+                fontsize=7,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.85, edgecolor="gray"),
+            )
 
         ax.set_ylim(0, 1.05)
         ax.legend(loc="lower right", fontsize=8)
@@ -306,6 +327,19 @@ def plot_f6_cost_vs_accuracy(
     fig.tight_layout()
     export_figure(fig, output_dir / "F6_cost_vs_accuracy_dominance", csv_data)
     plt.close(fig)
+
+    fieldnames = [
+        "corpus", "strategy_a", "strategy_b", "calls_a", "calls_b",
+        "f1_a", "f1_b", "f1_diff", "dominance"
+    ]
+    write_csv(output_dir / "F6_dominance.csv", dominance_rows, fieldnames=fieldnames)
+    export_markdown_table(
+        dominance_rows, output_dir / "F6_dominance.md",
+        "Figure F6: Pairwise Pareto Dominance Summary (D5 / D3 / R2)",
+        headers=fieldnames,
+    )
+
+
 
 
 def plot_f1_calls_scaling(
@@ -451,14 +485,16 @@ def plot_f2_wallclock_scaling(
 def plot_f3_premise_check(
     t2_rows: List[Dict[str, Any]],
     output_dir: Path,
-    k_cap: int = 10,
-    smax_cap: int = 10,
+    k_cap: int,
+    smax_cap: int,
 ) -> None:
     """Figure F3: Premise check: calls and total_s vs n for Strategies 3 and 4
-
     on a linear y-axis, with the cap (k, s_max) drawn as a reference line (plan line 77).
     Two panels: Left panel = LLM calls vs n; Right panel = total_s vs n.
     """
+    if k_cap is None or smax_cap is None:
+        raise ValueError("F3 caps (k_cap, smax_cap) must be provided from primary strategy_config.json")
+
     apply_thesis_style()
     fig, (ax_calls, ax_time) = plt.subplots(1, 2, figsize=(14, 5.5))
     csv_data = []
@@ -466,13 +502,13 @@ def plot_f3_premise_check(
     # Strategy 3 (primary: k=10)
     s3_rows = [r for r in t2_rows if r["strategy"] == "ann_retrieval" and "primary" in r.get("variant", "")]
     if not s3_rows:
-        s3_rows = [r for r in t2_rows if r["strategy"] == "ann_retrieval" and "k=10" in r.get("variant", "")]
+        s3_rows = [r for r in t2_rows if r["strategy"] == "ann_retrieval" and f"k={k_cap}" in r.get("variant", "")]
     s3_rows.sort(key=lambda x: int(x["size_n"]))
 
     # Strategy 4 (primary: s_max=10)
     s4_rows = [r for r in t2_rows if r["strategy"] == "bounded_bucket" and "primary" in r.get("variant", "")]
     if not s4_rows:
-        s4_rows = [r for r in t2_rows if r["strategy"] == "bounded_bucket" and "s_max=10" in r.get("variant", "")]
+        s4_rows = [r for r in t2_rows if r["strategy"] == "bounded_bucket" and f"s_max={smax_cap}" in r.get("variant", "")]
     s4_rows.sort(key=lambda x: int(x["size_n"]))
 
     # Panel A: LLM Calls on linear scale
@@ -480,8 +516,8 @@ def plot_f3_premise_check(
         sizes_3 = [int(r["size_n"]) for r in s3_rows]
         calls_3 = [float(r["llm_calls_mean"]) for r in s3_rows]
         tot_3 = [float(r["total_s_mean"]) for r in s3_rows]
-        ax_calls.plot(sizes_3, calls_3, "o-", label="Strategy 3 (ANN, k=10)", color=STRATEGY_PALETTE["ann_retrieval"], lw=2)
-        ax_time.plot(sizes_3, tot_3, "o-", label="Strategy 3 (ANN, k=10)", color=STRATEGY_PALETTE["ann_retrieval"], lw=2)
+        ax_calls.plot(sizes_3, calls_3, "o-", label=f"Strategy 3 (ANN, k={k_cap})", color=STRATEGY_PALETTE["ann_retrieval"], lw=2)
+        ax_time.plot(sizes_3, tot_3, "o-", label=f"Strategy 3 (ANN, k={k_cap})", color=STRATEGY_PALETTE["ann_retrieval"], lw=2)
         for s, c, t in zip(sizes_3, calls_3, tot_3):
             csv_data.append({"strategy": "ann_retrieval", "n": s, "llm_calls_mean": c, "total_s_mean": t, "cap": k_cap})
 
@@ -489,13 +525,13 @@ def plot_f3_premise_check(
         sizes_4 = [int(r["size_n"]) for r in s4_rows]
         calls_4 = [float(r["llm_calls_mean"]) for r in s4_rows]
         tot_4 = [float(r["total_s_mean"]) for r in s4_rows]
-        ax_calls.plot(sizes_4, calls_4, "s-", label="Strategy 4 (Bucket, s_max=10)", color=STRATEGY_PALETTE["bounded_bucket"], lw=2)
-        ax_time.plot(sizes_4, tot_4, "s-", label="Strategy 4 (Bucket, s_max=10)", color=STRATEGY_PALETTE["bounded_bucket"], lw=2)
+        ax_calls.plot(sizes_4, calls_4, "s-", label=f"Strategy 4 (Bucket, s_max={smax_cap})", color=STRATEGY_PALETTE["bounded_bucket"], lw=2)
+        ax_time.plot(sizes_4, tot_4, "s-", label=f"Strategy 4 (Bucket, s_max={smax_cap})", color=STRATEGY_PALETTE["bounded_bucket"], lw=2)
         for s, c, t in zip(sizes_4, calls_4, tot_4):
             csv_data.append({"strategy": "bounded_bucket", "n": s, "llm_calls_mean": c, "total_s_mean": t, "cap": smax_cap})
 
     # Reference cap line on calls panel
-    ax_calls.axhline(k_cap, color="red", linestyle="--", lw=1.5, label=f"Theoretical Bound (k = s_max = {k_cap})")
+    ax_calls.axhline(k_cap, color="red", linestyle="--", lw=1.5, label="cap (k / s_max)")
 
     ax_calls.set_xlabel("Graph Size n (linear scale)")
     ax_calls.set_ylabel("Realised LLM Calls per Insertion")
@@ -511,3 +547,4 @@ def plot_f3_premise_check(
     fig.tight_layout()
     export_figure(fig, output_dir / "F3_premise_check", csv_data)
     plt.close(fig)
+

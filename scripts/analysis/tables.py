@@ -21,26 +21,27 @@ import numpy as np
 
 try:
     from .validate_runs import (
-        compute_directory_sha256,
-        parse_manifest,
         parse_sidecar,
         parse_summary_csv,
         parse_raw_jsonl,
-        validate_single_run,
     )
     from .bootstrap import compute_series_stats
     from .stats import bootstrap_slope_ci, fit_log_log_slope, classify_slope_flatness
 except ImportError:
     from validate_runs import (
-        compute_directory_sha256,
-        parse_manifest,
         parse_sidecar,
         parse_summary_csv,
         parse_raw_jsonl,
-        validate_single_run,
     )
     from bootstrap import compute_series_stats
     from stats import bootstrap_slope_ci, fit_log_log_slope, classify_slope_flatness
+
+
+def _require_col(row: Dict[str, Any], col: str, run_name: str) -> Any:
+    """Strictly access a required column, raising KeyError naming run and column if missing."""
+    if col not in row or row[col] == "" or row[col] is None:
+        raise KeyError(f"Run '{run_name}' missing required column '{col}'")
+    return row[col]
 
 
 def extract_variant_label(run_name: str) -> str:
@@ -72,33 +73,41 @@ def extract_variant_label(run_name: str) -> str:
     return run_name
 
 
-def write_csv(output_path: Path, rows: List[Dict[str, Any]]) -> None:
+def write_csv(output_path: Path, rows: List[Dict[str, Any]], fieldnames: Optional[List[str]] = None) -> None:
     """Write rows to a CSV file with deterministic column order."""
-    if not rows:
+    if not rows and not fieldnames:
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    seen_keys: Dict[str, None] = {}
-    for r in rows:
-        for k in r.keys():
-            seen_keys[k] = None
-    fieldnames = list(seen_keys.keys())
+    if not fieldnames:
+        seen_keys: Dict[str, None] = {}
+        for r in rows:
+            for k in r.keys():
+                seen_keys[k] = None
+        fieldnames = list(seen_keys.keys())
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        if rows:
+            writer.writerows(rows)
 
 
-def export_markdown_table(rows: List[Dict[str, Any]], output_md_path: Path, title: str) -> None:
+def export_markdown_table(
+    rows: List[Dict[str, Any]],
+    output_md_path: Path,
+    title: str,
+    headers: Optional[List[str]] = None,
+) -> None:
     """Write table rows as a GitHub-flavored markdown table."""
-    if not rows:
+    if not rows and not headers:
         return
     output_md_path.parent.mkdir(parents=True, exist_ok=True)
-    seen_keys: Dict[str, None] = {}
-    for r in rows:
-        for k in r.keys():
-            seen_keys[k] = None
-    headers = list(seen_keys.keys())
+    if not headers:
+        seen_keys: Dict[str, None] = {}
+        for r in rows:
+            for k in r.keys():
+                seen_keys[k] = None
+        headers = list(seen_keys.keys())
 
     lines = [f"# {title}\n", "| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for r in rows:
@@ -119,6 +128,7 @@ def export_markdown_table(rows: List[Dict[str, Any]], output_md_path: Path, titl
         lines.append("| " + " | ".join(formatted_vals) + " |")
 
     output_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 
 
 def generate_t1_accuracy_table(
@@ -148,24 +158,16 @@ def generate_t1_accuracy_table(
         strat = strat_cfg.get("strategy", r_dir.name)
         variant = extract_variant_label(r_dir.name)
 
-        # Parse raw.jsonl for failure / retry inspection per corpus
+        # Parse raw.jsonl for failure tracking per corpus
         failed_then_succ_by_corpus: Dict[str, List[str]] = {}
-        retries_by_corpus: Dict[str, int] = {}
-        n_with_retries_by_corpus: Dict[str, int] = {}
-
         if raw_p.exists():
-            records, is_resumed, retry_counts, key_records = parse_raw_jsonl(raw_p)
+            records, is_resumed, _, key_records = parse_raw_jsonl(raw_p)
             for k, rec_list in key_records.items():
                 corp = rec_list[-1].get("corpus", "")
                 earlier_failed = any(x.get("status") in ("failed", "error") for x in rec_list[:-1])
                 final_success = rec_list[-1].get("status") == "success"
                 if earlier_failed and final_success:
                     failed_then_succ_by_corpus.setdefault(corp, []).append(k)
-
-                r_cnt = retry_counts.get(k, 0)
-                if r_cnt > 0 and final_success:
-                    retries_by_corpus[corp] = retries_by_corpus.get(corp, 0) + r_cnt
-                    n_with_retries_by_corpus[corp] = n_with_retries_by_corpus.get(corp, 0) + 1
 
         # Effective shortlist size k for random baseline
         cfg = strat_cfg.get("config", {}) if isinstance(strat_cfg.get("config"), dict) else {}
@@ -175,31 +177,33 @@ def generate_t1_accuracy_table(
 
         summary_rows = parse_summary_csv(summary_p)
         for s in summary_rows:
-            corpus = s.get("corpus_or_size", "")
+            corpus = _require_col(s, "corpus_or_size", r_dir.name)
             m = corpus_m.get(corpus, 28)
-            rand_baseline = (min(k_val, m) / m) if k_val is not None else 1.0
+            # Random baseline is blank/NaN where the strategy has no k or s_max cap
+            rand_baseline = (min(k_val, m) / m) if k_val is not None else float("nan")
 
             fts_keys = failed_then_succ_by_corpus.get(corpus, [])
-            n_with_retries = int(s.get("n_with_retries", n_with_retries_by_corpus.get(corpus, 0)))
+            # T1 n_with_retries comes only from summary.csv
+            n_with_retries = int(_require_col(s, "n_with_retries", r_dir.name))
 
             row = {
                 "strategy": strat,
                 "variant": variant,
                 "corpus": corpus,
-                "num_trials": int(s.get("num_trials", 0)),
-                "num_success": int(s.get("num_success", 0)),
+                "num_trials": int(_require_col(s, "num_trials", r_dir.name)),
+                "num_success": int(_require_col(s, "num_success", r_dir.name)),
                 "failed_then_succeeded_count": len(fts_keys),
                 "failed_then_succeeded_keys": "; ".join(fts_keys) if fts_keys else "none",
                 "n_with_retries": n_with_retries,
-                "llm_calls_mean": float(s.get("llm_calls_mean", 0.0)),
-                "precision_micro": float(s.get("precision_micro", 0.0)),
-                "recall_micro": float(s.get("recall_micro", 0.0)),
-                "f1_micro": float(s.get("f1_micro", 0.0)),
-                "precision_macro": float(s.get("precision_macro", 0.0)),
-                "recall_macro": float(s.get("recall_macro", 0.0)),
-                "f1_macro": float(s.get("f1_macro", 0.0)),
-                "shortlist_recall_micro": float(s.get("shortlist_recall_micro", 0.0)),
-                "shortlist_recall_macro": float(s.get("shortlist_recall_macro", 0.0)),
+                "llm_calls_mean": float(_require_col(s, "llm_calls_mean", r_dir.name)),
+                "precision_micro": float(_require_col(s, "precision_micro", r_dir.name)),
+                "recall_micro": float(_require_col(s, "recall_micro", r_dir.name)),
+                "f1_micro": float(_require_col(s, "f1_micro", r_dir.name)),
+                "precision_macro": float(_require_col(s, "precision_macro", r_dir.name)),
+                "recall_macro": float(_require_col(s, "recall_macro", r_dir.name)),
+                "f1_macro": float(_require_col(s, "f1_macro", r_dir.name)),
+                "shortlist_recall_micro": float(_require_col(s, "shortlist_recall_micro", r_dir.name)),
+                "shortlist_recall_macro": float(_require_col(s, "shortlist_recall_macro", r_dir.name)),
                 "random_baseline_recall": rand_baseline,
             }
             rows.append(row)
@@ -231,14 +235,14 @@ def generate_t4_sensitivity_table(
             row = {
                 "strategy": strat,
                 "variant": variant,
-                "corpus": s.get("corpus_or_size", ""),
-                "precision_micro_sensitivity": float(s.get("precision_micro_sensitivity", 0.0)),
-                "recall_micro_sensitivity": float(s.get("recall_micro_sensitivity", 0.0)),
-                "f1_micro_sensitivity": float(s.get("f1_micro_sensitivity", 0.0)),
-                "precision_macro_sensitivity": float(s.get("precision_macro_sensitivity", 0.0)),
-                "recall_macro_sensitivity": float(s.get("recall_macro_sensitivity", 0.0)),
-                "f1_macro_sensitivity": float(s.get("f1_macro_sensitivity", 0.0)),
-                "unjudged_predictions_total": int(s.get("unjudged_predictions_total", 0)),
+                "corpus": _require_col(s, "corpus_or_size", r_dir.name),
+                "precision_micro_sensitivity": float(_require_col(s, "precision_micro_sensitivity", r_dir.name)),
+                "recall_micro_sensitivity": float(_require_col(s, "recall_micro_sensitivity", r_dir.name)),
+                "f1_micro_sensitivity": float(_require_col(s, "f1_micro_sensitivity", r_dir.name)),
+                "precision_macro_sensitivity": float(_require_col(s, "precision_macro_sensitivity", r_dir.name)),
+                "recall_macro_sensitivity": float(_require_col(s, "recall_macro_sensitivity", r_dir.name)),
+                "f1_macro_sensitivity": float(_require_col(s, "f1_macro_sensitivity", r_dir.name)),
+                "unjudged_predictions_total": int(_require_col(s, "unjudged_predictions_total", r_dir.name)),
             }
             rows.append(row)
 
@@ -249,46 +253,72 @@ def generate_t4_sensitivity_table(
 
 
 def generate_t3_inventory_table(
-    all_run_dirs: List[Path],
+    t3_csv_content_or_path: str | Path,
     output_csv_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
-    """Generate Table T3: Run inventory for reproducibility and provenance."""
-    rows = []
-    for r_dir in sorted(all_run_dirs):
-        manifest_p = r_dir / "manifest.json"
-        if not manifest_p.exists():
-            continue
+    """Parse validator's Table T3 CSV verbatim and optionally write to output_csv_path."""
+    if isinstance(t3_csv_content_or_path, Path):
+        content = t3_csv_content_or_path.read_text(encoding="utf-8")
+    else:
+        content = str(t3_csv_content_or_path)
 
-        passed, errors, info = validate_single_run(r_dir)
-        manifest = parse_manifest(manifest_p)
+    reader = csv.DictReader(content.splitlines())
+    rows = list(reader)
 
-        fts_keys = info.get("failed_then_succeeded_keys", [])
-        still_failed_keys = info.get("still_failed_keys", [])
-
-        row = {
-            "run_dir": r_dir.name,
-            "strategy": info.get("strategy", ""),
-            "mode": info.get("mode", ""),
-            "variant": extract_variant_label(r_dir.name),
-            "git_commit": str(info.get("git_commit", ""))[:7],
-            "git_dirty": info.get("git_dirty", ""),
-            "total_trials": info.get("total_trials", 0),
-            "total_calls": info.get("total_calls", 0),
-            "call_bound": info.get("call_bound", ""),
-            "failed_trials": info.get("failed_trials", 0),
-            "failed_then_succeeded_count": len(fts_keys),
-            "failed_then_succeeded_keys": "; ".join(fts_keys) if fts_keys else "none",
-            "still_failed_count": len(still_failed_keys),
-            "retries": info.get("total_retries", 0),
-            "gate_status": "PASS (resumed)" if (passed and info.get("resumed")) else ("PASS" if passed else "FAIL"),
-            "dir_sha256": info.get("dir_sha256", ""),
-        }
-        rows.append(row)
-
-    if output_csv_path and rows:
-        write_csv(output_csv_path, rows)
+    if output_csv_path:
+        output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        output_csv_path.write_text(content, encoding="utf-8")
 
     return rows
+
+
+def _fit_metric_slopes(
+    strat: str,
+    variant: str,
+    metric: str,
+    condition: str,
+    size_map: Dict[int, List[float]],
+    slope_fit_rows: List[Dict[str, Any]],
+) -> None:
+    """Helper to compute log-log slope fit and bootstrap CI per Rule R1."""
+    sizes = sorted(size_map.keys())
+    min_trials = min((len(size_map[s]) for s in sizes), default=0)
+    point_slope, ci_low, ci_high, cat, r2, n_boot = bootstrap_slope_ci(size_map)
+    slope_fit_rows.append({
+        "strategy": strat,
+        "variant": variant,
+        "metric": metric,
+        "condition": condition,
+        "slope": point_slope,
+        "ci_95_low": ci_low,
+        "ci_95_high": ci_high,
+        "r_squared": r2,
+        "flatness_category_D2": cat,
+        "min_trials_per_size": min_trials,
+        "n_boot_used": n_boot,
+    })
+
+    # If undefined due to zero mean, but at least 3 sizes have positive mean, emit exploratory row per R1
+    pos_sizes = {
+        s: trials for s, trials in size_map.items()
+        if len(trials) > 0 and np.mean(trials) > 0 and np.isfinite(np.mean(trials))
+    }
+    if (np.isnan(point_slope) or "undefined (zero mean" in cat) and len(pos_sizes) >= 3:
+        p_min_trials = min(len(pos_sizes[s]) for s in pos_sizes)
+        p_slope, p_low, p_high, p_cat, p_r2, p_n_boot = bootstrap_slope_ci(pos_sizes)
+        slope_fit_rows.append({
+            "strategy": strat,
+            "variant": variant,
+            "metric": metric,
+            "condition": "exploratory (positive-mean sizes only)",
+            "slope": p_slope,
+            "ci_95_low": p_low,
+            "ci_95_high": p_high,
+            "r_squared": p_r2,
+            "flatness_category_D2": p_cat,
+            "min_trials_per_size": p_min_trials,
+            "n_boot_used": p_n_boot,
+        })
 
 
 def generate_t2_sweep_cost_table(
@@ -301,13 +331,14 @@ def generate_t2_sweep_cost_table(
     - calls, total_s, shortlist_s, decide_s distributions (mean, median, std, min, max, 95% bootstrap CIs)
     - failed-then-succeeded keys and n_with_retries
     - timing sensitivity columns that exclude trials with retries > 0 and the single trial
-      sweep:brute_force:2000:t9, labelled "post-hoc, not pre-registered" (Requirement 4).
-    - log-log OLS slope fits with 95% bootstrap CIs and D2 flatness classifications (Requirement 3).
+      sweep:brute_force:2000:t9, labelled "post-hoc, not pre-registered" (Requirement 4 / R3).
+    - log-log OLS slope fits with 95% bootstrap CIs, min_trials_per_size, n_boot_used,
+      and D2 flatness classifications (Requirement 3 / R1).
 
     Returns (t2_rows, slope_fit_rows).
     """
     rows = []
-    slope_fit_rows = []
+    slope_fit_rows: List[Dict[str, Any]] = []
 
     for r_dir in sorted(sweep_run_dirs):
         summary_p = r_dir / "summary.csv"
@@ -321,20 +352,24 @@ def generate_t2_sweep_cost_table(
         variant = extract_variant_label(r_dir.name)
 
         # Parse raw.jsonl
-        records, is_resumed, retry_counts, key_records = parse_raw_jsonl(raw_p)
+        records, is_resumed, _, key_records = parse_raw_jsonl(raw_p)
 
         # Deduplicate records by trial key, keeping latest record per key
         records_by_key: Dict[str, Dict[str, Any]] = {}
         for r in records:
-            k = r.get("key")
-            if k:
-                records_by_key[k] = r
+            k = _require_col(r, "key", r_dir.name)
+            records_by_key[k] = r
         deduped = list(records_by_key.values())
 
         # Group by size
         by_size: Dict[int, List[Dict[str, Any]]] = {}
         for r in deduped:
-            s_val = int(r.get("size", r.get("metrics", {}).get("n_before", 0)))
+            if "size" in r:
+                s_val = int(r["size"])
+            elif "metrics" in r and "n_before" in r["metrics"]:
+                s_val = int(r["metrics"]["n_before"])
+            else:
+                raise KeyError(f"Run '{r_dir.name}' missing required size field in trial record")
             by_size.setdefault(s_val, []).append(r)
 
         # Track per-size arrays for slope fitting
@@ -344,24 +379,30 @@ def generate_t2_sweep_cost_table(
 
         for size_n in sorted(by_size.keys()):
             size_records = by_size[size_n]
-            successes = [r for r in size_records if r.get("status") == "success"]
+            successes = [r for r in size_records if _require_col(r, "status", r_dir.name) == "success"]
 
             # Failure and retry tracking
             fts_keys = []
             for r in successes:
-                k = r.get("key", "")
+                k = _require_col(r, "key", r_dir.name)
                 rec_hist = key_records.get(k, [])
                 if any(x.get("status") in ("failed", "error") for x in rec_hist[:-1]):
                     fts_keys.append(k)
 
-            n_with_retries = sum(1 for r in successes if r.get("retries", 0) > 0)
-            total_retries = sum(r.get("retries", 0) for r in successes)
+            n_with_retries = sum(1 for r in successes if int(_require_col(r, "retries", r_dir.name)) > 0)
+            total_retries = sum(int(_require_col(r, "retries", r_dir.name)) for r in successes)
 
             # Metric series across all pre-registered successful trials
-            calls_list = [float(r.get("metrics", {}).get("llm_calls", 0.0)) for r in successes]
-            tot_s_list = [float(r.get("metrics", {}).get("total_s", 0.0)) for r in successes]
-            short_s_list = [float(r.get("metrics", {}).get("shortlist_s", 0.0)) for r in successes]
-            dec_s_list = [float(r.get("metrics", {}).get("decide_s", 0.0)) for r in successes]
+            calls_list = []
+            tot_s_list = []
+            short_s_list = []
+            dec_s_list = []
+            for r in successes:
+                metrics = _require_col(r, "metrics", r_dir.name)
+                calls_list.append(float(_require_col(metrics, "llm_calls", r_dir.name)))
+                tot_s_list.append(float(_require_col(metrics, "total_s", r_dir.name)))
+                short_s_list.append(float(_require_col(metrics, "shortlist_s", r_dir.name)))
+                dec_s_list.append(float(_require_col(metrics, "decide_s", r_dir.name)))
 
             size_calls_map[size_n] = calls_list
             size_total_s_map[size_n] = tot_s_list
@@ -371,14 +412,15 @@ def generate_t2_sweep_cost_table(
             short_stats = compute_series_stats(short_s_list)
             dec_stats = compute_series_stats(dec_s_list)
 
-            # Post-hoc timing sensitivity: exclude trials with retries > 0 and sweep:brute_force:2000:t9
+            # Post-hoc timing sensitivity per Rule R3: exclude retries > 0 and sweep:brute_force:2000:t9
             clean_successes = [
                 r for r in successes
-                if r.get("retries", 0) == 0 and r.get("key") != "sweep:brute_force:2000:t9"
+                if int(_require_col(r, "retries", r_dir.name)) == 0
+                and _require_col(r, "key", r_dir.name) != "sweep:brute_force:2000:t9"
             ]
-            clean_tot_s_list = [float(r.get("metrics", {}).get("total_s", 0.0)) for r in clean_successes]
-            clean_short_s_list = [float(r.get("metrics", {}).get("shortlist_s", 0.0)) for r in clean_successes]
-            clean_dec_s_list = [float(r.get("metrics", {}).get("decide_s", 0.0)) for r in clean_successes]
+            clean_tot_s_list = [float(_require_col(r["metrics"], "total_s", r_dir.name)) for r in clean_successes]
+            clean_short_s_list = [float(_require_col(r["metrics"], "shortlist_s", r_dir.name)) for r in clean_successes]
+            clean_dec_s_list = [float(_require_col(r["metrics"], "decide_s", r_dir.name)) for r in clean_successes]
 
             size_total_s_clean_map[size_n] = clean_tot_s_list
             clean_tot_stats = compute_series_stats(clean_tot_s_list)
@@ -411,18 +453,23 @@ def generate_t2_sweep_cost_table(
                 "total_s_max": tot_stats["max"],
                 "total_s_ci_mean_low": tot_stats["ci_mean_low"],
                 "total_s_ci_mean_high": tot_stats["ci_mean_high"],
-                # Pre-registered components: shortlist_s and decide_s
+                # Pre-registered components: shortlist_s and decide_s with 95% bootstrap CIs
                 "shortlist_s_mean": short_stats["mean"],
                 "shortlist_s_median": short_stats["median"],
                 "shortlist_s_std": short_stats["std"],
                 "shortlist_s_min": short_stats["min"],
                 "shortlist_s_max": short_stats["max"],
+                "shortlist_s_ci_mean_low": short_stats["ci_mean_low"],
+                "shortlist_s_ci_mean_high": short_stats["ci_mean_high"],
                 "decide_s_mean": dec_stats["mean"],
                 "decide_s_median": dec_stats["median"],
                 "decide_s_std": dec_stats["std"],
                 "decide_s_min": dec_stats["min"],
                 "decide_s_max": dec_stats["max"],
-                # Post-hoc sensitivity timing (labelled "post-hoc, not pre-registered")
+                "decide_s_ci_mean_low": dec_stats["ci_mean_low"],
+                "decide_s_ci_mean_high": dec_stats["ci_mean_high"],
+                # Post-hoc sensitivity timing (labelled "post-hoc, not pre-registered") per Rule R3
+                "clean_exclusion_rule": "retries>0; and the single trial launched with --allow-peak inside the peak window (sweep:brute_force:2000:t9)",
                 "clean_num_trials_post_hoc_not_preregistered": len(clean_successes),
                 "clean_total_s_mean_post_hoc_not_preregistered": clean_tot_stats["mean"],
                 "clean_total_s_median_post_hoc_not_preregistered": clean_tot_stats["median"],
@@ -434,52 +481,23 @@ def generate_t2_sweep_cost_table(
             }
             rows.append(row)
 
-        # Compute log-log OLS slope fits across the 6 sizes for this run
+        # Compute log-log OLS slope fits across sizes for this run per Rule R1
         if len(size_calls_map) >= 2:
             # 1. LLM calls slope fit
-            calls_slope, calls_ci_low, calls_ci_high, calls_cat, calls_r2 = bootstrap_slope_ci(size_calls_map)
-            # 2. total_s slope fit (pre-registered)
-            tot_slope, tot_ci_low, tot_ci_high, tot_cat, tot_r2 = bootstrap_slope_ci(size_total_s_map)
-            # 3. total_s clean slope fit (post-hoc)
-            tot_clean_slope, tot_clean_ci_low, tot_clean_ci_high, tot_clean_cat, tot_clean_r2 = bootstrap_slope_ci(
-                size_total_s_clean_map
+            _fit_metric_slopes(
+                strat, variant, "llm_calls", "pre-registered (all trials)", size_calls_map, slope_fit_rows
             )
-
-            slope_fit_rows.append({
-                "strategy": strat,
-                "variant": variant,
-                "metric": "llm_calls",
-                "condition": "pre-registered (all trials)",
-                "slope": calls_slope,
-                "ci_95_low": calls_ci_low,
-                "ci_95_high": calls_ci_high,
-                "r_squared": calls_r2,
-                "flatness_category_D2": calls_cat,
-            })
-            slope_fit_rows.append({
-                "strategy": strat,
-                "variant": variant,
-                "metric": "total_s",
-                "condition": "pre-registered (all trials)",
-                "slope": tot_slope,
-                "ci_95_low": tot_ci_low,
-                "ci_95_high": tot_ci_high,
-                "r_squared": tot_r2,
-                "flatness_category_D2": tot_cat,
-            })
-            slope_fit_rows.append({
-                "strategy": strat,
-                "variant": variant,
-                "metric": "total_s",
-                "condition": "clean (post-hoc, not pre-registered)",
-                "slope": tot_clean_slope,
-                "ci_95_low": tot_clean_ci_low,
-                "ci_95_high": tot_clean_ci_high,
-                "r_squared": tot_clean_r2,
-                "flatness_category_D2": tot_clean_cat,
-            })
+            # 2. total_s slope fit (pre-registered)
+            _fit_metric_slopes(
+                strat, variant, "total_s", "pre-registered (all trials)", size_total_s_map, slope_fit_rows
+            )
+            # 3. total_s clean slope fit (post-hoc)
+            _fit_metric_slopes(
+                strat, variant, "total_s", "clean (post-hoc, not pre-registered)", size_total_s_clean_map, slope_fit_rows
+            )
 
     if output_csv_path and rows:
         write_csv(output_csv_path, rows)
 
     return rows, slope_fit_rows
+

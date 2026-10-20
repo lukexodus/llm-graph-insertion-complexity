@@ -716,3 +716,34 @@ Reasoning: closes the validation gate blind spots identified in ANALYSIS-001-R r
   (b) Added dedicated timing sensitivity columns to Table T2 (`clean_total_s_mean_post_hoc_not_preregistered`, `clean_total_s_median_post_hoc_not_preregistered`, etc.) that explicitly exclude all trials with $\text{retries} > 0$ and the single trial `sweep:brute_force:2000:t9`, labelled "post-hoc, not pre-registered".
 (5) Test suite and parity verification: Implemented comprehensive unit, integration, and parity test suite (`tests/test_analysis_pipeline.py`, 9 tests passing). Verified exact numerical parity between pipeline outputs and validator recomputations (`validate_runs.py::recompute_metrics`) across all 12 accuracy configurations.
 Reasoning: completes, hardens, and wires the Phase 4 empirical analysis pipeline into the repository, enforcing the pre-registered Analysis Plan [D-79], Decisions D1–D6, and post-hoc retry sensitivity accounting without altering raw experiment outputs. Affects: `scripts/analysis/`, `tests/test_analysis_pipeline.py`, `docs/decisions/decision-log.md`.
+
+**[D-86]** Corrections to D-85, Phase 4 analysis pipeline defect remediation, validation gate enforcement, Table T3 verbatim inventory, Rules R1–R3, and execution provenance (ANALYSIS-002-F):
+(1) Corrections to [D-85] and ANALYSIS-002 report:
+  (a) In [D-85](3)(b), bootstrap confidence intervals were erroneously claimed to be generated for `shortlist_s` and `decide_s`, whereas the initial implementation only computed CIs for `llm_calls` and `total_s`; 95% bootstrap CIs for `shortlist_s` and `decide_s` are now computed and emitted in Table T2.
+  (b) An ephemeral test count was erroneously embedded in [D-85](5); decision log entries record enduring architecture, protocols, and data decisions, not transient suite sizes.
+  (c) The real-data parity test in `tests/test_analysis_pipeline.py` previously contained a hardcoded path; it now accepts the results directory from the `PHASE4_RESULTS_DIR` environment variable and skips cleanly when unset.
+  (d) The claim in the ANALYSIS-002 report that trial `sweep:brute_force:2000:t9` suffered a "transient header failure" was factually unsupported; trial t9 is excluded from post-hoc timing sensitivity strictly because it was executed inside the DeepSeek peak-hours window using `--allow-peak`.
+(2) Validation gate enforcement and removal of `--skip-gate`:
+  (a) Removed `--skip-gate` CLI flag entirely from `run_analysis.py`; the pipeline unconditionally enforces the independent validation gate before performing any analysis or creating output directories. On gate failure, failing runs are printed, the process exits with code 1, and no output files are written.
+  (b) Output directory writes `RUN_INFO.txt` recording invocation argv, results directory, git commit, sha256 hashes of `validate_runs.py` and all analysis modules, external hashes file path and its sha256, `--src-diff-clean` status, and overall validation gate status.
+(3) Table T3 run inventory verbatim emission:
+  (a) Table T3 writes the independent validator's `t3_csv` output verbatim to `tables/T3_run_inventory.csv` with the exact 18 fieldnames defined by `validate_runs.py`.
+  (b) Removed ad-hoc recomputations and calls to `validate_single_run` in `tables.py`; Markdown rendering parses the verbatim CSV.
+(4) Table and Figure robustness and strict accessors:
+  (a) Replaced permissive `.get(col, 0.0)` accessors on required fields with strict accessors raising `KeyError` naming the run directory and missing column.
+  (b) Removed `retry_counts` misuse in Table T1; `n_with_retries` is sourced strictly from `summary.csv`.
+  (c) Random baseline recall in Table T1 evaluates to NaN for strategies without a $k$ or $s_{\max}$ shortlist cap (`brute_force`, `embedding_threshold`).
+  (d) Figure F3 theoretical caps for Strategies 3 and 4 are read strictly from primary run `strategy_config.json` sidecars passed by `run_analysis.py`, failing closed if missing, with the line labeled "cap (k / s_max)".
+(5) Rule R1 (Zero-mean log-log slope fits):
+  (a) Any log-log OLS fit where any graph size has an empirical mean $\le 0$ or non-finite cost is mathematically undefined, yielding NaN for slope, intercept, and $R^2$, no D2 category assignment, and category string "undefined (zero mean at n=...)". The arbitrary $10^{-12}$ clamp is eliminated from all fitting and bootstrap code.
+  (b) If a fit is undefined due to zero-mean sizes but at least three sizes have positive means, an additional exploratory row is emitted labeled "exploratory (positive-mean sizes only)".
+  (c) Bootstrap resampling drops resamples containing any zero-mean size, records `n_boot_used`, and assigns NaN CIs if no valid resamples remain.
+  (d) Sizes with no trials are treated as undefined rather than padded with zero; Table T2b records `min_trials_per_size`.
+(6) Rule R2 (Mechanical Pareto dominance):
+  (a) When $|\Delta F_1| < 0.025$, the pair is classified as "not distinguishable (F1 within 0.025)" regardless of call difference.
+  (b) When $|\Delta F_1| \ge 0.025$, strategy A dominates B if $F_{1,A} > F_{1,B}$ and $\text{calls}_A \le \text{calls}_B$; strategy B dominates A if $F_{1,B} > F_{1,A}$ and $\text{calls}_B \le \text{calls}_A$; otherwise the relationship is classified as "trade-off".
+  (c) Pairwise dominance labels are exported to `figures/F6_dominance.csv` and `.md` and rendered directly in a text box on Figure F6; no dummy placeholder rows are written to the figure plotting data.
+(7) Rule R3 (Post-hoc timing exclusion):
+  (a) Clean timing sensitivity columns in Table T2 exclude trials with $\text{retries} > 0$ and the single trial `sweep:brute_force:2000:t9`.
+  (b) Column `clean_exclusion_rule` states verbatim: "retries>0; and the single trial launched with --allow-peak inside the peak window (sweep:brute_force:2000:t9)". Existing column suffix `_post_hoc_not_preregistered` is preserved.
+Reasoning: resolves defects identified in independent review of the Phase 4 analysis pipeline, corrects inaccuracies in D-85, enforces the validation gate fail-closed without bypass, renders Table T3 verbatim from validator output, implements Rules R1–R3, and documents complete pipeline execution provenance without modifying raw experimental data. Affects: `scripts/analysis/`, `tests/test_analysis_pipeline.py`, `docs/decisions/decision-log.md`.

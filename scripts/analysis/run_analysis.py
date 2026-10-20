@@ -12,9 +12,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Ensure scripts/analysis and repo root are in sys.path
 _current_dir = Path(__file__).resolve().parent
@@ -27,6 +30,7 @@ if str(_repo_root) not in sys.path:
 try:
     from .validate_runs import validate_all_runs
     from .tables import (
+        extract_variant_label,
         generate_t1_accuracy_table,
         generate_t2_sweep_cost_table,
         generate_t3_inventory_table,
@@ -45,6 +49,7 @@ try:
 except ImportError:
     from validate_runs import validate_all_runs
     from tables import (
+        extract_variant_label,
         generate_t1_accuracy_table,
         generate_t2_sweep_cost_table,
         generate_t3_inventory_table,
@@ -60,6 +65,15 @@ except ImportError:
         plot_f5_sensitivity_panels,
         plot_f6_cost_vs_accuracy,
     )
+
+
+def _file_sha256(path: Path) -> str:
+    """Compute sha256 of a file in 64 KB chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def main() -> int:
@@ -88,12 +102,6 @@ def main() -> int:
         default=None,
         help="Optional path to machine-written sha256 hashes file to verify against",
     )
-    parser.add_argument(
-        "--skip-gate",
-        action="store_true",
-        default=False,
-        help="Bypass validation gate (for development / unit testing only)",
-    )
     args = parser.parse_args()
 
     results_dir = args.results_dir.resolve()
@@ -101,34 +109,78 @@ def main() -> int:
     tables_dir = output_dir / "tables"
     figures_dir = output_dir / "figures"
 
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    figures_dir.mkdir(parents=True, exist_ok=True)
-
     print("=" * 80)
     print("PHASE 4 EMPIRICAL ANALYSIS PIPELINE")
     print(f"Results Directory: {results_dir}")
     print(f"Output Directory:  {output_dir}")
     print("=" * 80)
 
-    # 1. Validation Gate (Real signature: returns (overall_passed, run_results, table_t3_csv_string))
-    if not args.skip_gate:
-        print("\n>>> STEP 1: Running Independent Validation Gate (scripts/analysis/validate_runs.py)...")
-        overall_passed, run_results, t3_csv_str = validate_all_runs(
-            results_dir,
-            src_diff_clean=args.src_diff_clean,
-            hashes_path=args.hashes,
-        )
-        if not overall_passed:
-            print("\n[ABORT] Validation gate failed. Analysis halted per Rule 5 of Analysis Plan.")
-            for r in run_results:
-                if not r.get("passed"):
-                    print(f"  FAILED RUN: {r.get('run_dir')}")
-                    for err in r.get("errors", []):
-                        print(f"    -> ERROR: {err}")
-            return 1
-        print("\n[OK] Validation gate passed 100%. Proceeding with analysis.\n")
+    # 1. Validation Gate (fail-closed: do not create output dirs or write anything on failure)
+    print("\n>>> STEP 1: Running Independent Validation Gate (scripts/analysis/validate_runs.py)...")
+    overall_passed, run_results, t3_csv_str = validate_all_runs(
+        results_dir,
+        src_diff_clean=args.src_diff_clean,
+        hashes_path=args.hashes,
+    )
+    if not overall_passed:
+        print("\n[ABORT] Validation gate failed. Analysis halted per Rule 5 of Analysis Plan.")
+        for r in run_results:
+            if not r.get("passed"):
+                print(f"  FAILED RUN: {r.get('run_dir')}")
+                for err in r.get("errors", []):
+                    print(f"    -> ERROR: {err}")
+        return 1
+
+    print("\n[OK] Validation gate passed 100%. Proceeding with analysis.\n")
+
+    # Create output directories only after the gate passes
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write RUN_INFO.txt
+    pipeline_modules = [
+        "validate_runs.py",
+        "run_analysis.py",
+        "tables.py",
+        "figures.py",
+        "stats.py",
+        "bootstrap.py",
+        "style.py",
+    ]
+    module_hashes = {}
+    for mod in pipeline_modules:
+        p = _current_dir / mod
+        if p.is_file():
+            module_hashes[mod] = _file_sha256(p)
+        else:
+            module_hashes[mod] = "MISSING"
+
+    try:
+        git_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=_repo_root, text=True
+        ).strip()
+    except Exception:
+        git_head = "UNKNOWN"
+
+    if args.hashes and args.hashes.is_file():
+        hashes_info = f"{args.hashes.resolve()} (sha256: {_file_sha256(args.hashes)})"
     else:
-        print("\n[WARNING] Validation gate skipped via --skip-gate.\n")
+        hashes_info = "NOT SUPPLIED"
+
+    run_info_lines = [
+        f"argv: {' '.join(sys.argv)}",
+        f"results_dir: {results_dir}",
+        f"git_commit: {git_head}",
+        "pipeline_modules_sha256:",
+    ]
+    for mod, h in module_hashes.items():
+        run_info_lines.append(f"  {mod}: {h}")
+    run_info_lines.extend([
+        f"hashes_file: {hashes_info}",
+        f"src_diff_clean: {args.src_diff_clean}",
+        "overall_gate_status: PASS",
+    ])
+    (output_dir / "RUN_INFO.txt").write_text("\n".join(run_info_lines) + "\n", encoding="utf-8")
 
     # Discover run directories
     if (results_dir / "manifest.json").is_file():
@@ -141,9 +193,10 @@ def main() -> int:
 
     print(f"Discovered: {len(all_runs)} total runs ({len(acc_runs)} accuracy, {len(sweep_runs)} sweep)\n")
 
-    # 2. Table T3: Run Inventory (always generated for provenance)
+    # 2. Table T3: Run Inventory (write validator's t3_csv verbatim as T3_run_inventory.csv)
     print(">>> STEP 2: Generating Table T3 (Run Inventory)...")
-    t3_rows = generate_t3_inventory_table(all_runs, tables_dir / "T3_run_inventory.csv")
+    (tables_dir / "T3_run_inventory.csv").write_text(t3_csv_str, encoding="utf-8")
+    t3_rows = generate_t3_inventory_table(t3_csv_str)
     export_markdown_table(t3_rows, tables_dir / "T3_run_inventory.md", "Table T3: Empirical Run Inventory")
     print(f"    Saved: {tables_dir / 'T3_run_inventory.csv'} and .md ({len(t3_rows)} entries)")
 
@@ -167,6 +220,7 @@ def main() -> int:
 
         plot_f6_cost_vs_accuracy(t1_rows, figures_dir)
         print(f"    Saved: {figures_dir / 'F6_cost_vs_accuracy_dominance.pdf'} (.png, .csv)")
+        print(f"    Saved: {figures_dir / 'F6_dominance.csv'} and .md")
 
     # 4. Sweep Tables & Figures (if sweep runs present)
     if sweep_runs:
@@ -180,6 +234,35 @@ def main() -> int:
             export_markdown_table(slope_fit_rows, tables_dir / "T2_slope_fits.md", "Table T2b: Log-Log OLS Slope Fits & Flatness Classification (D2)")
             print(f"    Saved: {tables_dir / 'T2_slope_fits.csv'} and .md ({len(slope_fit_rows)} fits)")
 
+        # Extract primary caps for F3
+        k_cap: Optional[int] = None
+        smax_cap: Optional[int] = None
+        for d in sweep_runs:
+            sidecar_p = d / "strategy_config.json"
+            if not sidecar_p.is_file():
+                continue
+            strat_cfg = json.loads(sidecar_p.read_text(encoding="utf-8"))
+            strat = strat_cfg.get("strategy")
+            strat_params = strat_cfg.get("config", {}) if isinstance(strat_cfg.get("config"), dict) else {}
+            variant = extract_variant_label(d.name)
+
+            if strat == "ann_retrieval" and "primary" in variant:
+                if "k" in strat_params:
+                    k_cap = int(strat_params["k"])
+                elif "k" in strat_cfg:
+                    k_cap = int(strat_cfg["k"])
+
+            if strat == "bounded_bucket" and "primary" in variant:
+                if "s_max" in strat_params:
+                    smax_cap = int(strat_params["s_max"])
+                elif "s_max" in strat_cfg:
+                    smax_cap = int(strat_cfg["s_max"])
+
+        if k_cap is None:
+            raise ValueError("Missing 'k' cap in primary Strategy 3 (ann_retrieval) strategy_config.json")
+        if smax_cap is None:
+            raise ValueError("Missing 's_max' cap in primary Strategy 4 (bounded_bucket) strategy_config.json")
+
         print("\n>>> STEP 6: Generating Sweep Figures (F1, F2, F3)...")
         plot_f1_calls_scaling(t2_rows, figures_dir)
         print(f"    Saved: {figures_dir / 'F1_calls_scaling.pdf'} (.png, .csv)")
@@ -187,7 +270,7 @@ def main() -> int:
         plot_f2_wallclock_scaling(t2_rows, figures_dir)
         print(f"    Saved: {figures_dir / 'F2_wallclock_scaling.pdf'} (.png, .csv)")
 
-        plot_f3_premise_check(t2_rows, figures_dir, k_cap=10, smax_cap=10)
+        plot_f3_premise_check(t2_rows, figures_dir, k_cap=k_cap, smax_cap=smax_cap)
         print(f"    Saved: {figures_dir / 'F3_premise_check.pdf'} (.png, .csv)")
 
     print("\n" + "=" * 80)
@@ -198,3 +281,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
