@@ -78,6 +78,7 @@ Status: **in-progress**
 | ANALYSIS-002-F | Remediate Phase 4 analysis pipeline review defects, enforce validation gate, implement Rules R1–R3, and record D-86 | **done** | Completed by Gemini; branch `task/ANALYSIS-002-F` at commit `f5e085d` (base `17ed1f8`). See report [`docs/reports/ANALYSIS-002-F-gemini-report.md`](docs/reports/ANALYSIS-002-F-gemini-report.md). |
 | ANALYSIS-002-G | Independent review of ANALYSIS-002-F Phase 4 analysis pipeline remediation | **done** | Completed by Gemini; branch `task/ANALYSIS-002-G` at commit `ccec59c` (base `f5e085d`). See report [`docs/reports/ANALYSIS-002-G-gemini-review.md`](docs/reports/ANALYSIS-002-G-gemini-review.md). |
 | ANALYSIS-003 | Add exploratory log-scale companion figures F1b, F2b, F6b and record D-87 | **done** | Completed by Gemini; branch `task/ANALYSIS-003` at commit `5ab04a6` (base `79046eb`). See report [`docs/reports/ANALYSIS-003-gemini-report.md`](docs/reports/ANALYSIS-003-gemini-report.md). |
+| DOC-012 | Correct the [D-84] record of Luke's inspection answer and peak-launch recollection, two status-row commit claims, final pipeline provenance, and known limits of the exploratory companion figures ([D-88]) | **needs-review** | Docs only. Completed by Claude Code; branch `task/DOC-012` at commit `6f198c5` (base `554bde3`). See report [`docs/reports/DOC-012-claude-code-correction.md`](docs/reports/DOC-012-claude-code-correction.md). |
 
 ## Thesis document status (separate track from the code work above)
 
