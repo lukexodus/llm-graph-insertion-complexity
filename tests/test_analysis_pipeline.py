@@ -22,6 +22,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+import matplotlib.pyplot as plt
+import matplotlib.text as mtext
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 import pytest
 
@@ -44,11 +47,14 @@ from scripts.analysis.tables import (
 )
 from scripts.analysis.figures import (
     plot_f1_calls_scaling,
+    plot_f1b_calls_scaling_logy,
     plot_f2_wallclock_scaling,
+    plot_f2b_wallclock_scaling_logy,
     plot_f3_premise_check,
     plot_f4_accuracy_comparison,
     plot_f5_sensitivity_panels,
     plot_f6_cost_vs_accuracy,
+    plot_f6b_cost_vs_accuracy_logx,
 )
 from scripts.analysis.validate_runs import parse_raw_jsonl, recompute_metrics, validate_all_runs
 from scripts.analysis.run_analysis import main as run_pipeline_main
@@ -632,11 +638,14 @@ def test_end_to_end_without_skip_gate(tmp_path: Path, monkeypatch):
     # Verify generated figures
     for fig_name in [
         "F1_calls_scaling",
+        "F1b_calls_scaling_logy",
         "F2_wallclock_scaling",
+        "F2b_wallclock_scaling_logy",
         "F3_premise_check",
         "F4_accuracy_by_strategy",
         "F5_sensitivity_panels",
         "F6_cost_vs_accuracy_dominance",
+        "F6b_cost_vs_accuracy_logx",
     ]:
         assert (output_dir / "figures" / f"{fig_name}.pdf").exists()
         assert (output_dir / "figures" / f"{fig_name}.png").exists()
@@ -708,3 +717,266 @@ def test_parity_with_validator_on_real_accuracy_directories():
             assert np.isclose(t1_row["shortlist_recall_micro"], expected["shortlist_recall_micro"], atol=1e-5)
             if expected["f1_macro"] is not None:
                 assert np.isclose(t1_row["f1_macro"], expected["f1_macro"], atol=1e-5)
+
+
+def test_companion_figures_output_files_and_scales(tmp_path: Path):
+    """Verifies that F1b, F2b, and F6b export .pdf, .png, and .csv, set log scales,
+
+    include the exploratory marker in figure text and CSV, and keep dominance consistent.
+    """
+    t2_rows = [
+        {
+            "strategy": "brute_force",
+            "variant": "primary (all candidates)",
+            "size_n": 50,
+            "llm_calls_mean": 50.0,
+            "llm_calls_ci_mean_low": 50.0,
+            "llm_calls_ci_mean_high": 50.0,
+            "llm_calls_median": 50.0,
+            "llm_calls_std": 0.0,
+            "total_s_mean": 1.25,
+            "total_s_ci_mean_low": 1.10,
+            "total_s_ci_mean_high": 1.40,
+            "shortlist_s_mean": 0.01,
+            "decide_s_mean": 1.24,
+        },
+        {
+            "strategy": "brute_force",
+            "variant": "primary (all candidates)",
+            "size_n": 100,
+            "llm_calls_mean": 100.0,
+            "llm_calls_ci_mean_low": 100.0,
+            "llm_calls_ci_mean_high": 100.0,
+            "llm_calls_median": 100.0,
+            "llm_calls_std": 0.0,
+            "total_s_mean": 2.50,
+            "total_s_ci_mean_low": 2.30,
+            "total_s_ci_mean_high": 2.70,
+            "shortlist_s_mean": 0.01,
+            "decide_s_mean": 2.49,
+        },
+    ]
+
+    t1_rows = [
+        {
+            "corpus": "DSA_gold_standard_MEKG",
+            "strategy": "brute_force",
+            "variant": "primary (all candidates)",
+            "llm_calls_mean": 28.0,
+            "f1_micro": 0.5862,
+        },
+        {
+            "corpus": "DSA_gold_standard_MEKG",
+            "strategy": "embedding_threshold",
+            "variant": "primary (theta=0.6)",
+            "llm_calls_mean": 0.8,
+            "f1_micro": 0.1475,
+        },
+    ]
+
+    # 1. F1b
+    fig1 = plot_f1b_calls_scaling_logy(t2_rows, tmp_path)
+    for ext in [".pdf", ".png", ".csv"]:
+        assert (tmp_path / f"F1b_calls_scaling_logy{ext}").exists()
+    ax1 = fig1.axes[0]
+    assert ax1.get_yscale() == "log", "F1b y scale must be log"
+    assert ax1.get_xscale() == "log", "F1b x scale must be log"
+
+    fig1_texts = [t.get_text() for t in fig1.findobj(mtext.Text)]
+    assert any("EXPLORATORY: log scale, not pre-registered" in txt for txt in fig1_texts)
+
+    with open(tmp_path / "F1b_calls_scaling_logy.csv", newline="", encoding="utf-8") as f:
+        r1 = list(csv.DictReader(f))
+        assert len(r1) == 2
+        assert all(row["status"] == "exploratory" for row in r1)
+        assert all(row["plotted"] in ("True", True) for row in r1)
+
+    # 2. F2b
+    fig2 = plot_f2b_wallclock_scaling_logy(t2_rows, tmp_path)
+    for ext in [".pdf", ".png", ".csv"]:
+        assert (tmp_path / f"F2b_wallclock_scaling_logy{ext}").exists()
+    assert fig2.axes[0].get_yscale() == "log", "F2b panel A y scale must be log"
+    assert fig2.axes[1].get_yscale() == "log", "F2b panel B y scale must be log"
+
+    fig2_texts = [t.get_text() for t in fig2.findobj(mtext.Text)]
+    assert any("EXPLORATORY: log scale, not pre-registered" in txt for txt in fig2_texts)
+
+    with open(tmp_path / "F2b_wallclock_scaling_logy.csv", newline="", encoding="utf-8") as f:
+        r2 = list(csv.DictReader(f))
+        assert len(r2) == 2
+        assert all(row["status"] == "exploratory" for row in r2)
+        assert all(row["plotted"] in ("True", True) for row in r2)
+
+    # 3. F6b
+    fig6 = plot_f6b_cost_vs_accuracy_logx(t1_rows, tmp_path)
+    for ext in [".pdf", ".png", ".csv"]:
+        assert (tmp_path / f"F6b_cost_vs_accuracy_logx{ext}").exists()
+    ax6 = fig6.axes[0]
+    assert ax6.get_xscale() == "log", "F6b x scale must be log"
+    assert ax6.get_ylim() == (0.0, 1.05), "F6b y scale must be linear (0, 1.05)"
+
+    fig6_texts = [t.get_text() for t in fig6.findobj(mtext.Text)]
+    assert any("EXPLORATORY: log scale, not pre-registered" in txt for txt in fig6_texts)
+
+    with open(tmp_path / "F6b_cost_vs_accuracy_logx.csv", newline="", encoding="utf-8") as f:
+        r6 = list(csv.DictReader(f))
+        assert len(r6) == 2
+        assert all(row["status"] == "exploratory" for row in r6)
+        assert all(row["plotted"] in ("True", True) for row in r6)
+
+
+def test_omitted_non_positive_points_and_no_clamping(tmp_path: Path):
+    """Verifies that non-positive points are omitted (never clamped to 1e-6 or any substitute),
+
+    recorded with plotted=False in CSV, named in a footnote, and confidence bounds <= 0 are unedited.
+    """
+    t2_rows = [
+        {
+            "strategy": "embedding_threshold",
+            "variant": "primary (theta=0.6)",
+            "size_n": 50,
+            "llm_calls_mean": 0.0,
+            "llm_calls_ci_mean_low": 0.0,
+            "llm_calls_ci_mean_high": 0.0,
+            "llm_calls_median": 0.0,
+            "llm_calls_std": 0.0,
+            "total_s_mean": 0.01,
+            "total_s_ci_mean_low": 0.0,
+            "total_s_ci_mean_high": 0.02,
+            "shortlist_s_mean": 0.01,
+            "decide_s_mean": 0.0,
+        },
+        {
+            "strategy": "embedding_threshold",
+            "variant": "primary (theta=0.6)",
+            "size_n": 100,
+            "llm_calls_mean": 0.1,
+            "llm_calls_ci_mean_low": 0.0,
+            "llm_calls_ci_mean_high": 0.3,
+            "llm_calls_median": 0.0,
+            "llm_calls_std": 0.316,
+            "total_s_mean": 0.02,
+            "total_s_ci_mean_low": 0.01,
+            "total_s_ci_mean_high": 0.03,
+            "shortlist_s_mean": 0.01,
+            "decide_s_mean": 0.01,
+        },
+    ]
+
+    fig = plot_f1b_calls_scaling_logy(t2_rows, tmp_path)
+    ax = fig.axes[0]
+
+    drawn_y = [y for y in ax.lines[0].get_ydata() if not np.isnan(y)]
+    assert len(drawn_y) == 1, "Only positive points should be drawn"
+    assert drawn_y[0] == 0.1
+    assert not any(np.isclose(y, 1e-6) for y in drawn_y), "Zero-mean point was clamped to 1e-6 instead of omitted"
+    assert not any(y <= 0 for y in drawn_y), "Non-positive points must not be drawn"
+
+    with open(tmp_path / "F1b_calls_scaling_logy.csv", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+        assert len(rows) == 2
+        r50 = [r for r in rows if r["n"] in ("50", 50)][0]
+        r100 = [r for r in rows if r["n"] in ("100", 100)][0]
+        assert r50["plotted"] in ("False", False), "Omitted point must have plotted=False in CSV"
+        assert r100["plotted"] in ("True", True), "Plotted point must have plotted=True in CSV"
+        assert float(r100["llm_calls_ci_low"]) == 0.0
+
+    fig_texts = [t.get_text() for t in fig.findobj(mtext.Text)]
+    assert any("not plotted: embedding_threshold n=50: zero mean" in txt for txt in fig_texts)
+
+
+def test_f6b_annotations_no_overlap_and_leader_lines(tmp_path: Path):
+    """Verifies F6b on fixture with calls 1.1, 7.4, 10.0, 140.0 and micro-F1 0.27, 0.11, 0.29, 0.14.
+
+    Computes window extents of every annotation with the renderer and asserts no pairwise intersection.
+    Also asserts leader lines and alternating offsets are used, and dominance box matches evaluate_dominance.
+    """
+    t1_rows = [
+        {
+            "corpus": "metacademy_gold_standard_MEKG",
+            "strategy": "embedding_threshold",
+            "variant": "primary (theta=0.6)",
+            "llm_calls_mean": 1.1,
+            "f1_micro": 0.27,
+        },
+        {
+            "corpus": "metacademy_gold_standard_MEKG",
+            "strategy": "bounded_bucket",
+            "variant": "primary (s_min=5, s_max=10, nb=12)",
+            "llm_calls_mean": 7.4,
+            "f1_micro": 0.11,
+        },
+        {
+            "corpus": "metacademy_gold_standard_MEKG",
+            "strategy": "ann_retrieval",
+            "variant": "primary (k=10, ef=128)",
+            "llm_calls_mean": 10.0,
+            "f1_micro": 0.29,
+        },
+        {
+            "corpus": "metacademy_gold_standard_MEKG",
+            "strategy": "brute_force",
+            "variant": "primary (all candidates)",
+            "llm_calls_mean": 140.0,
+            "f1_micro": 0.14,
+        },
+    ]
+
+    fig = plot_f6b_cost_vs_accuracy_logx(t1_rows, tmp_path)
+    ax = fig.axes[0]
+
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    renderer = canvas.get_renderer()
+
+    annotations = [t for t in ax.texts if hasattr(t, "xyann") and t.arrowprops is not None]
+    assert len(annotations) == 4, f"Expected 4 point annotations, got {len(annotations)}"
+
+    assert all(ann.arrowprops is not None for ann in annotations), "Every point annotation must have a leader line"
+    offsets = [ann.xyann for ann in annotations]
+    assert len(set(offsets)) > 1, "F6b annotations must alternate offsets, not use fixed offset for all points"
+
+    bboxes = [ann.get_window_extent(renderer) for ann in annotations]
+    for i in range(len(bboxes)):
+        for j in range(i + 1, len(bboxes)):
+            assert not bboxes[i].overlaps(bboxes[j]), (
+                f"Pairwise intersection detected between annotation {i} and {j}: {bboxes[i]} vs {bboxes[j]}"
+            )
+
+    dom_texts = [t.get_text() for t in ax.texts if " vs " in t.get_text()]
+    assert len(dom_texts) == 1
+    dom_content = dom_texts[0]
+    expected_pairs = [
+        ("embedding_threshold", "bounded_bucket"),
+        ("embedding_threshold", "ann_retrieval"),
+        ("embedding_threshold", "brute_force"),
+        ("bounded_bucket", "ann_retrieval"),
+        ("bounded_bucket", "brute_force"),
+        ("ann_retrieval", "brute_force"),
+    ]
+    pts = {r["strategy"]: {"calls": r["llm_calls_mean"], "f1": r["f1_micro"]} for r in t1_rows}
+    for s_a, s_b in expected_pairs:
+        expected_dom = evaluate_dominance(pts[s_a], pts[s_b])
+        assert f"{s_a} vs {s_b}: {expected_dom}" in dom_content
+
+
+def test_f6b_plots_micro_f1_not_macro(tmp_path: Path):
+    """Verifies that F6b plots micro-F1, not macro-F1."""
+    t1_rows = [
+        {
+            "corpus": "DSA_gold_standard_MEKG",
+            "strategy": "brute_force",
+            "variant": "primary",
+            "llm_calls_mean": 28.0,
+            "f1_micro": 0.27,
+            "f1_macro": 0.85,
+        }
+    ]
+    fig = plot_f6b_cost_vs_accuracy_logx(t1_rows, tmp_path)
+    with open(tmp_path / "F6b_cost_vs_accuracy_logx.csv", newline="", encoding="utf-8") as f:
+        r = list(csv.DictReader(f))[0]
+        assert np.isclose(float(r["f1"]), 0.27), "F6b must plot f1_micro (0.27), not f1_macro"
+    ax = fig.axes[0]
+    offsets = ax.collections[0].get_offsets()
+    assert np.isclose(offsets[0][1], 0.27), "F6b scatter y-position must be f1_micro"
+

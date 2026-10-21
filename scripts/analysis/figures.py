@@ -548,3 +548,361 @@ def plot_f3_premise_check(
     export_figure(fig, output_dir / "F3_premise_check", csv_data)
     plt.close(fig)
 
+
+def plot_f1b_calls_scaling_logy(
+    t2_rows: List[Dict[str, Any]],
+    output_dir: Path,
+) -> plt.Figure:
+    """Figure F1b: LLM calls per insertion vs n on log-y (and log-x) scale.
+
+    EXPLORATORY companion to Figure F1.
+    Non-positive means are never clamped; omitted points are listed in CSV and footnote.
+    """
+    apply_thesis_style()
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    csv_data: List[Dict[str, Any]] = []
+    omitted_notes: List[str] = []
+
+    primaries = [r for r in t2_rows if "primary" in r.get("variant", "")]
+    if not primaries:
+        primaries = t2_rows
+
+    strategies = sorted(list(set(r["strategy"] for r in primaries)))
+    strat_order = ["brute_force", "embedding_threshold", "ann_retrieval", "bounded_bucket"]
+    strategies.sort(key=lambda s: strat_order.index(s) if s in strat_order else 99)
+
+    for strat in strategies:
+        color = STRATEGY_PALETTE.get(strat, "#333333")
+        marker = STRATEGY_MARKERS.get(strat, "o")
+        label = STRATEGY_LABELS.get(strat, strat)
+
+        s_rows = [r for r in primaries if r["strategy"] == strat]
+        s_rows.sort(key=lambda x: int(x["size_n"]))
+
+        sizes: List[int] = []
+        means: List[float] = []
+        lows: List[float] = []
+        highs: List[float] = []
+
+        for r in s_rows:
+            s = int(r["size_n"])
+            m = float(r["llm_calls_mean"])
+            l = float(r.get("llm_calls_ci_mean_low", r["llm_calls_mean"]))
+            h = float(r.get("llm_calls_ci_mean_high", r["llm_calls_mean"]))
+            med = float(r.get("llm_calls_median", m))
+            std = float(r.get("llm_calls_std", 0.0))
+
+            if np.isfinite(m) and m > 0:
+                plotted = True
+                sizes.append(s)
+                means.append(m)
+                lows.append(l)
+                highs.append(h)
+            else:
+                plotted = False
+                omitted_notes.append(f"not plotted: {strat} n={s}: zero mean")
+
+            csv_data.append({
+                "status": "exploratory",
+                "plotted": plotted,
+                "strategy": strat,
+                "variant": r["variant"],
+                "n": s,
+                "llm_calls_mean": m,
+                "llm_calls_ci_low": l,
+                "llm_calls_ci_high": h,
+                "llm_calls_median": med,
+                "llm_calls_std": std,
+            })
+
+        if sizes:
+            y_err = [
+                np.array(means) - np.array(lows),
+                np.array(highs) - np.array(means),
+            ]
+            ax.errorbar(sizes, means, yerr=y_err, label=label, color=color, marker=marker, capsize=4, lw=1.75)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Graph Size n (log scale)")
+    ax.set_ylabel("LLM Calls per Insertion (log scale)")
+    ax.set_title("Figure F1b: LLM Calls Scaling with Graph Size (Log-Log Scale, 95% Bootstrap CI)\nEXPLORATORY: log scale, not pre-registered")
+    ax.legend(loc="upper left")
+
+    ax.text(
+        0.98, 0.03, "EXPLORATORY: log scale, not pre-registered",
+        transform=ax.transAxes, fontsize=8, ha="right", va="bottom",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85, edgecolor="gray"),
+    )
+
+    if omitted_notes:
+        fig.text(0.12, 0.01, "; ".join(omitted_notes), fontsize=7.5, style="italic")
+
+    fig.tight_layout()
+    export_figure(fig, output_dir / "F1b_calls_scaling_logy", csv_data)
+    plt.close(fig)
+    return fig
+
+
+def plot_f2b_wallclock_scaling_logy(
+    t2_rows: List[Dict[str, Any]],
+    output_dir: Path,
+) -> plt.Figure:
+    """Figure F2b: Wall-clock latency vs n on log-y scale.
+
+    EXPLORATORY companion to Figure F2.
+    Panel A: Total latency (log-log scale)
+    Panel B: Shortlist vs Decide component split (log-log scale)
+    """
+    apply_thesis_style()
+    fig, (ax_tot, ax_split) = plt.subplots(1, 2, figsize=(14, 5.5))
+    csv_data: List[Dict[str, Any]] = []
+    omitted_notes: List[str] = []
+
+    primaries = [r for r in t2_rows if "primary" in r.get("variant", "")]
+    if not primaries:
+        primaries = t2_rows
+
+    strategies = sorted(list(set(r["strategy"] for r in primaries)))
+    strat_order = ["brute_force", "embedding_threshold", "ann_retrieval", "bounded_bucket"]
+    strategies.sort(key=lambda s: strat_order.index(s) if s in strat_order else 99)
+
+    for strat in strategies:
+        color = STRATEGY_PALETTE.get(strat, "#333333")
+        marker = STRATEGY_MARKERS.get(strat, "o")
+        label = STRATEGY_LABELS.get(strat, strat)
+
+        s_rows = [r for r in primaries if r["strategy"] == strat]
+        s_rows.sort(key=lambda x: int(x["size_n"]))
+
+        tot_sizes: List[int] = []
+        tot_means: List[float] = []
+        tot_lows: List[float] = []
+        tot_highs: List[float] = []
+
+        sh_sizes: List[int] = []
+        sh_means: List[float] = []
+
+        dec_sizes: List[int] = []
+        dec_means: List[float] = []
+
+        for r in s_rows:
+            s = int(r["size_n"])
+            tm = float(r["total_s_mean"])
+            tl = float(r.get("total_s_ci_mean_low", r["total_s_mean"]))
+            th = float(r.get("total_s_ci_mean_high", r["total_s_mean"]))
+            sh = float(r["shortlist_s_mean"])
+            dec = float(r["decide_s_mean"])
+            clean_tm = r.get("clean_total_s_mean_post_hoc_not_preregistered", tm)
+
+            if np.isfinite(tm) and tm > 0:
+                plotted = True
+                tot_sizes.append(s)
+                tot_means.append(tm)
+                tot_lows.append(tl)
+                tot_highs.append(th)
+            else:
+                plotted = False
+                omitted_notes.append(f"not plotted: {strat} n={s}: zero mean")
+
+            if np.isfinite(sh) and sh > 0:
+                sh_sizes.append(s)
+                sh_means.append(sh)
+
+            if np.isfinite(dec) and dec > 0:
+                dec_sizes.append(s)
+                dec_means.append(dec)
+
+            csv_data.append({
+                "status": "exploratory",
+                "plotted": plotted,
+                "strategy": strat,
+                "variant": r["variant"],
+                "n": s,
+                "total_s_mean": tm,
+                "total_s_ci_low": tl,
+                "total_s_ci_high": th,
+                "shortlist_s_mean": sh,
+                "decide_s_mean": dec,
+                "clean_total_s_mean_post_hoc": clean_tm,
+            })
+
+        if tot_sizes:
+            y_err = [
+                np.array(tot_means) - np.array(tot_lows),
+                np.array(tot_highs) - np.array(tot_means),
+            ]
+            ax_tot.errorbar(tot_sizes, tot_means, yerr=y_err, label=label, color=color, marker=marker, capsize=4, lw=1.75)
+
+        if sh_sizes:
+            ax_split.plot(sh_sizes, sh_means, color=color, marker=marker, linestyle="--", lw=1.5, label=f"{strat} (shortlist)")
+        if dec_sizes:
+            ax_split.plot(dec_sizes, dec_means, color=color, marker=marker, linestyle="-", lw=1.5, label=f"{strat} (decide)")
+
+    ax_tot.set_xscale("log")
+    ax_tot.set_yscale("log")
+    ax_tot.set_xlabel("Graph Size n (log scale)")
+    ax_tot.set_ylabel("Total Latency per Insertion (s, log scale)")
+    ax_tot.set_title("Panel A: Total Wall-Clock Latency vs n (Log-Log)\nEXPLORATORY: log scale, not pre-registered")
+    ax_tot.legend(loc="upper left")
+
+    ax_split.set_xscale("log")
+    ax_split.set_yscale("log")
+    ax_split.set_xlabel("Graph Size n (log scale)")
+    ax_split.set_ylabel("Component Latency (s, log scale)")
+    ax_split.set_title("Panel B: Shortlist vs. Decide Component Split (Log-Log)\nEXPLORATORY: log scale, not pre-registered")
+    ax_split.legend(loc="upper left", fontsize=7)
+
+    ax_tot.text(
+        0.98, 0.03, "EXPLORATORY: log scale, not pre-registered",
+        transform=ax_tot.transAxes, fontsize=8, ha="right", va="bottom",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85, edgecolor="gray"),
+    )
+    ax_split.text(
+        0.98, 0.03, "EXPLORATORY: log scale, not pre-registered",
+        transform=ax_split.transAxes, fontsize=8, ha="right", va="bottom",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85, edgecolor="gray"),
+    )
+
+    if omitted_notes:
+        fig.text(0.12, 0.01, "; ".join(omitted_notes), fontsize=7.5, style="italic")
+
+    fig.tight_layout()
+    export_figure(fig, output_dir / "F2b_wallclock_scaling_logy", csv_data)
+    plt.close(fig)
+    return fig
+
+
+def plot_f6b_cost_vs_accuracy_logx(
+    t1_rows: List[Dict[str, Any]],
+    output_dir: Path,
+) -> plt.Figure:
+    """Figure F6b: Cost beside accuracy on log-x scale (calls against F1).
+
+    EXPLORATORY companion to Figure F6.
+    Axis: log x, y stays linear (0 to 1.05).
+    Deterministic non-overlapping annotations with alternating offsets and leader lines.
+    Reuses evaluate_dominance for the pairwise dominance box.
+    """
+    apply_thesis_style()
+
+    primaries = [r for r in t1_rows if "primary" in r.get("variant", "")]
+    if not primaries:
+        primaries = t1_rows
+
+    corpora = sorted(list(set(r["corpus"] for r in primaries)))
+    if not corpora:
+        fig, ax = plt.subplots()
+        plt.close(fig)
+        return fig
+
+    fig, axes = plt.subplots(1, len(corpora), figsize=(7.0 * len(corpora), 5.5), squeeze=False)
+    csv_data: List[Dict[str, Any]] = []
+    omitted_notes: List[str] = []
+
+    for c_idx, corpus in enumerate(corpora):
+        ax = axes[0][c_idx]
+        c_rows = [r for r in primaries if r["corpus"] == corpus]
+
+        clean_corpus_name = "DSA (29 Nodes)" if "DSA" in corpus else "Metacademy (141 Nodes)"
+        n_corpus_str = "29" if "DSA" in corpus else "141"
+        ax.set_title(f"Cost vs. Accuracy (Log-X): {clean_corpus_name}\nEXPLORATORY: log scale, not pre-registered")
+        ax.set_xlabel("Mean LLM Calls per Insertion (log scale)")
+        ax.set_ylabel("Micro F1 Score")
+        ax.set_xscale("log")
+        ax.set_ylim(0, 1.05)
+
+        points: Dict[str, Dict[str, float]] = {}
+        pts_to_annotate: List[Dict[str, Any]] = []
+
+        for r in c_rows:
+            strat = r["strategy"]
+            color = STRATEGY_PALETTE.get(strat, "#000000")
+            marker = STRATEGY_MARKERS.get(strat, "o")
+            calls = float(r["llm_calls_mean"])
+            f1 = float(r["f1_micro"])
+
+            if np.isfinite(calls) and calls > 0:
+                plotted = True
+                ax.scatter(calls, f1, color=color, marker=marker, s=90, label=STRATEGY_LABELS.get(strat, strat), zorder=4)
+                points[strat] = {"calls": calls, "f1": f1}
+                pts_to_annotate.append({
+                    "strategy": strat,
+                    "calls": calls,
+                    "f1": f1,
+                })
+            else:
+                plotted = False
+                omitted_notes.append(f"not plotted: {strat} n={n_corpus_str}: zero mean")
+
+            csv_data.append({
+                "status": "exploratory",
+                "plotted": plotted,
+                "corpus": corpus,
+                "strategy": strat,
+                "variant": r["variant"],
+                "calls": calls,
+                "f1": f1,
+            })
+
+        # Place annotations deterministically: sort by x and alternate offsets up and down
+        pts_to_annotate.sort(key=lambda p: (p["calls"], p["strategy"]))
+        for idx, pt in enumerate(pts_to_annotate):
+            strat = pt["strategy"]
+            calls = pt["calls"]
+            f1 = pt["f1"]
+            if idx % 2 == 0:
+                offset = (0, 25)
+                va = "bottom"
+            else:
+                offset = (0, -32)
+                va = "top"
+
+            ax.annotate(
+                f"{strat}\n({calls:.1f}, {f1:.3f})",
+                xy=(calls, f1),
+                xytext=offset,
+                textcoords="offset points",
+                fontsize=8,
+                ha="center",
+                va=va,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.85, edgecolor="gray", lw=0.5),
+                arrowprops=dict(arrowstyle="-", color="gray", lw=0.8),
+            )
+
+        # Evaluate dominance pairs per Rule R2
+        strat_names = list(points.keys())
+        text_lines: List[str] = []
+        for i in range(len(strat_names)):
+            for j in range(i + 1, len(strat_names)):
+                s_a, s_b = strat_names[i], strat_names[j]
+                dom = evaluate_dominance(points[s_a], points[s_b])
+                text_lines.append(f"{s_a} vs {s_b}: {dom}")
+
+        if text_lines:
+            ax.text(
+                0.03, 0.97, "\n".join(text_lines),
+                transform=ax.transAxes,
+                fontsize=7,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.85, edgecolor="gray"),
+            )
+
+        ax.legend(loc="lower right", fontsize=8)
+
+        ax.text(
+            0.98, 0.03, "EXPLORATORY: log scale, not pre-registered",
+            transform=ax.transAxes, fontsize=8, ha="right", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.85, edgecolor="gray"),
+        )
+
+    if omitted_notes:
+        fig.text(0.12, 0.01, "; ".join(omitted_notes), fontsize=7.5, style="italic")
+
+    fig.tight_layout()
+    export_figure(fig, output_dir / "F6b_cost_vs_accuracy_logx", csv_data)
+    plt.close(fig)
+    return fig
+
+

@@ -77,6 +77,7 @@ Status: **in-progress**
 | ANALYSIS-002 | Implement and wire Phase 4 empirical analysis pipeline (`scripts/analysis/`), benchmark figures, tables, and record D-85 | **done** | Completed by Gemini; branch `task/ANALYSIS-002` at commit `17ed1f8` (base `48037e3`). See report [`docs/reports/ANALYSIS-002-gemini-report.md`](docs/reports/ANALYSIS-002-gemini-report.md). |
 | ANALYSIS-002-F | Remediate Phase 4 analysis pipeline review defects, enforce validation gate, implement Rules R1–R3, and record D-86 | **done** | Completed by Gemini; branch `task/ANALYSIS-002-F` at commit `f5e085d` (base `17ed1f8`). See report [`docs/reports/ANALYSIS-002-F-gemini-report.md`](docs/reports/ANALYSIS-002-F-gemini-report.md). |
 | ANALYSIS-002-G | Independent review of ANALYSIS-002-F Phase 4 analysis pipeline remediation | **done** | Completed by Gemini; branch `task/ANALYSIS-002-G` at commit `ccec59c` (base `f5e085d`). See report [`docs/reports/ANALYSIS-002-G-gemini-review.md`](docs/reports/ANALYSIS-002-G-gemini-review.md). |
+| ANALYSIS-003 | Add exploratory log-scale companion figures F1b, F2b, F6b and record D-87 | **done** | Completed by Gemini; branch `task/ANALYSIS-003` at commit `5ab04a6` (base `79046eb`). See report [`docs/reports/ANALYSIS-003-gemini-report.md`](docs/reports/ANALYSIS-003-gemini-report.md). |
 
 ## Thesis document status (separate track from the code work above)
 
