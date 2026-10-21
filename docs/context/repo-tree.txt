@@ -19,6 +19,15 @@
 │   │   ├── COLLABORATOR-GUIDE.md
 │   │   └── Name-pool generation runbook.md
 │   ├── prompts
+│   │   ├── ANALYSIS-002-G-prompt.md
+│   │   ├── ANALYSIS-002-G-PROMPT.md
+│   │   ├── ANALYSIS-003-prompt.md
+│   │   ├── ANALYSIS-003-PROMPT.md
+│   │   ├── CHK-001-PROMPT.md
+│   │   ├── DOC-011-prompt.md
+│   │   ├── DOC-011-PROMPT.md
+│   │   ├── DOC-012-prompt.md
+│   │   ├── FIG-001-prompt.md
 │   │   ├── STANDALONE-ADOPTION-PROMPT.md
 │   │   └── STANDALONE-PROMPT-TEMPLATE.md
 │   ├── reports
@@ -29,6 +38,10 @@
 │   │   ├── ANALYSIS-001-G-gemini-review.md
 │   │   ├── ANALYSIS-001-R-gemini-review.md
 │   │   ├── ANALYSIS-001-validator-report.md
+│   │   ├── ANALYSIS-002-F-gemini-report.md
+│   │   ├── ANALYSIS-002-gemini-report.md
+│   │   ├── ANALYSIS-002-G-gemini-review.md
+│   │   ├── ANALYSIS-003-gemini-report.md
 │   │   ├── DATA-001-gemini-verify-file-formats.md
 │   │   ├── DATA-002-gemini-mekg-directionality.md
 │   │   ├── DATA-003-gemini-source-text-evidence.md
@@ -54,7 +67,11 @@
 │   │   ├── DOC-005-A-gemini-erratum.md
 │   │   ├── DOC-005-gemini-run-plan.md
 │   │   ├── DOC-006-gemini.md
+│   │   ├── DOC-007-gemini-thesis-reconciliation.md
 │   │   ├── DOC-010-gemini-d82-correction.md
+│   │   ├── DOC-011-gemini-campaign-record.md
+│   │   ├── DOC-012-claude-code-correction.md
+│   │   ├── FIG-001-claude-code-redraw-legibility.md
 │   │   ├── FIX-001-gemini-infra-001-followup.md
 │   │   ├── FIX-002-gemini-infra-002-hardening.md
 │   │   ├── FIX-003-gemini-driver-followup.md
@@ -122,6 +139,10 @@
 │   ├── 0001-DOC-005-A-erratum-for-DOC-005-report-correct-Strateg.patch
 │   ├── 0001-DOC-005-record-run-plan-decisions-and-README-run-pla.patch
 │   ├── 0001-DOC-006-close-DOC-002-record-D-69-narrow-data-format.patch
+│   ├── 0001-docs-DOC-011-record-sweep-campaign-pipeline-provenan.patch
+│   ├── 0001-feat-ANALYSIS-003-add-exploratory-log-scale-companio.patch
+│   ├── 0001-feat-analysis-implement-and-wire-Phase-4-analysis-pi.patch
+│   ├── 0001-feat-FIG-001-add-legibility-redraw-script-and-report.patch
 │   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
 │   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
 │   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
@@ -144,6 +165,8 @@
 │   ├── 0004-STRAT-001-R-independent-review-of-Strategy-1-brute-f.patch
 │   ├── 0005-docs-reports-record-STRAT-003-prerequisite-check-rep.patch
 │   ├── 0006-FIX-015-explicit-adapter-thinking-control-results-da.patch
+│   ├── ANALYSIS-002-gemini-pipeline-wiring.patch
+│   ├── ANALYSIS-003-gemini-exploratory-companion-figures.patch
 │   ├── code_changes.patch
 │   ├── commit_DATA-004.patch
 │   ├── commit_DATA-005_code.patch
@@ -163,6 +186,7 @@
 │   ├── commit_INFRA-006.patch
 │   ├── DATA-006_code.patch
 │   ├── diff.txt
+│   ├── DOC-011-gemini-campaign-record.patch
 │   ├── FIX-006.patch
 │   ├── FIX-011_code.patch
 │   ├── FIX-011_working_tree.patch
@@ -180,7 +204,14 @@
 │   └── STRAT-004.patch
 ├── scripts
 │   ├── analysis
+│   │   ├── bootstrap.py
+│   │   ├── figures.py
 │   │   ├── __init__.py
+│   │   ├── redraw_thesis_figures.py
+│   │   ├── run_analysis.py
+│   │   ├── stats.py
+│   │   ├── style.py
+│   │   ├── tables.py
 │   │   └── validate_runs.py
 │   ├── apc-bundle.sh
 │   ├── generate_name_pool.py
@@ -219,6 +250,7 @@
 │   ├── controllable_embedder.py
 │   ├── __init__.py
 │   ├── stub_prompt_adapter.py
+│   ├── test_analysis_pipeline.py
 │   ├── test_analysis_validate_runs.py
 │   ├── test_ann_retrieval_strategy.py
 │   ├── test_apc_bundle.sh
@@ -246,4 +278,8 @@
 │   ├── test_strategy_interface.py
 │   └── test_strategy_registry.py
 ├── AGENTS.md
-└── pyproject.toml
+├── apc_check_f_outputs.py
+├── apc_check_pipeline_outputs.py
+├── CLAUDE.md
+├── pyproject.toml
+└── redraw_thesis_figures.py
