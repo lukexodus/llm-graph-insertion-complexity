@@ -40,11 +40,14 @@ try:
     )
     from .figures import (
         plot_f1_calls_scaling,
+        plot_f1b_calls_scaling_logy,
         plot_f2_wallclock_scaling,
+        plot_f2b_wallclock_scaling_logy,
         plot_f3_premise_check,
         plot_f4_accuracy_comparison,
         plot_f5_sensitivity_panels,
         plot_f6_cost_vs_accuracy,
+        plot_f6b_cost_vs_accuracy_logx,
     )
 except ImportError:
     from validate_runs import validate_all_runs
@@ -59,11 +62,14 @@ except ImportError:
     )
     from figures import (
         plot_f1_calls_scaling,
+        plot_f1b_calls_scaling_logy,
         plot_f2_wallclock_scaling,
+        plot_f2b_wallclock_scaling_logy,
         plot_f3_premise_check,
         plot_f4_accuracy_comparison,
         plot_f5_sensitivity_panels,
         plot_f6_cost_vs_accuracy,
+        plot_f6b_cost_vs_accuracy_logx,
     )
 
 
@@ -222,6 +228,9 @@ def main() -> int:
         print(f"    Saved: {figures_dir / 'F6_cost_vs_accuracy_dominance.pdf'} (.png, .csv)")
         print(f"    Saved: {figures_dir / 'F6_dominance.csv'} and .md")
 
+        plot_f6b_cost_vs_accuracy_logx(t1_rows, figures_dir)
+        print(f"    Saved: {figures_dir / 'F6b_cost_vs_accuracy_logx.pdf'} (.png, .csv)")
+
     # 4. Sweep Tables & Figures (if sweep runs present)
     if sweep_runs:
         print("\n>>> STEP 5: Generating Sweep Cost Table (T2) and Slope Fits...")
@@ -272,6 +281,12 @@ def main() -> int:
 
         plot_f3_premise_check(t2_rows, figures_dir, k_cap=k_cap, smax_cap=smax_cap)
         print(f"    Saved: {figures_dir / 'F3_premise_check.pdf'} (.png, .csv)")
+
+        plot_f1b_calls_scaling_logy(t2_rows, figures_dir)
+        print(f"    Saved: {figures_dir / 'F1b_calls_scaling_logy.pdf'} (.png, .csv)")
+
+        plot_f2b_wallclock_scaling_logy(t2_rows, figures_dir)
+        print(f"    Saved: {figures_dir / 'F2b_wallclock_scaling_logy.pdf'} (.png, .csv)")
 
     print("\n" + "=" * 80)
     print("PHASE 4 ANALYSIS PIPELINE COMPLETED SUCCESSFULLY (100% PASS).")
