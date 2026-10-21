@@ -325,7 +325,10 @@ Enforces worktree isolation when running multiple local agents or tasks in paral
 # Validate worktree state before operator commit
 ./scripts/task-worktree.sh handoff ANALYSIS-002
 
-# Clean up worktree after merge
+# Safely audit, merge worktree to current branch, and clean up
+./scripts/task-worktree.sh merge ANALYSIS-002
+
+# Clean up worktree manually after merge (if not using merge command)
 ./scripts/task-worktree.sh remove ANALYSIS-002
 ```
 
