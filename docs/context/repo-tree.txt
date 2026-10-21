@@ -3,6 +3,7 @@
 │   └── synthetic
 │       └── cs_concept_names.json
 ├── docs
+│   ├── artifacts
 │   ├── context
 │   │   ├── adviser-briefing-d1-d6.md
 │   │   ├── analysis-plan.md
@@ -18,13 +19,12 @@
 │   ├── guide
 │   │   ├── COLLABORATOR-GUIDE.md
 │   │   └── Name-pool generation runbook.md
+│   ├── handoffs
+│   │   └── APC-B-strategy-track-handoff-2026-10-21.md
 │   ├── prompts
-│   │   ├── ANALYSIS-002-G-prompt.md
 │   │   ├── ANALYSIS-002-G-PROMPT.md
-│   │   ├── ANALYSIS-003-prompt.md
 │   │   ├── ANALYSIS-003-PROMPT.md
 │   │   ├── CHK-001-PROMPT.md
-│   │   ├── DOC-011-prompt.md
 │   │   ├── DOC-011-PROMPT.md
 │   │   ├── DOC-012-prompt.md
 │   │   ├── FIG-001-prompt.md
@@ -129,6 +129,10 @@
 │   │   ├── high-level-tasks.md
 │   │   └── status.md
 │   └── thesis
+│       ├── drafts
+│       │   ├── chapter-4-draft.md
+│       │   ├── Defense material draft.md
+│       │   └── defense-qa-and-outline-draft.md
 │       └── An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction.md
 ├── patch
 │   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
@@ -204,6 +208,8 @@
 │   └── STRAT-004.patch
 ├── scripts
 │   ├── analysis
+│   │   ├── apc_check_f_outputs.py
+│   │   ├── apc_check_pipeline_outputs.py
 │   │   ├── bootstrap.py
 │   │   ├── figures.py
 │   │   ├── __init__.py
@@ -278,8 +284,6 @@
 │   ├── test_strategy_interface.py
 │   └── test_strategy_registry.py
 ├── AGENTS.md
-├── apc_check_f_outputs.py
-├── apc_check_pipeline_outputs.py
 ├── CLAUDE.md
 ├── pyproject.toml
 └── redraw_thesis_figures.py
