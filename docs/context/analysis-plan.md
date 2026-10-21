@@ -110,3 +110,12 @@ Every figure is saved as vector (PDF) and as the CSV it was drawn from. Fonts, c
 2. **Directory name and configuration slug (§2)**: Directory name must match `manifest.json` `run_id` and the canonical strategy/config slug derived from `strategy_config.json`; mismatch fails.
 3. **Duplicate keys and failure accounting (§2)**: Confirmed from `harness.py` that successful keys are skipped on resume; a duplicate trial key whose earlier record is a success fails validation as corrupt. Failed-then-succeeded keys are listed separately from still-failed keys, and Table T3 reports both counts.
 
+### Amendment 3 (2026-10-20):
+Amendment 3 (2026-10-20), made after the sweep campaign and after an agent-written draft of the pipeline had been run on the real results (see [D-84] for what is and is not known about who saw its numbers):
+1. Amendment 1's statement that the primary-column choice is 'confirmed against thesis Section 3.3.1' is clarified: Section 3.3.1 defines 'standard scores' (unjudged pair omitted) and a separate sensitivity variant (unjudged pair counted as a false positive); the plan's non-sensitivity columns are the standard scores. The thesis text does not use the word 'primary' (D-82).
+2. Strategy 1 and Strategy 2 sweep runs were first executed at sizes 50, 100, 200 and 500 and then extended by --resume to the full six sizes before any analysis of the final data; the frozen design on sizes is unchanged ([D-84]).
+3. Failed-then-succeeded keys, retried trials and the single peak-hour trial are reported as sensitivity analyses, labelled post-hoc.
+4. A log-log slope is undefined when any size has zero mean cost. Such fits are reported as undefined and receive no D2 category. An exploratory fit on positive-mean sizes may be shown, labelled exploratory.
+5. The post-hoc timing sensitivity excludes trials with retries > 0 and the single trial sweep:brute_force:2000:t9, the only trial launched with --allow-peak inside a peak window ([D-84]).
+
+
