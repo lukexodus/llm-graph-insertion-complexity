@@ -340,6 +340,10 @@ The demo is an illustration, not a new result. Decisions are real recorded
 PILOT-001 answers (2026-10-07, prompt v2, `deepseek-flash`); latency, tokens and
 cost are recorded values, not measurements from the demo run.
 
+Operator guide, including defense-day flow, flags, troubleshooting, exit codes
+and suggested counter-nodes:
+[`docs/presentation/information/DEMO-001-OPERATOR-GUIDE.md`](../docs/presentation/information/DEMO-001-OPERATOR-GUIDE.md).
+
 ---
 
 ## Operational Tooling

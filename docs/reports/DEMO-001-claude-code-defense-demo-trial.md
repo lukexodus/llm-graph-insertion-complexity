@@ -30,6 +30,10 @@ Run it with:
 .venv-ann/bin/python scripts/demo_trial.py
 ```
 
+Operator guide (defense-day flow, flags, troubleshooting, exit codes and
+suggested counter-nodes):
+[`docs/presentation/information/DEMO-001-OPERATOR-GUIDE.md`](../presentation/information/DEMO-001-OPERATOR-GUIDE.md).
+
 ---
 
 ## 2. Pre-flight Results (P1–P8)
@@ -655,9 +659,12 @@ Suite totals: **787 passed, 3 skipped** (analysis modules excluded).
 
 ## 9. Git Diff and Patch
 
-The diff below is `git diff --cached` for the implementation, tests, README,
-prompt archive, status row and D-99 entry. This report file itself is added after
-the diff was captured; the authoritative full patch is:
+The operator guide was added in a follow-up commit on the same branch; the
+authoritative patch file includes it. The diff below is the initial
+implementation diff (`git diff --cached` before this report was committed):
+implementation, tests, README, prompt archive, status row and D-99 entry. The
+report file itself was added after the diff was captured. The authoritative full
+patch is:
 
 `patch/DEMO-001-claude-code-defense-demo-trial.patch`
 
