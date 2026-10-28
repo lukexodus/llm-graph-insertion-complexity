@@ -6,6 +6,17 @@ it names is the transfer. The core bundle referenced at the end carries the
 current text of every file named here, plus the edited docx and the
 ANALYSIS-004 outputs.
 
+> **UPDATE — same day, after this handoff was first written.** ANALYSIS-004
+> was merged to master at **`c05d1e0`** and the edited docx text was synced
+> into the repo markdown at **`8685310`**. The sections below describe the
+> state before that; read them with this update applied. Master is now the
+> merged state, the ANALYSIS-004 worktree and branch are gone, the old
+> Chapters 1–3 markdown is removed (history retains it), and the revised
+> Chapters 1–4 markdown now carries the docx text with figures extracted to
+> `docs/thesis/media/` (image1 = F7, image2 = F8, image9 = F9,
+> byte-identical). The pre-sync markdown is archived under
+> `docs/thesis/previous-versions/`.
+
 ---
 
 ## 1. Orientation (unchanged)
@@ -62,11 +73,11 @@ reproducible, gate-validated pipeline stage.
   report sentences were wrong (T9b matches are 3 of 6, not 2; the MC
   dispersion claim above), corrected in the erratum and [D-91]. The C_i
   formula finding was confirmed.
-- **Branch:** `task/ANALYSIS-004`, head `4c6330a`, base `a524de7`, worktree
-  `/home/lukexodus/projects/llm-graph-insertion-complexity-ANALYSIS-004`.
-  Commits: `edda901` (D-89 + Amendment 4), `8e2eccf` (code/tests),
-  `e3b563d` (figure layout), `f4ba18a` (D-90 + status), `b32ee07` (report +
-  status), `7ee6065` (D-91 + erratum), `4c6330a` (erratum wording).
+- **Branch:** `task/ANALYSIS-004` was merged to master at `c05d1e0` and the
+  branch and worktree were deleted. Commits merged: `edda901` (D-89 +
+  Amendment 4), `8e2eccf` (code/tests), `e3b563d` (figure layout),
+  `f4ba18a` (D-90 + status), `b32ee07` (report + status), `7ee6065`
+  (D-91 + erratum), `4c6330a` (erratum wording), `fa57170` (this handoff).
 - **Report:** `docs/reports/ANALYSIS-004-claude-code-posthoc-ranking.md`.
   **Erratum:** `docs/reports/ANALYSIS-004-claude-code-erratum.md` (this is
   the authoritative correction; the original report's two wrong sentences
@@ -75,13 +86,20 @@ reproducible, gate-validated pipeline stage.
   (`git diff a524de7..f4ba18a`, 2,355 lines; `patch/` is gitignored).
 - **Outputs bundle:** `/home/lukexodus/projects/thesis-analysis/bundle_c_posthoc_outputs.tar.gz`.
 
-### Thesis edits applied by the ending APC (docx only)
+### Thesis edits applied by the ending APC (docx, then synced to the repo)
 
 The ending APC applied the ANALYSIS-004 delta to the docx and replaced
-Figures 4.11–4.13 with F7/F8/F9. **This new text exists only in the docx in
-`docs/thesis/`, not in the repo's markdown.**
+Figures 4.11–4.13 with F7/F8/F9. **The text has since been synced into the
+repo markdown at `8685310`**, so the repo and the docx now agree on text;
+the docx remains the layout artefact.
 
-- File: `docs/thesis/_REVISED__An_Empirical_Complexity_Analysis_of_Candidate-Narrowing_Strategies_for_Incremental_LLM-Driven_Graph_Construction_With_Chapter_4_ANALYSIS-004.docx`
+- Docx (source layout):
+  `docs/thesis/_REVISED__An_Empirical_Complexity_Analysis_of_Candidate-Narrowing_Strategies_for_Incremental_LLM-Driven_Graph_Construction_With_Chapter_4_ANALYSIS-004.docx`
+  (untracked).
+- Synced markdown:
+  `docs/thesis/[REVISED] An Empirical Complexity Analysis … With Chapter 4.md`,
+  with figures in `docs/thesis/media/`; pre-sync copy under
+  `docs/thesis/previous-versions/`.
 - Text export for reading: `/home/lukexodus/projects/thesis-analysis/ANALYSIS-004_thesis_export.md`
   (pandoc gfm; the C_i formula is present as `C_i = 1 − …`).
 - Verified in the docx: `numpy.random.default_rng(42)`, the exact-share
@@ -99,16 +117,12 @@ Figures 4.11–4.13 with F7/F8/F9. **This new text exists only in the docx in
 
 ## 3. What is in flight
 
-- **ANALYSIS-004 is `needs-review` and its branch is unmerged.** The
-  worktree remains at
-  `/home/lukexodus/projects/llm-graph-insertion-complexity-ANALYSIS-004`.
-  Do not merge the untracked `repositories` symlink inside it (test support
-  only).
-- **Thesis text is split.** The edited docx is authoritative for the new
-  Section 3.6.3/4.4.1 text; the repo's revised `.md` predates those edits
-  and is untracked. The original Chapter 1–3 `.md` is **deleted in the main
-  working tree** (unstaged) and also untracked new files sit beside it. No
-  decision has been made on how to sync the docx text into the repo.
+- **ANALYSIS-004 is merged and done** (`c05d1e0`); the branch and worktree
+  are gone. The status row is updated to `done`.
+- **Thesis text is synced** (`8685310`). The edited docx remains the layout
+  artefact (untracked); the repo markdown carries its text, with figures in
+  `docs/thesis/media/`. The old Chapters 1–3 markdown was removed; git
+  history retains it. No further sync decision is open.
 - **Deck:** slide 37 still needs "0.907 to 0.960" → "0.905 to 0.959" and
   "69%" → "68%"; slide 22 is Luke's image fix. Slides 27 and 36 need no
   change.
@@ -119,15 +133,13 @@ Figures 4.11–4.13 with F7/F8/F9. **This new text exists only in the docx in
 
 ## 4. What to do first
 
-1. **Review and merge ANALYSIS-004** (or write a follow-up). Read the report,
-   the erratum and [D-89]/[D-90]/[D-91]; the independent review already
-   confirmed the numbers and the only corrections are the erratum's. Merge
-   only after review. Do not merge the `repositories` symlink.
-2. **Decide the thesis sync.** The docx holds the only current Chapter 3–4
-   text. If the repo should own it, write a DOC task that lands the docx
-   export (or a hand-edited markdown) into `docs/thesis/`, preserving the
-   old file history and recording the source docx path; otherwise record
-   that the docx is the working copy and the repo `.md` is stale.
+1. **ANALYSIS-004 is merged and synced.** No action needed beyond noting
+   `c05d1e0` (merge) and `8685310` (thesis sync). The report, erratum and
+   [D-89]/[D-90]/[D-91] are in master.
+2. **Verify the synced markdown** against the docx if a discrepancy is ever
+   suspected: the export was generated from the docx with pandoc, and
+   `media/image1.png`, `image2.png`, `image9.png` are byte-identical to
+   F7/F8/F9.
 3. **Close the deck edits** (slide 37; slide 22 is Luke's).
 4. Then pick up the open thesis items in Section 5.
 
@@ -135,17 +147,17 @@ Figures 4.11–4.13 with F7/F8/F9. **This new text exists only in the docx in
 
 ## 5. Repo state and unresolved items
 
-### Current repo state (verified from git at handoff time)
+### Current repo state (verified from git after the update above)
 
-- `master` is `a524de7`; it does **not** contain the ANALYSIS-004 branch.
-- `task/ANALYSIS-004` head `4c6330a`; `task/ANALYSIS-001-G`, `-002`, `-003`
-  are merged into master (their worktrees still exist).
-- Main working tree is **dirty with Luke's edits**: `.gitignore` modified,
-  `docs/context/repo-tree.txt` modified, original thesis `.md` deleted
-  (unstaged), and untracked `docs/thesis/[REVISED] …With Chapter 4.md`,
-  the ANALYSIS-004 docx, `docs/thesis/buffer/`,
-  `docs/thesis/previous-versions/`, `docs/presentation/`,
-  `redraw_thesis_figures.py`. Do not treat these as committed state.
+- `master` is `8685310` (merge `c05d1e0`, sync `8685310`); ANALYSIS-004 is
+  in it.
+- `task/ANALYSIS-001-G`, `-002`, `-003` are merged into master (their
+  worktrees still exist). The ANALYSIS-004 worktree/branch is gone.
+- Tracked working tree is clean. Untracked files (not committed state):
+  the ANALYSIS-004 docx, `docs/thesis/buffer/`, `docs/presentation/`,
+  `redraw_thesis_figures.py`, and the archived old Chapters 1–3 file under
+  `docs/thesis/previous-versions/`. The revised markdown and its
+  `docs/thesis/media/` figures are tracked.
 - `patch/` is gitignored; patch files exist but are untracked by design.
 - The hashes file recorded in earlier provenance as
   `~/run-logs/final-results-hashes.txt` now lives at
@@ -230,12 +242,11 @@ Figures 4.11–4.13 with F7/F8/F9. **This new text exists only in the docx in
 
 ## 7. Bundle contents
 
-Built from the ANALYSIS-004 worktree so that it carries the post-merge-view
-status and decision log (including [D-91]). It contains the core context
-files, the frozen analysis plan, the catalogue, the revised thesis markdown,
+Built from master after the merge and sync. It contains the core context
+files, the frozen analysis plan, the catalogue, the synced thesis markdown,
 the edited ANALYSIS-004 docx, the pandoc text export, the task report and
-erratum, and the current `repo-tree.txt`. Path and checksum are in the
-message that accompanies this handoff.
+erratum, this handoff, and the current `repo-tree.txt`. Path and checksum
+are in the message that accompanies this handoff.
 
 The pre-registered and post-hoc **outputs** are not inside that bundle; they
 are at `/home/lukexodus/projects/thesis-analysis/final_output_posthoc`
