@@ -1,68 +1,6 @@
-# Defense Script and Background Guide
-
-*An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction*
-
-Adrian Luke A. Labasan · Alejandrei Jazz F. Lopez · Geila May C. Rigayen · Melvie Jeanna O. Abad
-
-## How to use this guide
-
-Every slide has two parts: a **Script** you can say almost word for word, and a **Background** that teaches the ideas behind the slide so you can answer follow-up questions. Scripts are written for a calm pace of about 130 words a minute. All numbers come from the deck and from Chapter 4 of the thesis, so quote them exactly as they appear.
-
-**How the Backgrounds are built.** Each Background starts from the simplest idea and adds one step at a time until it reaches what the slide says. Ideas build across slides too: an idea is explained in full where it first matters, and later slides reuse it. If a term is unfamiliar, go back to the slide where it first appears (see the map below). Wherever a number or example is labelled "our arithmetic" or "illustration", it is a teaching aid and not a thesis claim.
-
-**Naming.** Slides 15–17 and 22 use Strategies A–D, while Chapters III and IV use S1–S4. They are the same strategies: A = S1 brute force, B = S2 embedding threshold, C = S3 ANN retrieval, D = S4 bounded bucket.
-
-**Four messages every presenter repeats**
-
-1. We measure one insertion at a time. We do not test amortized cost over a sequence of insertions.
-2. Only the narrowing step differs between strategies. The LLM decision step is identical, so differences come from narrowing.
-3. Results are descriptive: one run per configuration, 10 trials per size, no hypothesis tests.
-4. The classification and ranking of the strategies was defined after the results were available (post hoc).
-
-## Concept ladder: where each idea is first taught
-
-Read down the list to see how the study builds from a graph to a ranking. Each row uses the rows above it.
-
-| Idea                                                               | First taught on  | Needed for                   |
-| ------------------------------------------------------------------ | ---------------- | ---------------------------- |
-| Graph, node, edge, direction, knowledge graph, LLM                 | Slide 4          | Everything                   |
-| Batch versus incremental, the symbol n, a call as the unit of cost | Slide 5          | Cost on slides 31–32         |
-| Linear cost and brute force                                        | Slide 6          | The control condition        |
-| Embeddings, cosine similarity, threshold, top-k, bucket            | Slide 7          | Strategies on slide 23       |
-| Research gap, aggregate versus scaling cost                        | Slide 8          | Research questions           |
-| Premise versus theorem                                             | Slide 9          | RQ4 on slide 38              |
-| Log-spaced sizes                                                   | Slide 10         | The slope on slide 26        |
-| Gold standard, leave-one-out, precision, recall, F1                | Slide 12         | Accuracy on slides 33–34     |
-| HNSW, approximate search                                           | Slide 15         | Strategy S3                  |
-| Dominance, weighted sum, gates, amortized analysis                 | Slide 16         | Ranking on slide 27          |
-| Controlled variables, shared decision step                         | Slides 19 and 21 | Fair comparison              |
-| Hyperplane hashing, Gray order, segments                           | Slide 23         | Strategy S4                  |
-| Pilot, conditional verdict                                         | Slide 24         | The accuracy bar on slide 36 |
-| Trial, run, configuration                                          | Slide 25         | Data collected on slide 29   |
-| Log-log slope, bootstrap interval, shortlist recall                | Slide 26         | RQ1, RQ2                     |
-| Worked weighted score                                              | Slide 27         | Table 4.9 on slide 37        |
-
-
-## Who presents what
-
-| Member   | Slides | Part                                           | Approx. time |
-| -------- | ------ | ---------------------------------------------- | ------------ |
-| Member 1 | 1–17   | Opening, Chapter I, Chapter II                 | about 16 min |
-| Member 2 | 18–27  | Chapter III, Methodology                       | about 16 min |
-| Member 3 | 28–34  | Chapter IV: data collected, setup, RQ1, RQ2    | about 13 min |
-| Member 4 | 35–42  | Chapter IV: RQ3, RQ4, limits, summary, closing | about 13 min |
-
-Member numbers are not tied to any person, so assign them however the group likes. The total is roughly an hour at a calm pace. If time is short, drop the optional asides in the scripts, not the key numbers.
-
----
-
-# Member 1 (Slides 1–17)
+# Part 1 (Slides 1–17)
 
 ### Slide 1: Cover (about 0.5 min)
-
-**Script**
-
-“Good day to the members of the panel, our adviser, and everyone present. We are from the College of Computing and Information Sciences of Mariano Marcos State University. Our study asks a simple question about knowledge graphs that keep growing: when one new concept arrives, how much work does it take to connect it to the graph, and does that work grow as the graph grows? I am \[say your full name\], and my groupmates and I will take you through the study in four parts.”
 
 **Background**
 
@@ -88,15 +26,11 @@ Member numbers are not tied to any person, so assign them however the group like
 
 **Opening etiquette.**
 - Greet the panel, the adviser and the audience in that order. Check the names against the thesis acknowledgements.
-- Say your own name where the script has the placeholder. Do not read the full author list here, because slide 2 does that.
+- Say your own name in the opening. Do not read the full author list here, because slide 2 does that.
 - Do not quote any numbers on slide 1. Its only job is to say what the study is about, in plain words.
 - Keep it to about 30 seconds. A calm start sets the pace for the hour.
 
 ### Slide 2: Title and members (about 0.5 min)
-
-**Script**
-
-“The title of our study is *An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction*. In plain words: we measured, rather than proved, how the cost of adding one new concept to a graph built with a Large Language Model changes as the graph gets bigger, and we compared four ways of shortlisting which existing concepts the model has to look at. The researchers are Adrian Luke Labasan, Alejandrei Jazz Lopez, Geila May Rigayen, and Melvie Jeanna Abad.”
 
 **Background**
 
@@ -125,10 +59,6 @@ Decode the title one word at a time. Each step uses the idea before it, so you c
 
 ### Slide 3: Chapter I, Introduction (about 0.5 min)
 
-**Script**
-
-“Chapter I introduces the problem. We will cover what a knowledge graph is, why adding to one is costly, what existing work has done, and the two gaps this study fills.”
-
 **Background**
 
 This slide is a signpost. Use it to give the panel a map, and use these notes to be sure of the map yourself.
@@ -147,10 +77,6 @@ This slide is a signpost. Use it to give the panel a map, and use these notes to
 **Four messages (repeat them).** Single insertions only. Only the narrowing step differs. Results are descriptive. The ranking is post hoc. You will hear each one again.
 
 ### Slide 4: Background of the Study (about 1 min)
-
-**Script**
-
-“A graph is made of nodes connected by edges. A knowledge graph uses that idea for ideas themselves: each node is a concept, and each edge is a relationship. For example, Calculus requires Limits. Knowledge graphs are used in web search, recommendation systems, and increasingly in education. In the past, domain experts built them by hand. That is accurate, but it does not scale. Today, Large Language Models can read text and extract concepts and relationships automatically, and that is why this area is growing so quickly.”
 
 **Background**
 
@@ -178,10 +104,6 @@ What LLMs changed was the cost and speed of extraction, not the three-stage stru
 
 ### Slide 5: The problem: knowledge keeps growing (about 1 min)
 
-**Script**
-
-“Most systems build the graph once, in a single batch. But knowledge keeps growing: a course adds a new topic, or a field publishes a new technique. Rebuilding the whole graph for one new concept is wasteful. So the real question is what we call the incremental insertion problem: how do we connect one new concept to an existing graph without re-checking every node?”
-
 **Background**
 
 This slide introduces the study's core vocabulary. Every later slide reuses it.
@@ -206,10 +128,6 @@ This slide introduces the study's core vocabulary. Every later slide reuses it.
 **If asked "why not just rebuild in batch?"** Batch sees the whole corpus and is fine when you build once. It wastes effort when only one item is new, and the thesis argues that repeating it per new concept does not reflect how knowledge grows.
 
 ### Slide 6: Why brute force doesn’t work (about 1 min)
-
-**Script**
-
-“The obvious method is brute force: ask the LLM to compare the new concept with every existing node. Funk and colleagues describe this as needing, in their words, ‘a huge number of queries’. Even their own pruned insertion algorithm needed 22 to 50 LLM prompts per concept, at a cost of 11 cents up to 12 dollars and 45 cents depending on the domain. Brute force on a graph of n nodes needs n calls, so the larger the graph, the worse it gets.”
 
 **Background**
 
@@ -244,10 +162,6 @@ Calls equal n exactly. Time is about 0.86 seconds per call. Multiply n by 40 and
 
 ### Slide 7: The solution: candidate narrowing (about 1 min)
 
-**Script**
-
-“The fix is candidate narrowing. Step one: use a cheap method, such as embeddings, to shortlist the likely candidates. Step two: use the expensive LLM only on that shortlist. Three existing systems shaped our study. iText2KG keeps only nodes whose cosine similarity passes a threshold of about 0.6. SAC-KG uses learned pruning and was tested at over one million nodes. EraRAG groups nodes into size-bounded buckets, and its authors prove that insertion cost should not grow with graph size.”
-
 **Background**
 
 This slide has the most new vocabulary in Chapter I. Take it in the order below: what we want, what tool makes it possible, three ways to use the tool, then three systems that used them.
@@ -277,10 +191,6 @@ This slide has the most new vocabulary in Chapter I. Take it in the order below:
 
 ### Slide 8: The research gaps (about 1 min)
 
-**Script**
-
-“Reading this literature, we found two gaps. First, none of the studies we reviewed measures insertion cost as a function of graph size. Costs are reported in aggregate, such as total dollars or total time for an entire experiment. Second, none compares narrowing strategies against each other under the same task and the same measurements. Each system is tested only against generic baselines. Those two gaps are what this study addresses.”
-
 **Background**
 
 A gap claim is only as strong as you can explain it. Use these steps so you can defend each gap in your own words.
@@ -304,10 +214,6 @@ A gap claim is only as strong as you can explain it. Use these steps so you can 
 **Likely question: "How do you know no one did this?"** Answer: we do not. We searched in a structured way and found none, and we say so plainly. If a study exists, it would strengthen the case for the comparison rather than remove the need for measuring.
 
 ### Slide 9: Statement of the Problem (about 1 min)
-
-**Script**
-
-“Our central question is: how can a new concept be added to an LLM-built knowledge graph without checking every existing node? It breaks into four research questions. RQ1: how do time and LLM calls per insertion change as the graph grows? RQ2: does placement accuracy hold up as the graph grows? RQ3: how do the four strategies compare under identical conditions? RQ4: does the cost of a single insertion stay flat under a bucket-capped strategy?”
 
 **Background**
 
@@ -337,10 +243,6 @@ This slide turns the gaps into four testable questions. For each one, learn what
 
 ### Slide 10: Objectives of the Study (about 1 min)
 
-**Script**
-
-“The general objective is to characterize and compare the cost and accuracy of narrowing strategies as the graph grows. Specifically, we implement four strategies: brute-force LLM comparison, embedding-similarity thresholding, approximate nearest-neighbor retrieval, and bounded-bucket partitioning. We run insertions on graphs from 50 to 2,000 nodes, measure time, LLM calls and accuracy, test whether bucket-capped cost stays flat, and release a reproducible codebase and dataset.”
-
 **Background**
 
 **Step 1: General versus specific objectives.** The general objective is the overall aim. The specific objectives are the concrete tasks that achieve it. Each one maps to a research question and to a part of Chapter III.
@@ -363,10 +265,6 @@ This slide turns the gaps into four testable questions. For each one, learn what
 
 ### Slide 11: Significance of the Study (about 0.75 min)
 
-**Script**
-
-“This study matters to three groups. To the field of Computer Science, it provides an empirical benchmark comparing several insertion strategies under identical conditions across graph sizes. To future researchers, it checks whether theoretical cost claims hold up in practice and gives a base for testing new strategies, domains, and limits. To practitioners building knowledge-graph systems, it helps choose a narrowing strategy that fits their expected graph size and update frequency.”
-
 **Background**
 
 **Step 1: Significance means who benefits and how.** The thesis names three audiences. For each, keep one sentence of evidence ready.
@@ -387,10 +285,6 @@ This slide turns the gaps into four testable questions. For each one, learn what
 **Likely question: "Who would actually use this?"** Anyone maintaining a curriculum or course graph that grows over time and wants LLM-assisted updates without paying for n calls each time.
 
 ### Slide 12: Scope of the Study (about 1 min)
-
-**Script**
-
-“We focus only on the incremental insertion phase: adding one new node to an existing graph. We do not propose a new batch-construction method. We cover four strategies: brute force, embedding threshold, ANN, and bounded bucket. For data, we use two gold-standard graphs, Metacademy with 141 concepts and DSA with 29 concepts, for accuracy, and synthetic concept names up to about 2,000 nodes for cost scaling. We measure wall-clock time per insertion, LLM calls per insertion, and placement accuracy as precision, recall, and F1.”
 
 **Background**
 
@@ -425,10 +319,6 @@ This slide introduces the data and the accuracy scores. Both are used on almost 
 
 ### Slide 13: Limitations of the Study (about 1 min)
 
-**Script**
-
-“We want to be upfront about the limits. Concepts are represented by bare names only, with one model and one fixed prompt. The synthetic concepts are unverified, so they are used for cost only. Parameters are fixed, and no thresholds stricter than 0.6 were tested. We test single insertions, not amortized cost. There is one run per configuration and 10 trials per size, with no hypothesis tests. Accuracy is measured at only two graph sizes. And the ranking framework was defined after the results.”
-
 **Background**
 
 Limitations are where panels probe hardest, so know what each one prevents you from claiming. Learn them in groups.
@@ -457,10 +347,6 @@ Limitations are where panels probe hardest, so know what each one prevents you f
 **Careful.** Do not apologize for the limits. They are stated openly, and each one is tied to a claim we did not make.
 
 ### Slide 14: Chapter II, Review of Related Literature (about 0.5 min)
-
-**Script**
-
-“Chapter II reviews the related literature. For each strategy and method we use, we show what the source says and why it matters to this study.”
 
 **Background**
 
@@ -498,10 +384,6 @@ This slide opens the literature review. Learn the order and the reference number
 
 ### Slide 15: Related literature, part 1 (about 1.5 min)
 
-**Script**
-
-“This table links each source to its role in our study. Funk and colleagues show that comparing a new concept with every node needs too many LLM calls, so brute force is our control condition, and their 22 to 50 prompts is our cost benchmark. iText2KG uses a cosine threshold, which is the basis for Strategy B at 0.6, and its threshold problem motivates a count-based alternative. HNSW and FAISS give us top-k retrieval, the basis for Strategy C, which needs no similarity cutoff. EraRAG gives us size-bounded buckets, the basis for Strategy D, and its theorem is the claim whose premise we test. Finally, SAC-KG shows automated construction working at over a million nodes, which makes a 2,000-node sweep realistic.”
-
 **Background**
 
 Each row of this table gives a source, what it does, and why we need it. Learn them in this order, since each builds on the last.
@@ -531,10 +413,6 @@ Each row of this table gives a source, what it does, and why we need it. Learn t
 
 ### Slide 16: Related literature, part 2 (about 1.5 min)
 
-**Script**
-
-“The second table covers evaluation and context. ACE and the Metacademy and DSA gold graphs give us ground truth for accuracy. Pareto dominance, the weighted-sum model, TOPSIS and minimum-level gates support how we judge cost and accuracy together. Amortized analysis explains why single-insertion tests cannot confirm an amortized bound. EraRAG’s experiments varied the incoming batch size, not the graph size, which is the gap we fill. Last, public datasets make our work reproducible, and we found no local study on incremental insertion, which supports novelty.”
-
 **Background**
 
 This table covers how we judge strategies and the surrounding context. Each concept is introduced here and used in full on slide 27, so learn the ideas now and the numbers later.
@@ -559,10 +437,6 @@ This table covers how we judge strategies and the surrounding context. Each conc
 **Check before presenting.** The deck cites [13]–[21] here while the thesis reference list numbers these sources [12]–[20]. See the note on slide 14.
 
 ### Slide 17: Conceptual Framework (about 1.25 min)
-
-**Script**
-
-“Our framework follows input, process, output. The input is an existing graph of size n, from 50 to 2,000 nodes, one new concept, and a narrowing strategy: A brute force, B embedding threshold, C ANN retrieval, or D bounded bucket. In the process, the strategy reduces the graph to a candidate shortlist, a shared LLM decision step judges the relationship for each shortlisted candidate, and the graph is updated and measured. The output is an updated graph of size n plus one, with cost measured as time and LLM calls, and accuracy measured as precision, recall and F1 against the gold standard.”
 
 **Background**
 
@@ -596,13 +470,9 @@ The conceptual framework is the study's blueprint: what goes in, what happens, w
 
 ---
 
-# Member 2 (Slides 18–27)
+# Part 2 (Slides 18–27)
 
 ### Slide 18: Chapter III, Research Methodology (about 0.5 min)
-
-**Script**
-
-“Chapter III explains how we designed the experiment: the data we used, the four strategies, the shared decision step, the procedure, and how we measure and judge the results.”
 
 **Background**
 
@@ -620,10 +490,6 @@ The conceptual framework is the study's blueprint: what goes in, what happens, w
 **If asked "what is post hoc?"** It means "after the fact". A choice made after seeing results. It is allowed if labelled, because it cannot be mistaken for a prediction. Section 3.6 is labelled post hoc.
 
 ### Slide 19: Research Design (about 1 min)
-
-**Script**
-
-“Our design is developmental and experimental. It works like an algorithm benchmark: there are no human respondents and no surveys. We control two independent variables, the narrowing strategy and the graph size, and we measure two kinds of dependent variables: insertion cost, as time and LLM calls, and placement accuracy.”
 
 **Background**
 
@@ -648,10 +514,6 @@ The conceptual framework is the study's blueprint: what goes in, what happens, w
 **Step 5: Why the controlled column matters most.** A comparison is only fair if everything except the thing under study is identical. That is the reason slide 21 stresses the shared decision step.
 
 ### Slide 20: Data Sources (about 2 min)
-
-**Script**
-
-“We use two kinds of data. For accuracy, we use gold-standard graphs: Metacademy with 141 concepts and DSA with 29 concepts, both with expert-verified prerequisite relationships. For each trial we withhold one concept, re-insert it with a strategy, and compare the result with the true answers. For cost, we use a synthetic pool of 2,254 unique computer science concept names generated with an LLM, used to build graphs from 50 up to 2,000 nodes. Because those names are not verified, we never use them for accuracy claims.”
 
 **Background**
 
@@ -682,10 +544,6 @@ This slide has a lot of numbers. Understand the logic first and the numbers will
 
 ### Slide 21: Experimental Design (about 1 min)
 
-**Script**
-
-“Every insertion has the same shape. The input is one new concept and an existing graph. The narrowing step, which is different for each strategy, produces a shortlist of candidates. The decision step, which is identical for all four, has an LLM judge the new concept against each shortlisted candidate. Because only the narrowing step changes, any difference in the results comes from the narrowing method.”
-
 **Background**
 
 This slide is the logic of the whole experiment. If you understand this, you can defend the study against most methodological questions.
@@ -707,10 +565,6 @@ This slide is the logic of the whole experiment. If you understand this, you can
 **Step 7: A caveat you should volunteer.** Strategies S3 and S4 both cap the shortlist at 10. So the comparison cannot separate the geometry of bucket partitioning from simple shortlist capacity. Say this before a panelist does.
 
 ### Slide 22: Research Design diagram (about 2 min)
-
-**Script**
-
-“This diagram shows one insertion from top to bottom. At the top are the inputs: the existing graph with n concepts, the new concept, and a subject-area label such as ‘data structures and algorithms’. Strategies B, C and D also use a small embedding model that runs on CPU. In the middle is the only part that differs: candidate narrowing. A uses every node, B uses nodes above 0.6 similarity, C uses the top 10 nearest neighbors, and D uses only the members of one bucket. Each strategy produces a candidate shortlist: n for A, between 0 and n for B, 10 for C, and at most 10 for D. Every shortlist goes into the same decision step: one LLM call per candidate, one at a time, at temperature 0, returning one of three labels. The output is the updated graph with n plus one concepts, plus the measurements for that insertion. The gold-standard graphs are used only for the accuracy trials.”
 
 **Background**
 
@@ -743,10 +597,6 @@ Read the diagram top to bottom and name each box. The slide is Figure 3.1 of the
 **Reading tip.** Point at the middle layer and say "this is the only thing that changes between strategies". It is the clearest one-line summary of the whole design.
 
 ### Slide 23: The Four Strategies (about 2 min)
-
-**Script**
-
-“Here are the four strategies and their worst-case cost. S1, brute force, is the control: it judges every existing node, so up to n calls. S2 keeps nodes whose cosine similarity is above 0.6, so its calls can go up to n, but often it finds none. S3 keeps the top 10 most similar nodes using a FAISS HNSW index, so at most 10 calls. S4 keeps only the members of the new concept’s bucket, between 5 and 10 nodes, so also at most 10 calls.”
 
 **Background**
 
@@ -781,10 +631,6 @@ Learn the strategies as a progression. Each adds one idea to the one before it.
 
 ### Slide 24: The Shared Decision Step (about 2 min)
 
-**Script**
-
-“The decision step is the same for every strategy. For each shortlisted candidate, we make one LLM call, one at a time. We call DeepSeek through its official API at temperature 0, with one fixed prompt. The input is only the two concept names plus a subject-area label, and the output is one of three answers: X is a prerequisite of Y, Y is a prerequisite of X, or none. Before comparing strategies, we ran a pilot with brute force on the DSA graph. It gave a micro F1 of 0.541 and recall of 0.611, which counted as a conditional pass. We kept the prompt unchanged and did not tune it further.”
-
 **Background**
 
 The decision step is the part everyone shares. Learn what a call looks like, what the model returns, and how the pilot justified keeping the prompt.
@@ -817,10 +663,6 @@ The decision step is the part everyone shares. Learn what a call looks like, wha
 **Careful.** Say "DeepSeek V3" only if you are sure the figure on slide 22 has been fixed. Otherwise avoid the version number.
 
 ### Slide 25: Experimental Procedure (about 1.5 min)
-
-**Script**
-
-“We test graph sizes of 50, 100, 200, 500, 1,000 and 2,000, with one single insertion per trial and 10 trials per size. Accuracy runs use 59 trials: 29 on DSA and 30 on Metacademy. All parameters were fixed before running and were not tuned on the data. We also ran 8 one-at-a-time sensitivity settings: thresholds 0.4 and 0.5 for S2, k of 5 and 20 and efSearch of 64 and 256 for S3, and bucket bounds of (2, 5) and (10, 20) for S4. That gives 12 configurations in total, one run each.”
 
 **Background**
 
@@ -857,10 +699,6 @@ Learn the counting hierarchy first, then the procedure, then the sensitivity des
 
 ### Slide 26: Measures and Analysis (about 2 min)
 
-**Script**
-
-“For cost we measure wall-clock time per insertion and LLM calls per insertion. For accuracy we use precision, recall and F1, micro-averaged. We also track shortlist recall: the share of true neighbors that narrowing keeps. To judge scaling, we fit the slope of log cost against log graph size. A slope below 0.1 is approximately flat, 0.1 to 0.9 is sub-linear, and above 0.9 is approximately linear. We describe results with 95% bootstrap intervals, and we run no hypothesis tests.”
-
 **Background**
 
 Each measure is explained with a tiny example. Use the examples in answers.
@@ -893,10 +731,6 @@ Each measure is explained with a tiny example. Use the examples in answers.
 **Descriptive, not inferential.** We report what happened. We do not claim a strategy is "significantly" different from another.
 
 ### Slide 27: Decision and Ranking Framework, post hoc (about 2 min)
-
-**Script**
-
-“This framework was defined after the Chapter IV measurements were available, and we label it that way. First, three gates. G1: the shortlist recall must beat a random shortlist. G2: at most 50 LLM calls per insertion at n of 2,000. G3: the strategy must not be beaten on both calls and F1 by another strategy. A strategy is classed as Effective, Conditionally effective, or Not effective. Then we rank strategies with a weighted score of F1 and the log of calls under three weight scenarios, plus a 20,000-draw weight sweep and a TOPSIS cross-check.”
 
 **Background**
 
@@ -935,13 +769,9 @@ This framework was written after the results existed, and we say so. Build it in
 
 ---
 
-# Member 3 (Slides 28–34)
+# Part 3 (Slides 28–34)
 
 ### Slide 28: Chapter IV, Results and Discussions, initial result (about 0.5 min)
-
-**Script**
-
-“Chapter IV presents our initial results. They are organized around the four research questions: cost scaling, placement accuracy, comparison of the strategies, and the bucket-cost premise.”
 
 **Background**
 
@@ -965,10 +795,6 @@ Before the numbers, learn how to read them. Every result slide uses the same con
 **Disclosure you should know.** The accuracy-mode summaries were seen before the analysis plan was frozen, so accuracy-side choices (per-corpus reporting and the 0.025 labelling margin) were not made blind. A first draft of the analysis pipeline was run on the real results before the final one was accepted. The recorded answer is that its output was looked at, label overlaps were noticed, no numbers or results were noticed, and no change was requested because of it.
 
 ### Slide 29: Data Collected (about 1.5 min)
-
-**Script**
-
-“We collected 24 runs across 12 configurations on three data sources. The 24 runs are 12 accuracy-mode runs and 12 size-sweep runs, and the 12 configurations are 4 primary settings plus 8 sensitivity settings. Accuracy runs have 59 trials, and sweep runs have 60. All 24 runs passed the validation gate. The three data sources are the DSA gold graph, 29 expert-verified concepts, used for 29 leave-one-out trials; the Metacademy gold graph, 141 concepts, used for 30 trials; and the synthetic concept pool of 2,254 names, which has no ground truth and is used only for cost at n from 50 to 2,000, with 10 trials per size.”
 
 **Background**
 
@@ -997,10 +823,6 @@ Think of this slide as an inventory of what was collected. Learn the hierarchy a
 
 ### Slide 30: Setup, the four strategies compared (about 1 min)
 
-**Script**
-
-“A quick reminder of the setup. S1 judges every existing node, up to n calls. S2 keeps nodes with cosine similarity above 0.6, up to n calls and uncapped. S3 keeps the top 10 using a FAISS HNSW index, so 10 calls. S4 uses bounded buckets of 5 to 10 nodes, so at most 10 calls. All four share the same decision step, so differences come from the narrowing mechanism. Results are means with 95% bootstrap intervals, and we run no hypothesis tests.”
-
 **Background**
 
 This slide is a refresher so the results make sense. Keep it quick, but check that you can explain each row.
@@ -1021,22 +843,18 @@ This slide is a refresher so the results make sense. Keep it quick, but check th
 
 ### Slide 31: RQ1, wall-clock time at n = 2,000 (about 2.5 min)
 
-**Script**
-
-“Our first question is how time per insertion changes as the graph grows. At n of 2,000, one brute-force insertion takes 1,713 seconds, which is about 29 minutes. S3 takes 8.28 seconds and S4 takes 5.64 seconds. S2 takes 0.94 seconds, but only because most of its trials make no call at all. The slopes agree: brute force is approximately linear at 0.96, while S3 and S4 are approximately flat, at minus 0.02 and 0.008. Time follows calls. Each LLM call takes about 0.8 to 0.9 seconds, and the shortlist step takes under 0.03 seconds. At n of 2,000, brute force is about 207 times slower than S3 and 304 times slower than S4. So the answer to RQ1: linear for brute force, flat for the capped strategies, and call-dependent for the threshold.”
-
 **Background**
 
 Slide 31 is the headline cost result. Read it in three steps: the picture, the shape of each curve, and the reason behind it.
 
 **Step 1: The raw picture at n = 2,000.**
 
-| Strategy | Mean time per insertion | Reading |
-| --- | --- | --- |
-| S1 brute force | 1,713.10 s (about 28.5 min) | slope 0.9605, approximately linear |
-| S2 θ = 0.6 | 0.938 s | only because most trials make no call |
-| S3 k = 10 | 8.277 s | slope −0.0201, approximately flat |
-| S4 (5, 10) | 5.638 s | slope 0.0084, approximately flat |
+| Strategy       | Mean time per insertion     | Reading                               |
+| -------------- | --------------------------- | ------------------------------------- |
+| S1 brute force | 1,713.10 s (about 28.5 min) | slope 0.9605, approximately linear    |
+| S2 θ = 0.6     | 0.938 s                     | only because most trials make no call |
+| S3 k = 10      | 8.277 s                     | slope −0.0201, approximately flat     |
+| S4 (5, 10)     | 5.638 s                     | slope 0.0084, approximately flat      |
 
 At n = 2,000 brute force is about 207 times slower than S3 (1,713.1 ÷ 8.277) and about 304 times slower than S4 (1,713.1 ÷ 5.638). These ratios are computed from the means.
 
@@ -1056,10 +874,6 @@ At n = 2,000 brute force is about 207 times slower than S3 (1,713.1 ÷ 8.277) an
 **Answer to RQ1 in one line.** Linear for brute force, flat for the two capped strategies, and call-dependent for the threshold.
 
 ### Slide 32: RQ1, LLM calls per insertion (about 2 min)
-
-**Script**
-
-“This table shows LLM calls per insertion by graph size. Brute force needs exactly n calls, the linear cost that Funk and colleagues warned about. S3 always makes 10 calls, and S4 averages between 6.6 and 7.5, because their shortlists are capped. S2 depends on how many nodes pass the threshold. At the primary threshold of 0.6 it averages at most 0.8 calls at n of 2,000, and at a looser threshold of 0.4 it reaches 13.5 calls, about 0.7% of the nodes. Its slope at 0.6 is undefined because some sizes have zero average calls.”
 
 **Background**
 
@@ -1091,10 +905,6 @@ Calls are the cause and time is the effect, so this table explains the previous 
 **Step 5: The "so what".** Funk et al. warned that brute force needs a huge number of queries, and the S1 row shows exactly that: calls equal the graph size. Capping the shortlist removes that dependence.
 
 ### Slide 33: RQ2, accuracy of the primary configurations (about 2.5 min)
-
-**Script**
-
-“Our second question is whether placement accuracy holds up as the graph grows. We can answer it only at two sizes: 29 concepts on DSA and 141 on Metacademy. On DSA, brute force has the best F1 at 0.586, using 28 calls, and S3 follows at 0.511 with 10 calls. On Metacademy the order changes: S3 is best at 0.294, S2 is next at 0.270, and brute force falls to 0.143. Look at brute force: its recall stays about the same, 0.630 and 0.624, but its precision falls from 0.548 to 0.081. The last column, shortlist recall, shows how much of the true neighborhood each shortlist keeps. It is 1.0 for brute force, about 0.5 for S3, and much lower for S2 and S4. These are micro-averaged, one run each.”
 
 **Background**
 
@@ -1130,10 +940,6 @@ This is the densest table in the deck. Learn the columns first, then the three p
 
 ### Slide 34: RQ2, why accuracy differs across strategies (about 2.5 min)
 
-**Script**
-
-“There are three reasons accuracy differs. First, brute force over-links. Its recall is steady at 0.630 and 0.624, but precision falls from 0.548 to 0.081 when 140 candidates are judged one by one. Second, narrowing trades recall for precision. S2 has high precision, 0.643 and 0.594, but recall of only 0.083 and 0.174, because at a threshold of 0.6 most concepts reach no decision. Third, the decision step caps recall. Recall never exceeds shortlist recall, and the decision step labels only 62% to 86% of the shortlisted true neighbors correctly. So F1 is lower on Metacademy than on DSA for S1, S3 and S4, but domain and edge density differ too, so size alone cannot be blamed.”
-
 **Background**
 
 This slide answers "why", so every claim needs a mechanism. Use the mini-explanations below.
@@ -1161,13 +967,9 @@ This slide answers "why", so every claim needs a mechanism. Use the mini-explana
 
 ---
 
-# Member 4 (Slides 35–42)
+# Part 4 (Slides 35–42)
 
 ### Slide 35: RQ3, trade-offs on DSA, domination on Metacademy (about 2.5 min)
-
-**Script**
-
-“Our third question compares the four strategies under identical conditions. We use dominance: one strategy dominates another if it makes no more calls and has a higher F1. On DSA, every pair of strategies is a trade-off. Brute force has the best F1, 0.586, at 28 calls, but it gains only 0.075 F1 over S3 for 18 more calls. On Metacademy, S3 dominates brute force: F1 is 0.151 higher with 130 fewer calls. S2 dominates both brute force and S4. S3 versus S2 is not distinguishable, because the F1 difference of 0.0246 is inside our 0.025 margin. And S2’s low call count is a recall cost, not a free saving: most insertions find no candidate above the threshold, so its shortlist recall is only 0.111 and 0.202. The largest graph reverses the DSA picture, because brute force is dominated outright.”
 
 **Background**
 
@@ -1202,10 +1004,6 @@ This slide compares strategies on cost and accuracy together. Learn dominance fi
 
 ### Slide 36: RQ3, only S3 passes every gate (about 2 min)
 
-**Script**
-
-“Applying the three gates to the primary configurations, only S3 passes every gate and is classed Effective. S2 passes the gates that can be assessed, but G1 cannot be assessed for it because it has no shortlist cap, so it is Conditionally effective. S1 fails the cost gate at 2,000 calls and is dominated on Metacademy. S4 fails the random baseline on DSA and is dominated on Metacademy, so both are Not effective. This is post hoc and single-run. And no strategy meets the pilot’s absolute accuracy bar of F1 at least 0.50 and recall at least 0.70, so S3 is best only in a relative sense.”
-
 **Background**
 
 Now apply the three gates from slide 27 to the primary configurations. Learn the table, then why the classes are robust, then what they do not mean.
@@ -1237,10 +1035,6 @@ Now apply the three gates from slide 27 to the primary configurations. Learn the
 **Don't say.** "S3 is accurate." Say "S3 is the best available option under these gates, and its accuracy is modest."
 
 ### Slide 37: RQ3, S3 is the most stable across weights (about 2.5 min)
-
-**Script**
-
-“If we ask which strategy is best under a weighted score, the answer depends on the weights. On DSA the leader changes: accuracy-first favors brute force at 0.700, balanced favors S3 at 0.587, and cost-first favors S2 at 0.700. On Metacademy, S2 leads in all scenarios, scoring 0.907 to 0.960, with S3 second at 0.726 to 0.883. S2 gains on cost what it lacks in recall. Across 20,000 random weights, S3 is last in under 0.5% of draws, and it is second most often, 60% on DSA and 69% on Metacademy. S4 is first in no draw. So S3 is the most stable choice across weights. These scores are post hoc, single-run, and scaled across only four strategies, so they describe these measurements and not repeated-run differences.”
 
 **Background**
 
@@ -1289,10 +1083,6 @@ On DSA the leader changes with the weights (S1, then S3, then S2). On Metacademy
 
 ### Slide 38: RQ4, bucket cost does not grow with graph size (about 2 min)
 
-**Script**
-
-“Our fourth question is whether the cost of one insertion stays flat under a bucket-capped strategy. For S4, mean LLM calls stay between 6.6 and 7.5 against a cap of 10, across n from 50 to 2,000. Mean time stays between 5.15 and 5.77 seconds, and the shortlist step takes about 0.01 seconds. The fitted slopes are near zero, minus 0.0004 for calls and 0.0084 for time, and the intervals contain zero. This is consistent with the premise behind the amortized bound in EraRAG: an insertion touches a bounded region of the graph. But there are two cautions. Flat calls are close to guaranteed by the cap, and S3 is equally flat, so flatness is not specific to bucket partitioning. And we tested single insertions, so the amortized bound itself is not tested.”
-
 **Background**
 
 RQ4 tests a specific idea. Be precise about what that idea is and what the evidence can and cannot show.
@@ -1322,10 +1112,6 @@ RQ4 tests a specific idea. Be precise about what that idea is and what the evide
 
 ### Slide 39: Limits of these results (about 1.5 min)
 
-**Script**
-
-“Here is what the results do not show. There is one run per configuration and 10 trials per size, so there are no hypothesis tests. There is one decision model, one prompt, and bare concept names. Accuracy is measured at only two sizes, 29 and 141 concepts, which also differ in domain and density. The synthetic pool is unverified and used for cost only. We tested single, un-amortized insertions, so the amortized bound is untested. And the gates and weights were set post hoc, so the classes label these measurements only.”
-
 **Background**
 
 Know each limit, what it blocks, and what you can still claim. This is the table to rehearse for the question period.
@@ -1349,10 +1135,6 @@ Know each limit, what it blocks, and what you can still claim. This is the table
 **How to answer.** Name the limit, say which claim it blocks, then say what we still claim, as on slide 13.
 
 ### Slide 40: Summary of findings (about 1.5 min)
-
-**Script**
-
-“To summarize by research question. RQ1: brute force grows linearly, 1,713 seconds at n of 2,000, while ANN retrieval and bounded buckets stay flat, and the threshold grows with the number of passing nodes, from a small base. RQ2: F1 is lower on the 141-node graph for S1, S3 and S4, but domain and density are confounded, and brute force over-links with a precision of 0.081. RQ3: only S3 is effective, S2 is conditionally effective, and S1 and S4 are not, and no strategy meets the pilot’s absolute accuracy bar. RQ4: calls and time did not grow with graph size, consistent with the premise, and the amortized bound remains untested.”
 
 **Background: the answer to each question, then likely panel questions**
 
@@ -1395,10 +1177,6 @@ Know each limit, what it blocks, and what you can still claim. This is the table
 
 ### Slide 41: Thank you (about 0.5 min)
 
-**Script**
-
-“Thank you. In short: cost per insertion grows linearly with brute force and stays flat with ANN retrieval and bounded buckets. ANN retrieval was the only strategy to pass every gate, though no strategy reached the absolute accuracy bar. And the bucket premise held for single insertions. We welcome your questions.”
-
 **Background**
 
 **The closing, in order.** Use the same structure each time so the panel hears a clear ending.
@@ -1423,10 +1201,6 @@ Know each limit, what it blocks, and what you can still claim. This is the table
 
 ### Slide 42: Contact (leave on screen)
 
-**Script**
-
-No script. Leave this slide up during questions.
-
 **Background: who answers what**
 
 Leave this slide up during questions. Use the map below to route questions.
@@ -1448,9 +1222,7 @@ Leave this slide up during questions. Use the map below to route questions.
 
 ---
 
-# Appendix A: Numbers cheat sheet
-
-Quote these exactly. Each is in the thesis chapter shown.
+# Appendix A: Numbers Reference
 
 **Study size**
 - 24 runs = 12 accuracy-mode + 12 size-sweep. 12 configurations = 4 primary + 8 sensitivity. (4.1)

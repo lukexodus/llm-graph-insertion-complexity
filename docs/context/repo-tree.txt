@@ -1,8 +1,10 @@
 .
+├── artifacts
 ├── data
 │   └── synthetic
 │       └── cs_concept_names.json
 ├── docs
+│   ├── artifacts
 │   ├── context
 │   │   ├── adviser-briefing-d1-d6.md
 │   │   ├── analysis-plan.md
@@ -26,12 +28,14 @@
 │   │   │   ├── assets
 │   │   │   │   ├── mmsu-50-logo.png
 │   │   │   │   └── mmsu-lockup.png
+│   │   │   ├── background-concepts.html
 │   │   │   ├── BRIEF.md
 │   │   │   ├── CONTENT-PACK.md
 │   │   │   └── DECK-EXTRACT.md
-│   │   ├── script
-│   │   │   ├── Defense_Script_and_Background_Guide—Comprehensive Version.md
-│   │   │   └── Defense_Script_and_Background_Guide.md
+│   │   ├── information
+│   │   │   ├── Defense_Script_and_Background_Guide.md
+│   │   │   ├── details-background.md
+│   │   │   └── details.md
 │   │   └── An Empirical Complexity Analysis Of Candidate-Narrowing Strategies For Incremental LLM-Driven Graph Construction—Presentation.pptx
 │   ├── prompts
 │   │   ├── ANALYSIS-002-G-PROMPT.md
@@ -42,6 +46,7 @@
 │   │   ├── DOC-011-PROMPT.md
 │   │   ├── DOC-012-prompt.md
 │   │   ├── FIG-001-prompt.md
+│   │   ├── PRES-002-PROMPT.md
 │   │   ├── STANDALONE-ADOPTION-PROMPT.md
 │   │   └── STANDALONE-PROMPT-TEMPLATE.md
 │   ├── reports
@@ -121,6 +126,10 @@
 │   │   ├── INFRA-010-gemini-import-order-and-manifest-libraries.md
 │   │   ├── INFRA-011-gemini-closeout.md
 │   │   ├── PRES-001-claude-code-background-deck-materials.md
+│   │   ├── PRES-002-claude-code-background-concepts-deck.md
+│   │   ├── PRES-002-claude-code-bootstrap-interval-scene.md
+│   │   ├── PRES-002-claude-code-configuration-mode-scenes.md
+│   │   ├── PRES-002-claude-code-efsearch-scene.md
 │   │   ├── RUN-001-accuracy-stage-docs.md
 │   │   ├── STRAT-001-A-claude-code.md
 │   │   ├── STRAT-001-gemini-brute-force.md
@@ -173,7 +182,77 @@
 │       ├── _REVISED__An_Empirical_Complexity_Analysis_of_Candidate-Narrowing_Strategies_for_Incremental_LLM-Driven_Graph_Construction_With_Chapter_4_ANALYSIS-004.docx
 │       └── [REVISED] An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction—With Chapter 4.md
 ├── patch
-│   └── PRES-001-claude-code-background-deck-materials.patch
+│   ├── 0001-DATA-005-secondary-concept-name-generation-backend-v.patch
+│   ├── 0001-DATA-007-thesis-side-supervisor-for-sharded-name-poo.patch
+│   ├── 0001-DOC-004-A-amend-DOC-004-thesis-sync-proposal-with-co.patch
+│   ├── 0001-DOC-004-B-land-amended-core-thesis-diff-and-record-D.patch
+│   ├── 0001-DOC-004-proposed-thesis-sync-after-strategy-track-re.patch
+│   ├── 0001-DOC-005-A-erratum-for-DOC-005-report-correct-Strateg.patch
+│   ├── 0001-DOC-005-record-run-plan-decisions-and-README-run-pla.patch
+│   ├── 0001-DOC-006-close-DOC-002-record-D-69-narrow-data-format.patch
+│   ├── 0001-docs-DOC-011-record-sweep-campaign-pipeline-provenan.patch
+│   ├── 0001-feat-ANALYSIS-003-add-exploratory-log-scale-companio.patch
+│   ├── 0001-feat-analysis-implement-and-wire-Phase-4-analysis-pi.patch
+│   ├── 0001-feat-FIG-001-add-legibility-redraw-script-and-report.patch
+│   ├── 0001-FIX-014-finish-FIX-013-rewrite-D-54-close-test-gaps-.patch
+│   ├── 0001-FIX-016-make-the-dry-run-planner-use-each-strategy-s.patch
+│   ├── 0001-FIX-017-per-shard-multi-profile-provenance-in-merged.patch
+│   ├── 0001-INFRA-007-P-pins-and-runtime-check-embedder-identity.patch
+│   ├── 0001-INFRA-007-Q-pin-sentence-transformers-and-MiniLM-rev.patch
+│   ├── 0001-INFRA-007-R-independent-review-of-strategy-wiring-D-.patch
+│   ├── 0001-INFRA-007-wire-four-strategies-parameters-run-direct.patch
+│   ├── 0001-INFRA-008-record-OpenMP-thread-check-outcome-effect-.patch
+│   ├── 0001-INFRA-009-A-wiring-tests-through-main-both-order-FAI.patch
+│   ├── 0001-INFRA-009-pin-PyTorch-CPU-threads-to-1-for-all-embed.patch
+│   ├── 0001-INFRA-010-A-record-FAISS-PyTorch-import-order-findin.patch
+│   ├── 0001-INFRA-010-B-record-torch-faiss-cpu-and-sentence-tran.patch
+│   ├── 0001-STRAT-003-B-close-stale-cache-hole-in-Strategy-2-and.patch
+│   ├── 0001-STRAT-003-Strategy-3-approximate-nearest-neighbour-F.patch
+│   ├── 0001-STRAT-004-A2-close-scoring-tie-break-and-bucket-size.patch
+│   ├── 0001-STRAT-004-A-amend-Strategy-4-decision-record-and-tes.patch
+│   ├── 0001-STRAT-004-implement-Strategy-4-bounded-bucket-retrie.patch
+│   ├── 0002-FIX-013-repair-and-test-DATA-006-shard-orchestration.patch
+│   ├── 0003-STRAT-001-A-close-test-coverage-gap-and-review-nits-.patch
+│   ├── 0004-STRAT-001-R-independent-review-of-Strategy-1-brute-f.patch
+│   ├── 0005-docs-reports-record-STRAT-003-prerequisite-check-rep.patch
+│   ├── 0006-FIX-015-explicit-adapter-thinking-control-results-da.patch
+│   ├── ANALYSIS-002-gemini-pipeline-wiring.patch
+│   ├── ANALYSIS-003-gemini-exploratory-companion-figures.patch
+│   ├── code_changes.patch
+│   ├── commit_DATA-004.patch
+│   ├── commit_DATA-005_code.patch
+│   ├── commit_DATA-005.patch
+│   ├── commit_FIX-001.patch
+│   ├── commit_FIX-002_INFRA-003.patch
+│   ├── commit_FIX-002.patch
+│   ├── commit_FIX-003.patch
+│   ├── commit_FIX-004.patch
+│   ├── commit_FIX-008.patch
+│   ├── commit_FIX-009.patch
+│   ├── commit_FIX-010.patch
+│   ├── commit_INFRA-001.patch
+│   ├── commit_INFRA-003.patch
+│   ├── commit_INFRA-004.patch
+│   ├── commit_INFRA-005.patch
+│   ├── commit_INFRA-006.patch
+│   ├── DATA-006_code.patch
+│   ├── diff.txt
+│   ├── DOC-011-gemini-campaign-record.patch
+│   ├── FIX-006.patch
+│   ├── FIX-011_code.patch
+│   ├── FIX-011_working_tree.patch
+│   ├── FIX-013_code.patch
+│   ├── full_commit.patch
+│   ├── STRAT-001-A.patch
+│   ├── STRAT-001_code.patch
+│   ├── STRAT-001.patch
+│   ├── STRAT-002_code.patch
+│   ├── STRAT-002-R_code.patch
+│   ├── STRAT-002-V_code.patch
+│   ├── STRAT-003-B_code.patch
+│   ├── STRAT-003-B.patch
+│   ├── STRAT-004_code.patch
+│   └── STRAT-004.patch
 ├── scripts
 │   ├── analysis
 │   │   ├── apc_check_f_outputs.py
@@ -230,6 +309,7 @@
 │   ├── test_analysis_validate_runs.py
 │   ├── test_ann_retrieval_strategy.py
 │   ├── test_apc_bundle.sh
+│   ├── test_background_deck_static.py
 │   ├── test_bounded_bucket_strategy.py
 │   ├── test_brute_force_strategy.py
 │   ├── test_controllable_embedder.py
@@ -256,4 +336,5 @@
 │   └── test_strategy_registry.py
 ├── AGENTS.md
 ├── CLAUDE.md
-└── pyproject.toml
+├── pyproject.toml
+└── redraw_thesis_figures.py
