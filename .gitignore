@@ -19,3 +19,4 @@ patch/
 results/
 *.log
 .aider*
+demo_runs/

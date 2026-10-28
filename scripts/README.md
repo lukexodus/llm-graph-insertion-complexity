@@ -312,33 +312,43 @@ the production code; only the LLM transport is replaced by a replay client that
 looks up each answer by exact prompt text in the recorded PILOT-001 cache.
 
 ```bash
-# Full demo (all four strategies, default node)
+# Full replay demo (default)
 .venv-ann/bin/python scripts/demo_trial.py
 
 # One strategy / a different node / plain ASCII / pauses between phases
 .venv-ann/bin/python scripts/demo_trial.py --strategies s1,s3 --node graph --ascii --pause
 
-# Offline pre-flight: provenance, corpus, node, embedder (no trial)
+# Replay pre-flight: provenance, corpus, node, embedder (no trial)
 .venv-ann/bin/python scripts/demo_trial.py --check
 
-# Save the machine-readable report outside results/
+# Save the replay machine-readable report outside results/
 .venv-ann/bin/python scripts/demo_trial.py --json /tmp/demo.json
+
+# Live: real DeepSeek calls for the same single trial; --confirm is mandatory
+.venv-ann/bin/python scripts/demo_trial.py --live --confirm
+.venv-ann/bin/python scripts/demo_trial.py --check --live
+.venv-ann/bin/python scripts/demo_trial.py --live --confirm --output-dir demo_runs/my-run
 ```
 
 Options: `--node NAME`, `--strategies LIST` (`s1`–`s4` or canonical names),
 `--pilot-dir DIR`, `--no-color`, `--ascii`, `--pause`, `--show-all-calls`,
-`--json PATH`, `--check`, `--traceback`. Colour is used only on a TTY unless
-`--no-color` or `NO_COLOR` is set. The demo sets `HF_HUB_OFFLINE=1` and
-`TRANSFORMERS_OFFLINE=1`; it never calls the API, reads `DEEPSEEK_API_KEY`, or
-writes under `results/`.
+`--json PATH`, `--live`, `--confirm`, `--allow-peak`, `--output-dir DIR`,
+`--check`, `--traceback`. Colour is used only on a TTY unless `--no-color` or
+`NO_COLOR` is set. Replay sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`
+and never calls the API. Live mode requires `DEEPSEEK_API_KEY`, refuses a peak
+pricing window unless `--allow-peak` is passed, and writes a new
+`demo_runs/live-<UTC>/` directory containing `transcript.txt`, `demo.json` and
+`run_meta.json`; a non-empty output directory is refused, as is any path under
+`results/`. Embeddings remain local in both modes.
 
 Exit codes: `0` ok, `2` usage, `3` pilot cache/provenance failure, `4` corpus or
-node problem, `5` missing dependency/embedder, `6` internal consistency check,
-`7` refused output path.
+node problem, `5` missing dependency/embedder/API key, `6` internal consistency
+check, `7` refused output path.
 
-The demo is an illustration, not a new result. Decisions are real recorded
-PILOT-001 answers (2026-10-07, prompt v2, `deepseek-flash`); latency, tokens and
-cost are recorded values, not measurements from the demo run.
+The demo is an illustration, not a new result. Replay decisions are real
+recorded PILOT-001 answers (2026-10-07, prompt v2, `deepseek-flash`); live
+answers are fresh API responses. Latency, tokens and cost are shown with
+`[PILOT]` in replay and `[LIVE]` in live mode.
 
 Operator guide, including defense-day flow, flags, troubleshooting, exit codes
 and suggested counter-nodes:
