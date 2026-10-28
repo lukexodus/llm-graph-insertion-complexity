@@ -28,7 +28,7 @@ Always execute the script from the **repository root**:
 
 ## Built-In Profiles
 
-The script provides 5 standard profiles. If no profile is specified, it defaults to `core`.
+The script provides 6 standard profiles. If no profile is specified, it defaults to `core`.
 
 | Profile | Purpose | Included Files |
 | :--- | :--- | :--- |
@@ -36,6 +36,7 @@ The script provides 5 standard profiles. If no profile is specified, it defaults
 | `strat` | Strategy review & testing | All of `core`, plus `src/graph_insertion/strategies/null.py`, `tests/test_strategy_interface.py`, `tests/test_null_strategy.py`, `docs/rrl/catalogue.md` |
 | `strat-design` | Methodology & thesis text | All of `strat`, plus the thesis document (`docs/thesis/*.md`) |
 | `fix` | Interface contracts & fixes | All of `core`, plus `docs/context/prompt-adapter-contract.md` |
+| `presentation` | Background-concepts HTML deck | Project context, decision log, status, `docs/presentation/background-deck/` brief/content pack/deck extract, both defense scripts, the revised thesis markdown, the existing `.pptx`, and the two MMSU logo assets |
 | `full` | Complete snapshot | Union of all profiles above (de-duplicated) |
 
 ### The "Comment-Out" Workflow

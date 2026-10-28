@@ -92,6 +92,12 @@ Status: **in-progress**
 | Chapter 4 — Results and Discussion                | not started (depends on Phase 3/4 code work)                                                                                                                                                                        |
 | Chapter 5 — Summary, Conclusions, Recommendations | not started                                                                                                                                                                                                         |
 
+## Presentation track (separate from the thesis/code work above)
+
+| ID | Task | Status | Notes / Report |
+| --- | --- | --- | --- |
+| PRES-001 | Consolidate the source material, requirements, style reference, and asset pack for the APC to plan a separate background-concepts HTML presentation for defense panelists (first-principles teaching; no Chapter 4 results). | **needs-review** | Completed by Claude Code; branch `task/PRES-001`, worktree `../llm-graph-insertion-complexity-PRES-001`. Materials in `docs/presentation/background-deck/` (`BRIEF.md`, `CONTENT-PACK.md`, `DECK-EXTRACT.md`, logos). See report [`docs/reports/PRES-001-claude-code-background-deck-materials.md`](docs/reports/PRES-001-claude-code-background-deck-materials.md). |
+
 ## Housekeeping
 
 | ID      | Task                                                                                                  | Status   | Notes / Report                                                                                                                               |
