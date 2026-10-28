@@ -6,6 +6,7 @@
 **Base commit:** `7dec5e9`
 **Reserved decision:** [D-99]
 **Status:** needs-review
+**Merged:** `28edad8` (merge commit on `master`); task branch tip `c71acbe`.
 
 ---
 
@@ -4012,5 +4013,9 @@ index 0000000..5ad42c6
 4. **Defense note:** say explicitly that the demo replays the 2026-10-07 pilot
    and that S1/S4 differ by one edge from the 2026-10-18 accuracy runs because
    those runs made their own live calls.
-5. **No merge/rebase/worktree cleanup performed.** Branch `task/DEMO-001`,
-   worktree `/home/lukexodus/projects/llm-graph-insertion-complexity-DEMO-001`.
+5. **Merge performed after the initial report.** `task/DEMO-001` was merged into
+   `master` at `28edad8` with `git merge --no-ff` because the merge helper
+   refused on pre-existing dirty files in the main checkout. Branch
+   `task/DEMO-001` and worktree
+   `/home/lukexodus/projects/llm-graph-insertion-complexity-DEMO-001` remain in
+   place; no rebase or worktree cleanup was performed.
