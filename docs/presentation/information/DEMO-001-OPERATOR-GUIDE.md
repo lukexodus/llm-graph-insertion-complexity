@@ -150,6 +150,62 @@ Both are genuine replay results from the same cache, not special cases.
 
 ---
 
+## 3A. Live mode (optional, real API calls)
+
+Default remains replay. Add `--live` to make real DeepSeek calls for the same
+single-node, four-strategy trial. It is still one insertion per strategy, not a
+size sweep.
+
+```bash
+# Pre-flight only: checks key, model, corpus, node, embedder; no network call
+.venv-ann/bin/python scripts/demo_trial.py --check --live
+
+# Real run. --confirm is mandatory.
+export DEEPSEEK_API_KEY=...
+.venv-ann/bin/python scripts/demo_trial.py --live --confirm
+
+# Choose the output directory yourself
+.venv-ann/bin/python scripts/demo_trial.py --live --confirm \
+    --output-dir demo_runs/my-live-run
+
+# Allow peak-priced execution (otherwise a peak window is refused)
+.venv-ann/bin/python scripts/demo_trial.py --live --confirm --allow-peak
+```
+
+What changes in live mode:
+
+- Every answer is a fresh DeepSeek response. The replay cache is not read.
+- Tags switch from `[PILOT]` to `[LIVE]` for answers, latency and tokens.
+- The banner says `LIVE RUN` and prints the endpoint, model, prompt version,
+  temperature, thinking mode and call/retry counts.
+- Default call count is about 48 (S1 28, S2 1, S3 10, S4 9 on the default node);
+  the pre-flight prints a 76-call upper bound and a cost bound. At off-peak
+  prices the default run is on the order of one tenth of a cent.
+- Embeddings are still computed locally with the pinned MiniLM model. Only the
+  LLM transport is live.
+- Peak guard: a live run whose execution window overlaps DeepSeek peak pricing
+  is refused unless `--allow-peak` is passed ([D-37]).
+- Safety: `--confirm` is mandatory, so a stray `--live` cannot spend money.
+
+Output is always written to a new directory, never over an existing one:
+
+```text
+demo_runs/live-<UTC timestamp>/
+  transcript.txt   full no-colour transcript
+  demo.json        same machine-readable record as --json
+  run_meta.json    mode, model, endpoint, argv, node, strategies, wall time
+```
+
+`--output-dir DIR` overrides the location. A non-empty directory is refused
+(exit 7), and so is any path under `results/`. `demo_runs/` is gitignored.
+The terminal still prints the transcript and ends with `LIVE OUTPUT: <dir>`.
+
+Live limitations are printed in the transcript: one node, one trial, no
+scaling claim, and each strategy made its own calls, so strategies may disagree
+on a pair even though they share the decision step.
+
+---
+
 ## 4. What to say, and what not to say
 
 Say:
@@ -163,9 +219,15 @@ Say:
 - "This is one node, one trial. It illustrates the pipeline; the thesis
   evidence is the full runs."
 
+If running `--live`, say instead:
+
+- "This run is making live DeepSeek calls now; every answer is fresh."
+- "Embeddings are still local; only the LLM transport is live."
+- "This is still one node and one trial, not a new empirical result."
+
 Do not say:
 
-- That the demo is making live API calls. It is not.
+- That replay mode is making live API calls. It is not.
 - That the shown latency is this machine's current latency. It is not.
 - That the demo is a new empirical result or part of Chapter 4. It is not.
 - That replay agreement proves the official runs agree. The official accuracy
@@ -182,7 +244,7 @@ Do not say:
 | 2 | Usage error (bad/duplicate/unknown `--strategies`) | Use `s1`–`s4` or the canonical names. |
 | 3 | Pilot cache/provenance failure | Restore the accepted PILOT-001 artifacts; do not edit the cache. The SHA-256 and prompt-version checks are fail-closed. |
 | 4 | Corpus or node problem | Check `repositories/dataset/EKG-Dataset/`; use a node name from the DSA corpus. Close matches are printed. |
-| 5 | Missing dependency or embedder | Use `.venv-ann`; the model must already be cached. The demo never downloads. |
+| 5 | Missing dependency/embedder/API key | Use `.venv-ann`; the model must already be cached. Live mode also needs `DEEPSEEK_API_KEY`. The demo never downloads. |
 | 6 | Internal consistency check failed | A production path, edge rebuild, label sum or subset invariant disagreed. Do not present the run; report it. |
 | 7 | Refused `--json` path | Pick a new path outside `results/` whose parent exists. |
 
@@ -190,6 +252,10 @@ Common fixes:
 
 - **`ModuleNotFoundError: sentence_transformers` or `faiss`** — run with
   `.venv-ann/bin/python`, not system Python.
+- **Live mode exits 5 with `DEEPSEEK_API_KEY`** — export the key or omit
+  `--live`; `--check --live` checks it without making a call.
+- **Live mode exits 2 for peak pricing** — wait for off-peak, or pass
+  `--allow-peak` and accept peak rates.
 - **Model load fails offline** — the cached MiniLM model is missing. Restore the
   cache; do not unset the offline variables to force a download during a
   defense.
@@ -213,7 +279,7 @@ Verified by the test suite and the DEMO-001 report:
 - Deterministic non-volatile JSON across two runs.
 - No writes under `results/`; pilot artifact SHA unchanged.
 - Formatter width <= 88 columns for every DSA node in both Unicode and ASCII.
-- 51 new tests; full runnable suite 787 passed, 3 skipped.
+- 59 new tests; full runnable suite 795 passed, 3 skipped.
 
 Not verified or not claimed:
 
@@ -254,24 +320,120 @@ Use symbol names, not line numbers; line numbers drift. Start in
 
 ### 8.1 Files to open, and what to point at
 
-| File | Symbols to show | What to say |
-|---|---|---|
-| `scripts/demo_trial.py` | `run_demo`, `ReplayLLMClient.complete`, `load_pilot`, `Formatter.while_block` | This is demo-only orchestration. It loads the corpus, loops over strategies, calls production `insert_node`, and formats the transcript. |
-| `src/graph_insertion/strategy.py` | `Shortlist`, `InsertionMetrics`, `insert_node` | The canonical insertion driver. It times narrowing, calls the shared decision step, validates the edges, mutates the graph, updates the strategy, and records metrics. |
-| `src/graph_insertion/decision.py` | `SYSTEM_PROMPT`, `parse_token`, `PairwiseDecisionStep.decide` | The one step shared by all strategies: one model call per candidate, one of three tokens, mapped to a canonical prerequisite edge. |
-| `src/graph_insertion/strategies/brute_force.py` | `BruteForceStrategy.shortlist` | The control: every existing concept is sent to the model. This is why S1 makes exactly `n` calls. |
-| `src/graph_insertion/strategies/embedding_threshold.py` | `EmbeddingThresholdStrategy.setup`, `.shortlist`, `.on_inserted` | S2: cache all embeddings, keep only cosine above theta, append the new vector after insertion. |
-| `src/graph_insertion/strategies/ann_retrieval.py` | `AnnRetrievalStrategy.setup`, `.shortlist`, `.on_inserted` | S3: build an HNSW index, retrieve top-k, add the new vector to the index after insertion. |
-| `src/graph_insertion/strategies/bounded_bucket.py` | `BoundedBucketStrategy.shortlist`, `._locate_home`, `._insert_entry` | S4: hash the new vector, find its home segment, shortlist only that segment, split when it overflows. |
-| `src/graph_insertion/strategies/registry.py` | `STRATEGY_FACTORIES` | One place maps CLI strategy names to classes and default parameters. |
-| `src/graph_insertion/scoring.py` | `score_node_insertion`, `NodeScore` | Turns predicted edges and the shortlist into TP/FP/FN, precision/recall/F1 and shortlist recall. Unjudged DSA pairs are excluded, with a sensitivity variant. |
-| `src/graph_insertion/loader.py` | `load_corpus`, `CORPUS_DOMAIN_CONTEXT_MAP` | Parses the gold triples, applies the verified column orientation, and supplies the domain string for the prompt. |
-| `src/graph_insertion/graph_representation.py` | `ConceptGraph`, `oriented_edge`, `embed_text` | Stores the graph; canonical edge `(prereq, dependent)` always means prereq → dependent; embeddings use bare names with spaces. |
-| `src/graph_insertion/embedding.py` | `MeteredEmbedder` | Counts embedding calls and time. This is how the demo proves S2–S4 embed the new concept once, not repeatedly. |
-| `src/graph_insertion/llm.py` | `LLMResponse`, `MeteredLLMClient` | The transport interface. The demo replaces the client, not the decision step or the meter. |
-| `src/graph_insertion/embedding_minilm.py` | `MiniLMEmbedder` | Pinned model, revision and sentence-transformers version; fail-closed. |
-| `src/graph_insertion/cpu_threads.py` | `pin_cpu_threads` | Pins PyTorch to one thread for comparable embedding latency. |
-| `docs/context/strategy-interface.md` | Strategy lifecycle and timing rules | The written contract; use it if a panelist asks what a strategy is allowed to do. |
+| File                                                    | Symbols to show                                                               | What to say                                                                                                                                                            |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/demo_trial.py`                                 | `run_demo`, `ReplayLLMClient.complete`, `RecordingLLMClient`, `load_pilot`, `Formatter.while_block`, `_write_live_outputs` | This is demo-only orchestration. It loads the corpus, loops over strategies, calls production `insert_node`, and formats the transcript. Live mode wraps the API client with a recorder and writes a run directory. |
+| `src/graph_insertion/strategy.py`                       | `Shortlist`, `InsertionMetrics`, `insert_node`                                | The canonical insertion driver. It times narrowing, calls the shared decision step, validates the edges, mutates the graph, updates the strategy, and records metrics. |
+| `src/graph_insertion/decision.py`                       | `SYSTEM_PROMPT`, `parse_token`, `PairwiseDecisionStep.decide`                 | The one step shared by all strategies: one model call per candidate, one of three tokens, mapped to a canonical prerequisite edge.                                     |
+| `src/graph_insertion/strategies/brute_force.py`         | `BruteForceStrategy.shortlist`                                                | The control: every existing concept is sent to the model. This is why S1 makes exactly `n` calls.                                                                      |
+| `src/graph_insertion/strategies/embedding_threshold.py` | `EmbeddingThresholdStrategy.setup`, `.shortlist`, `.on_inserted`              | S2: cache all embeddings, keep only cosine above theta, append the new vector after insertion.                                                                         |
+| `src/graph_insertion/strategies/ann_retrieval.py`       | `AnnRetrievalStrategy.setup`, `.shortlist`, `.on_inserted`                    | S3: build an HNSW index, retrieve top-k, add the new vector to the index after insertion.                                                                              |
+| `src/graph_insertion/strategies/bounded_bucket.py`      | `BoundedBucketStrategy.shortlist`, `._locate_home`, `._insert_entry`          | S4: hash the new vector, find its home segment, shortlist only that segment, split when it overflows.                                                                  |
+| `src/graph_insertion/strategies/registry.py`            | `STRATEGY_FACTORIES`                                                          | One place maps CLI strategy names to classes and default parameters.                                                                                                   |
+| `src/graph_insertion/scoring.py`                        | `score_node_insertion`, `NodeScore`                                           | Turns predicted edges and the shortlist into TP/FP/FN, precision/recall/F1 and shortlist recall. Unjudged DSA pairs are excluded, with a sensitivity variant.          |
+| `src/graph_insertion/loader.py`                         | `load_corpus`, `CORPUS_DOMAIN_CONTEXT_MAP`                                    | Parses the gold triples, applies the verified column orientation, and supplies the domain string for the prompt.                                                       |
+| `src/graph_insertion/graph_representation.py`           | `ConceptGraph`, `oriented_edge`, `embed_text`                                 | Stores the graph; canonical edge `(prereq, dependent)` always means prereq → dependent; embeddings use bare names with spaces.                                         |
+| `src/graph_insertion/embedding.py`                      | `MeteredEmbedder`                                                             | Counts embedding calls and time. This is how the demo proves S2–S4 embed the new concept once, not repeatedly.                                                         |
+| `src/graph_insertion/llm.py`                            | `LLMResponse`, `MeteredLLMClient`                                             | The transport interface. The demo replaces the client, not the decision step or the meter.                                                                             |
+| `src/graph_insertion/embedding_minilm.py`               | `MiniLMEmbedder`                                                              | Pinned model, revision and sentence-transformers version; fail-closed.                                                                                                 |
+| `src/graph_insertion/cpu_threads.py`                    | `pin_cpu_threads`                                                             | Pins PyTorch to one thread for comparable embedding latency.                                                                                                           |
+| `docs/context/strategy-interface.md`                    | Strategy lifecycle and timing rules                                           | The written contract; use it if a panelist asks what a strategy is allowed to do.                                                                                      |
+
+### 8.1a Symbol cheat sheet
+
+One-line explanations for every symbol in the table above.
+
+**Demo-only (`scripts/demo_trial.py`)**
+
+- `run_demo` — Loads the corpus and either the replay cache or a live client,
+  runs one insertion per selected strategy, and returns the report object used
+  by both the transcript and JSON.
+- `load_pilot` — Validates the recorded cache byte-for-byte (SHA, field types,
+  812 pairs, sums) and returns provenance plus a prompt-to-answer map. Fails
+  closed; no fallback.
+- `ReplayLLMClient.complete` — Looks up the exact `user_prompt` in that map and
+  returns an `LLMResponse`; a missing prompt raises instead of inventing one.
+- `RecordingLLMClient` — Wraps either the replay client or the live DeepSeek
+  client and stores every prompt/response pair in order so the formatter can
+  show calls without changing the decision step.
+- `_write_live_outputs` — Writes `transcript.txt`, `demo.json` and
+  `run_meta.json` into the new live output directory.
+- `Formatter.while_block` — Renders one strategy's WHILE section: setup,
+  shortlist, candidate ranking, sampled calls, answers, calls, latency, tokens,
+  cost and graph update, with `[LIVE]`/`[PILOT]`/`[CALC]` tags.
+
+**Production driver (`src/graph_insertion/strategy.py`)**
+
+- `Shortlist` — The strategy's output: an ordered tuple of candidate names and
+  an optional tuple of matching scores.
+- `InsertionMetrics` — One insertion's counters: graph size, shortlist size,
+  LLM calls, embedding calls and time, shortlist/decision/apply/update/total
+  time, validation time and diagnostics.
+- `insert_node` — The canonical pipeline: validate inputs, time the shortlist,
+  call the shared decision step, validate edges, mutate the graph, call
+  `on_inserted`, and return `InsertionResult` with metrics.
+
+**Shared decision step (`src/graph_insertion/decision.py`)**
+
+- `SYSTEM_PROMPT` — The fixed v2 instruction: prerequisite means direct or
+  indirect, answer with exactly one token, names only.
+- `parse_token` — Normalises a raw completion (strip/uppercase) to
+  `X_PREREQ_Y`, `Y_PREREQ_X`, `NONE`, or `None`.
+- `PairwiseDecisionStep.decide` — Makes one sequential call per candidate and
+  maps the token to a canonical edge or no edge.
+
+**Strategies**
+
+- `BruteForceStrategy.shortlist` — Returns every existing node, alphabetically,
+  with uniform zero scores; S1 therefore makes exactly `n` calls.
+- `EmbeddingThresholdStrategy.setup` — Embeds and L2-normalises all nodes into a
+  matrix; `.shortlist` embeds the new name once and keeps cosine `> theta`;
+  `.on_inserted` appends the cached vector without re-embedding.
+- `AnnRetrievalStrategy.setup` — Builds the HNSW index over normalised vectors;
+  `.shortlist` retrieves top-k; `.on_inserted` adds the cached vector to the
+  index.
+- `BoundedBucketStrategy.shortlist` — Hashes the query, finds its home segment,
+  and scores only that segment's members.
+- `BoundedBucketStrategy._locate_home` — Binary-searches segment boundaries and,
+  when the query falls between segments, chooses the nearer neighbour.
+- `BoundedBucketStrategy._insert_entry` — Inserts the new entry in sorted order
+  and splits the segment at its midpoint if it exceeds `s_max`.
+- `STRATEGY_FACTORIES` — Maps strategy names to factory functions and their
+  default parameters.
+
+**Accuracy (`src/graph_insertion/scoring.py`)**
+
+- `score_node_insertion` — Compares predicted canonical edges and the shortlist
+  with the gold graph and judgments, producing TP/FP/FN, precision, recall, F1,
+  shortlist recall, unjudged-pair exclusion and the sensitivity variant.
+- `NodeScore` — The per-trial dataclass holding those metrics.
+
+**Data (`loader.py`, `graph_representation.py`)**
+
+- `load_corpus` — Discovers and parses a corpus into `ConceptGraph` plus
+  `GoldJudgmentSet`, applying the verified delimiter and column orientation.
+- `CORPUS_DOMAIN_CONTEXT_MAP` — Maps a corpus name to the graph-level subject
+  string placed in the decision prompt.
+- `ConceptGraph` — NetworkX-backed graph wrapper; nodes are bare names, an edge
+  `(u, v)` means u is a prerequisite of v, and `without_node` makes the
+  leave-one-out copy.
+- `oriented_edge` — Converts a file row into canonical `(prereq, dependent)`;
+  gold files use `(col2, col1)`, example MEKG files use `(col1, col2)`.
+- `embed_text` — Converts a concept name to its embedding text by replacing
+  underscores with spaces; no domain context is added.
+
+**Embedding and transport (`embedding.py`, `llm.py`, `embedding_minilm.py`, `cpu_threads.py`)**
+
+- `MeteredEmbedder` — Counts embedding calls, texts and seconds; the demo uses
+  it to prove the new concept is embedded once.
+- `LLMResponse` — The transport result: text, token counts, latency, model ID
+  and attempts.
+- `MeteredLLMClient` — Wraps any client to count calls, retries, tokens, latency
+  and parse failures.
+- `MiniLMEmbedder` — The pinned all-MiniLM-L6-v2 backend: 384-dimensional,
+  CPU, float32, version and revision checked at construction.
+- `pin_cpu_threads` — Sets and verifies PyTorch intra-op threads to one so
+  embedding latency is comparable across strategies.
 
 ### 8.2 Five-minute code path
 
@@ -346,3 +508,4 @@ Then add the demo-specific sentence:
 | `docs/decisions/decision-log.md` | D-99: replay-only, fail-closed, tag semantics. |
 | `docs/tasks/status.md` | DEMO-001 status row. |
 | `results/pilot/20261007_053743Z/` | Recorded PILOT-001 cache and summary. |
+| `demo_runs/live-<UTC>/` | Generated live output (`transcript.txt`, `demo.json`, `run_meta.json`); gitignored. |

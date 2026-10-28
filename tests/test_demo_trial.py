@@ -28,6 +28,7 @@ from graph_insertion.graph_representation import (
     GoldJudgmentSet,
     SourceKind,
 )
+from graph_insertion.llm import LLMResponse
 from graph_insertion.scoring import NodeScore
 
 
@@ -516,7 +517,7 @@ def make_strategy(
             y=f"c{i}",
             token=tokens[i],
             edge=(("n2", f"c{i}") if tokens[i] == "X_PREREQ_Y" else None),
-            latency_s_pilot=1.0,
+            latency_s=1.0,
             input_tokens=153,
             output_tokens=5,
             user_prompt=f"prompt {i}",
@@ -793,6 +794,142 @@ class TestCLI:
             timeout=120,
         )
         assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Live mode (fake client; no network)
+# ---------------------------------------------------------------------------
+
+
+class FakeLiveClient:
+    model = "deepseek-flash"
+    base_url = "https://api.deepseek.com"
+    temperature = 0.0
+    thinking_mode = "disabled"
+
+    def __init__(self, token_override=None):
+        self.token_override = token_override
+
+    def complete(self, system: str, user: str) -> LLMResponse:
+        x = y = None
+        for line in user.splitlines():
+            if line.startswith("Concept X: "):
+                x = line[11:].replace(" ", "_")
+            elif line.startswith("Concept Y: "):
+                y = line[11:].replace(" ", "_")
+        token = self.token_override or response_for(x, y)
+        return LLMResponse(
+            text=token,
+            input_tokens=150,
+            output_tokens=5,
+            latency_s=0.5,
+            model_id="deepseek-flash",
+        )
+
+    def record_parse_failure(self, text: str) -> None:
+        pass
+
+
+class TestLiveMode:
+    def test_live_orchestration_marks_live_and_uses_replay_free_path(self, tmp_path):
+        corpus = make_toy_corpus()
+        report = demo.run_demo(
+            node="n2",
+            selected=["brute_force"],
+            corpus=corpus,
+            live_client=FakeLiveClient(),
+            raw_embedder=FakeEmbedder(dim=32, seed=42),
+            argv=["--live"],
+        )
+        assert report.mode == "live"
+        assert report.provenance.path == "(live DeepSeek API)"
+        assert report.provenance.model == "deepseek-flash"
+        assert report.provenance.n_calls == 5
+        assert report.provenance.cumulative_latency_s == pytest.approx(2.5)
+        lines = demo.format_report(report, demo.FormatOptions(color=False))
+        text = "\n".join(lines)
+        assert "LIVE RUN" in text
+        assert demo.LIVE_NOTICE in text.replace("\n  ", " ").replace("\n", " ")
+        assert "[PILOT]" not in text
+        assert "5 calls · 2.50 s API latency [LIVE]" in text
+
+    def test_live_unparseable_response_fails_closed(self):
+        corpus = make_toy_corpus()
+        with pytest.raises(demo.DemoError) as exc:
+            demo.run_demo(
+                node="n2",
+                selected=["brute_force"],
+                corpus=corpus,
+                live_client=FakeLiveClient(token_override="MAYBE"),
+                raw_embedder=FakeEmbedder(dim=32, seed=42),
+                argv=["--live"],
+            )
+        assert exc.value.exit_code == 6
+
+    def test_live_output_dir_refuses_nonempty(self, tmp_path):
+        target = tmp_path / "out"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
+        with pytest.raises(demo.DemoError) as exc:
+            demo._validate_live_output_dir(str(target))
+        assert exc.value.exit_code == 7
+        assert (target / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    def test_live_outputs_written(self, tmp_path):
+        corpus = make_toy_corpus()
+        report = demo.run_demo(
+            node="n2",
+            selected=["brute_force"],
+            corpus=corpus,
+            live_client=FakeLiveClient(),
+            raw_embedder=FakeEmbedder(dim=32, seed=42),
+            argv=["--live"],
+        )
+        output_dir = demo._validate_live_output_dir(str(tmp_path / "live"))
+        report.output_dir = str(output_dir)
+        demo._write_live_outputs(
+            report, output_dir, ascii_mode=False, show_all_calls=False, argv=["--live"]
+        )
+        assert (output_dir / "transcript.txt").is_file()
+        assert (output_dir / "demo.json").is_file()
+        assert (output_dir / "run_meta.json").is_file()
+        meta = json.loads((output_dir / "run_meta.json").read_text(encoding="utf-8"))
+        assert meta["mode"] == "live"
+        assert meta["model"] == "deepseek-flash"
+
+    def test_live_cli_requires_confirm(self, capsys):
+        assert demo.main(["--live", "--strategies", "s1"]) == 2
+        assert "--confirm" in capsys.readouterr().err
+
+    def test_live_cli_missing_key_exit_5(self, monkeypatch, capsys):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "graph_insertion.schedule.window_intersects_peak", lambda *args: False
+        )
+        assert demo.main(["--live", "--confirm", "--strategies", "s1"]) == 5
+        assert "DEEPSEEK_API_KEY" in capsys.readouterr().err
+
+    def test_check_live_missing_key_exit_5(self, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        assert demo.main(["--check", "--live", "--strategies", "s1"]) == 5
+
+    def test_live_cli_end_to_end_with_fake_client(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(demo, "_build_live_client", lambda: FakeLiveClient())
+        monkeypatch.setattr(
+            "graph_insertion.schedule.window_intersects_peak", lambda *args: False
+        )
+        output_dir = tmp_path / "live-run"
+        code = demo.main([
+            "--live", "--confirm", "--strategies", "s1",
+            "--output-dir", str(output_dir), "--no-color",
+        ])
+        assert code == 0
+        assert (output_dir / "transcript.txt").is_file()
+        assert (output_dir / "demo.json").is_file()
+        assert (output_dir / "run_meta.json").is_file()
+        transcript = (output_dir / "transcript.txt").read_text(encoding="utf-8")
+        assert "LIVE RUN" in transcript
+        assert "LIVE OUTPUT:" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
