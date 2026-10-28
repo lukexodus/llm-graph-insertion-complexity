@@ -64,23 +64,23 @@ and 47 edges; the full gold graph is 29 concepts and 54 edges.
 
 The transcript has three phases:
 
-| Phase | What the panel sees |
-|---|---|
-| **BEFORE** | The research question, corpus, hidden gold neighbourhood, the shared decision prompt, the four strategies and the cost formula. |
-| **WHILE** | Per strategy: setup time, shortlist size and narrowing, candidate ranking, sampled decision calls with exact prompts, recorded answers, calls, recorded model latency, tokens, cost, and graph update. |
-| **AFTER** | Gold neighbourhood revealed, TP/FP/FN edges, missed-edge causes, precision/recall/F1, shortlist recall, cross-strategy tables, takeaways and limitations. |
+| Phase      | What the panel sees                                                                                                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **BEFORE** | The research question, corpus, hidden gold neighbourhood, the shared decision prompt, the four strategies and the cost formula.                                                                        |
+| **WHILE**  | Per strategy: setup time, shortlist size and narrowing, candidate ranking, sampled decision calls with exact prompts, recorded answers, calls, recorded model latency, tokens, cost, and graph update. |
+| **AFTER**  | Gold neighbourhood revealed, TP/FP/FN edges, missed-edge causes, precision/recall/F1, shortlist recall, cross-strategy tables, takeaways and limitations.                                              |
 
 Metric tags: `[LIVE]` measured now, `[PILOT]` recorded on 2026-10-07, `[CALC]`
 derived from recorded values, `[GOLD]` ground truth shown only in AFTER.
 
 Expected default result (P8, reproduced by the test suite):
 
-| strategy | shortlist | calls | F1 | TP/FP/FN |
-|---|---:|---:|---:|---:|
-| S1 brute force | 28/28 | 28 | .667 | 4/1/3 |
-| S2 embedding threshold (θ=.6) | 1/28 | 1 | .250 | 1/0/6 |
-| S3 ANN retrieval (k=10) | 10/28 | 10 | .727 | 4/0/3 |
-| S4 bounded bucket (5..10) | 9/28 | 9 | .250 | 1/0/6 |
+| strategy                      | shortlist | calls |   F1 | TP/FP/FN |
+| ----------------------------- | --------: | ----: | ---: | -------: |
+| S1 brute force                |     28/28 |    28 | .667 |    4/1/3 |
+| S2 embedding threshold (θ=.6) |      1/28 |     1 | .250 |    1/0/6 |
+| S3 ANN retrieval (k=10)       |     10/28 |    10 | .727 |    4/0/3 |
+| S4 bounded bucket (5..10)     |      9/28 |     9 | .250 |    1/0/6 |
 
 Runtime: about 7–10 seconds including model load on this machine; process wall
 about 8–11 seconds. Well under 30 seconds.
@@ -247,7 +247,94 @@ The current pins are:
 
 ---
 
-## 8. Files involved
+## 8. Source-code walkthrough for panelists
+
+Use symbol names, not line numbers; line numbers drift. Start in
+`scripts/demo_trial.py`, then follow the production call path.
+
+### 8.1 Files to open, and what to point at
+
+| File | Symbols to show | What to say |
+|---|---|---|
+| `scripts/demo_trial.py` | `run_demo`, `ReplayLLMClient.complete`, `load_pilot`, `Formatter.while_block` | This is demo-only orchestration. It loads the corpus, loops over strategies, calls production `insert_node`, and formats the transcript. |
+| `src/graph_insertion/strategy.py` | `Shortlist`, `InsertionMetrics`, `insert_node` | The canonical insertion driver. It times narrowing, calls the shared decision step, validates the edges, mutates the graph, updates the strategy, and records metrics. |
+| `src/graph_insertion/decision.py` | `SYSTEM_PROMPT`, `parse_token`, `PairwiseDecisionStep.decide` | The one step shared by all strategies: one model call per candidate, one of three tokens, mapped to a canonical prerequisite edge. |
+| `src/graph_insertion/strategies/brute_force.py` | `BruteForceStrategy.shortlist` | The control: every existing concept is sent to the model. This is why S1 makes exactly `n` calls. |
+| `src/graph_insertion/strategies/embedding_threshold.py` | `EmbeddingThresholdStrategy.setup`, `.shortlist`, `.on_inserted` | S2: cache all embeddings, keep only cosine above theta, append the new vector after insertion. |
+| `src/graph_insertion/strategies/ann_retrieval.py` | `AnnRetrievalStrategy.setup`, `.shortlist`, `.on_inserted` | S3: build an HNSW index, retrieve top-k, add the new vector to the index after insertion. |
+| `src/graph_insertion/strategies/bounded_bucket.py` | `BoundedBucketStrategy.shortlist`, `._locate_home`, `._insert_entry` | S4: hash the new vector, find its home segment, shortlist only that segment, split when it overflows. |
+| `src/graph_insertion/strategies/registry.py` | `STRATEGY_FACTORIES` | One place maps CLI strategy names to classes and default parameters. |
+| `src/graph_insertion/scoring.py` | `score_node_insertion`, `NodeScore` | Turns predicted edges and the shortlist into TP/FP/FN, precision/recall/F1 and shortlist recall. Unjudged DSA pairs are excluded, with a sensitivity variant. |
+| `src/graph_insertion/loader.py` | `load_corpus`, `CORPUS_DOMAIN_CONTEXT_MAP` | Parses the gold triples, applies the verified column orientation, and supplies the domain string for the prompt. |
+| `src/graph_insertion/graph_representation.py` | `ConceptGraph`, `oriented_edge`, `embed_text` | Stores the graph; canonical edge `(prereq, dependent)` always means prereq → dependent; embeddings use bare names with spaces. |
+| `src/graph_insertion/embedding.py` | `MeteredEmbedder` | Counts embedding calls and time. This is how the demo proves S2–S4 embed the new concept once, not repeatedly. |
+| `src/graph_insertion/llm.py` | `LLMResponse`, `MeteredLLMClient` | The transport interface. The demo replaces the client, not the decision step or the meter. |
+| `src/graph_insertion/embedding_minilm.py` | `MiniLMEmbedder` | Pinned model, revision and sentence-transformers version; fail-closed. |
+| `src/graph_insertion/cpu_threads.py` | `pin_cpu_threads` | Pins PyTorch to one thread for comparable embedding latency. |
+| `docs/context/strategy-interface.md` | Strategy lifecycle and timing rules | The written contract; use it if a panelist asks what a strategy is allowed to do. |
+
+### 8.2 Five-minute code path
+
+Open these in order and keep each stop short:
+
+1. **`scripts/demo_trial.py` → `run_demo`.** Point at
+   `gold_graph.without_node(node)`, the per-strategy loop, the fresh
+   `MeteredEmbedder`, and the call to `insert_node`.
+2. **`src/graph_insertion/strategy.py` → `insert_node`.** Point at the sequence:
+   `strategy.shortlist()`, then `decision_step.decide()`, then edge validation,
+   then `graph.add_node` / `add_prereq_edge`, then
+   `strategy.on_inserted()`, then `InsertionMetrics`.
+3. **`src/graph_insertion/decision.py` → `PairwiseDecisionStep.decide`.**
+   Point at the single call per candidate and the three-token mapping:
+   `X_PREREQ_Y` → `(new, cand)`, `Y_PREREQ_X` → `(cand, new)`, `NONE` → no
+   edge. Point at `SYSTEM_PROMPT`: direct or indirect prerequisite, one token
+   only, names only.
+4. **One strategy's `shortlist`.** Use `brute_force.py` for the simplest
+   contrast; use `ann_retrieval.py` or `bounded_bucket.py` if asked how
+   narrowing actually works.
+5. **`src/graph_insertion/scoring.py` → `score_node_insertion`.** Point at
+   `shortlist_recall` (did narrowing keep the true neighbours?) and
+   `tp`/`fp`/`fn` (did the shared decision step get the edges right?).
+6. **`scripts/demo_trial.py` → `ReplayLLMClient.complete`.** This is the only
+   replacement: exact `user_prompt` lookup in the accepted cache, no answer
+   fabricated, SHA-pinned cache.
+
+Optional: **`Formatter.while_block`** if asked where the `[LIVE]`, `[PILOT]`,
+`[CALC]` and `[GOLD]` tags come from.
+
+### 8.3 The explanation in one breath
+
+> A strategy only chooses whom the model is allowed to see. The shared decision
+> step asks the same question for each candidate and returns the same three
+> possible answers. The driver applies the edges and records the cost. Scoring
+> compares the result with the gold graph at two points: did narrowing keep the
+> right neighbours, and did the model get the edges right?
+
+Then add the demo-specific sentence:
+
+> This program replaces only the HTTP transport with a lookup into the real
+> recorded PILOT-001 answers. The strategy classes, the decision step, the
+> graph update, the meter and the scorer are the production code; `src/` was
+> not modified for the demo.
+
+### 8.4 Quick answers if a panelist probes
+
+| Question | Answer |
+|---|---|
+| "Is the shortlist hardcoded?" | No. It is computed live by the strategy from the held-out graph and the pinned MiniLM embeddings. |
+| "Are the model answers hardcoded?" | They are recorded, not invented: every answer is looked up by exact prompt text from the accepted PILOT-001 cache. A missing prompt stops the run; it never guesses. |
+| "Did you change the experiment code to make the demo?" | No changes under `src/`. `scripts/demo_trial.py` imports the production classes; only the LLM client is swapped. |
+| "Where is the actual LLM call in the official run?" | `PairwiseDecisionStep.decide` calls the injected client once per candidate. In the official run that client is `DeepSeekClient`; in the demo it is `ReplayLLMClient`. |
+| "How is the comparison fair?" | The decision prompt, model, token vocabulary, embedder and scorer are identical across S1–S4. Only the shortlist mechanism differs. |
+| "How do you know narrowing caused the difference?" | In replay the answer for a pair is fixed, so any edge difference can only come from which pairs reached the decision step. The demo asserts the S1 superset invariant and prints it. |
+| "How is cost measured?" | `InsertionMetrics` records shortlist time, decision time, apply time, update time, embedding calls and LLM calls. The demo adds recorded pilot latency and tokens separately and labels them `[PILOT]`. |
+| "How is accuracy computed?" | `score_node_insertion` compares predicted canonical edges with the gold graph and `GoldJudgmentSet`: TP/FP/FN, precision/recall/F1, plus shortlist recall. |
+| "What is the edge direction?" | Canonical `(prereq, dependent)` means prereq → dependent; `oriented_edge` converts the file's column order once at load time. |
+| "Why can S2 return nothing?" | The threshold is strict `cosine > theta`; if no existing concept passes, the shortlist is empty, so the decision step makes zero calls and adds no edges. That is a valid outcome, not an error. |
+
+---
+
+## 9. Files involved
 
 | File | Role |
 |---|---|
