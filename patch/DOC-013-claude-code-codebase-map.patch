@@ -1,0 +1,2574 @@
+diff --git c/docs/context/codebase-map.md w/docs/context/codebase-map.md
+new file mode 100644
+index 0000000..6043388
+--- /dev/null
++++ w/docs/context/codebase-map.md
+@@ -0,0 +1,2543 @@
++# Codebase Map — Core Files, Symbols, and Workflows
++
++**Status:** generated 2026-10-29 by Claude Code under task `DOC-013`.
++**Scope:** the executable core of the thesis experiment (runtime package +
++experiment CLI) in full, the Phase 4 analysis pipeline in outline, and the
++supporting data-generation tooling in brief.
++**Basis:** every claim below was read directly from the files in this
++repository at commit `4983840` (base of branch `task/DOC-013`). Line numbers
++are those of that commit and will drift as files change — treat them as
++pointers, not contracts.
++**Companion docs:** `docs/context/complete-context.md` (project overview),
++`docs/context/strategy-interface.md` (normative strategy contract),
++`docs/context/data-formats.md` (dataset formats), `docs/decisions/decision-log.md`
++(decision IDs cited throughout).
++
++**Reading convention.** Pseudocode in this document is deliberately
++language-neutral:
++
++- `←` assignment, `==` equality, `!=` inequality.
++- `for x in X:` / `if cond:` / `return` / `raise` are structural.
++- `A.f()` means a method call; `[ ... ]` denotes an ordered list.
++- Timing and metrics names are written exactly as in the code.
++
++---
++
++## 1. The one-paragraph architecture
++
++A **strategy** narrows a new concept against an existing `ConceptGraph` to a
++shortlist. A **shared decision step** asks an LLM, once per shortlisted
++candidate, whether one concept is a prerequisite of the other. The **shared
++insertion driver** validates the shortlist and the LLM's edges, mutates the
++graph, then tells the strategy to update its index. A **harness** repeats this
++for leave-one-out accuracy trials (DSA, Metacademy) or synthetic cost-sweep
++trials (six graph sizes), streaming one JSON record per trial. A separate
++**validation gate + analysis pipeline** recomputes metrics from raw records
++and emits every thesis table and figure.
++
++```
++                         ┌──────────────────────────┐
++                         │      ConceptGraph        │  NetworkX DiGraph
++                         │  nodes: bare names       │  edge: prereq -> dependent
++                         │  domain_context: str|None│
++                         └────────────┬─────────────┘
++                                      │ read-only
++             setup(graph, embedder)   │
++                                      ▼
++                         ┌──────────────────────────┐
++ new_name ──────────────>│   NarrowingStrategy      │  no LLM calls
++                         │   .shortlist(new_name)   │  may embed
++                         └────────────┬─────────────┘
++                                      │ Shortlist(candidates, scores)
++                                      ▼
++                         ┌──────────────────────────┐
++                         │  DecisionStep            │  1 LLM call / candidate
++                         │  .decide(new, candidates)│  returns canonical edges
++                         └────────────┬─────────────┘
++                                      │ DecisionOutcome(edges, calls, seconds)
++                                      ▼
++                         ┌──────────────────────────┐
++                         │  insert_node() driver    │
++                         │  validate -> mutate      │
++                         │  graph -> strategy.update│
++                         └────────────┬─────────────┘
++                                      │ InsertionResult + InsertionMetrics
++                                      ▼
++                         ┌──────────────────────────┐
++                         │  Harness runners         │
++                         │  accuracy / sweep        │
++                         │  raw.jsonl + summary.csv │
++                         └────────────┬─────────────┘
++                                      ▼
++                         ┌──────────────────────────┐
++                         │ validate_runs.py gate    │ fail-closed
++                         │ run_analysis.py          │ tables + figures
++                         └──────────────────────────┘
++```
++
++---
++
++## 2. Core file tree
++
++Only files that participate in the experiment or its analysis are listed.
++Generated artifacts (`__pycache__`, `.egg-info`) are omitted.
++
++```
++.
++├── pyproject.toml                         package metadata, deps, pytest config
++├── data/
++│   └── synthetic/
++│       └── cs_concept_names.json          DATA-004 name pool (2,254 names)
++├── repositories/
++│   └── dataset/EKG-Dataset/               raw corpora (nested clone)
++│       ├── DSA_gold_standard_MEKG.txt
++│       ├── metacademy_gold_standard_MEKG.txt
++│       └── MEKG_with*.txt                 10 example graphs
++├── src/graph_insertion/
++│   ├── __init__.py                        public re-export surface
++│   ├── graph_representation.py            ConceptGraph, GoldJudgmentSet, orientation
++│   ├── loader.py                          corpus discovery + strict parsing
++│   ├── strategy.py                        strategy contract + insert_node driver
++│   ├── embedding.py                       Embedder protocol, metering, FakeEmbedder
++│   ├── embedding_minilm.py                pinned all-MiniLM-L6-v2 embedder
++│   ├── cpu_threads.py                     PyTorch thread pin
++│   ├── decision.py                        shared pairwise LLM decision step
++│   ├── llm.py                             LLM clients, retries, metering
++│   ├── schedule.py                        DeepSeek peak-window guard
++│   ├── scoring.py                         accuracy metrics vs gold judgments
++│   ├── harness.py                         accuracy + sweep runners, persistence
++│   └── strategies/
++│       ├── __init__.py                    lazy strategy exports
++│       ├── registry.py                    factories, parameter rules, run slugs
++│       ├── null.py                        random-k lower-bound control
++│       ├── stub.py                        deterministic harness-test strategy
++│       ├── brute_force.py                 S1: all existing nodes
++│       ├── embedding_threshold.py         S2: cosine > theta
++│       ├── ann_retrieval.py               S3: FAISS HNSW top-k
++│       └── bounded_bucket.py              S4: bounded segments along LSH order
++├── scripts/
++│   ├── run_experiment.py                  CLI entry point for accuracy/sweep
++│   ├── generate_name_pool.py              DATA-004/005/006 synthetic name pool
++│   ├── name_pool_supervisor.py            unattended sharded pool generation
++│   ├── analysis/
++│   │   ├── validate_runs.py               fail-closed run validation gate
++│   │   ├── run_analysis.py                master analysis orchestration
++│   │   ├── tables.py                      T1–T4, T2 slope fits
++│   │   ├── figures.py                     F1–F6, F1b/F2b/F6b
++│   │   ├── stats.py                       log-log slopes, bootstrap CI, dominance
++│   │   ├── bootstrap.py                   percentile bootstrap helpers
++│   │   ├── style.py                       shared matplotlib style/palette
++│   │   ├── posthoc.py                     T5–T9b post-hoc rankings
++│   │   ├── posthoc_figures.py             F7–F9
++│   │   ├── apc_check_f_outputs.py         independent output cross-check
++│   │   ├── apc_check_pipeline_outputs.py  independent pipeline cross-check
++│   │   └── redraw_thesis_figures.py       thesis-figure redraw utility
++│   ├── apc-bundle.sh                      context packaging for APC sessions
++│   ├── task-worktree.sh                   worktree lifecycle helper
++│   ├── validate-report.py                 report structure linter
++│   └── manage-decisions.py                decision-ID allocator
++└── tests/                                 see §8
++```
++
++---
++
++## 3. End-to-end workflows
++
++### 3.1 Organising the work: one insertion
++
++```
++INPUT: strategy S, graph G (n nodes), decision step D, meter E, new_name x
++
++1. assert E is MeteredEmbedder
++2. assert S._embedder is None or S._embedder is E
++3. assert x is a valid bare name and x not in G
++4. t0 <- now()
++   shortlist <- S.shortlist(x)
++   t1 <- now()
++5. validate shortlist: tuple, no x, no duplicates, all in G,
++   scores length matches candidates
++6. if shortlist empty:
++       outcome <- (edges=(), calls=0, seconds=0)
++       decide_s <- 0
++   else:
++       t2 <- now()
++       outcome <- D.decide(x, shortlist.candidates, G.domain_context)
++       t3 <- now(); decide_s <- t3 - t2
++7. validate edges: tuple, no duplicates, 2-tuples of str, no self-loop,
++   every edge involves x, other endpoint in shortlist
++8. t4 <- now()
++   G.add_node(x)
++   for (p, d) in outcome.edges: G.add_prereq_edge(p, d)
++   apply_s <- now() - t4
++9. record meter before update
++   t5 <- now(); S.on_inserted(x, outcome.edges); t6 <- now()
++   update_s <- t6 - t5
++   embedding_calls_in_update <- meter.calls delta
++   embed_in_update_s <- meter.seconds delta
++10. total_s <- shortlist_s + decide_s + apply_s + update_s
++    validate_s <- shortlist-validation seconds + edge-validation seconds
++11. diagnostics <- S.diagnostics() or {"diagnostics_error": repr(e)}
++12. return InsertionResult(...)
++```
++
++### 3.2 Accuracy mode (leave-one-out)
++
++```
++INPUT: HarnessConfig(mode="accuracy"), strategy factory, decision step,
++       embedder factory, corpora {DSA, Metacademy}
++
++1. require confirm=True unless dry_run
++2. create output dir; write manifest.json
++3. optional warmup (CLI uses it to write strategy_config.json once)
++4. if resume: load successful keys (and failed keys unless retry_failed)
++5. planned keys <- for each corpus, each sampled held-out node, each repeat
++   - DSA: all 29 nodes
++   - Metacademy: deterministic sample of min(30, 141) nodes
++6. for each corpus, repeat, held-out node h:
++       if key skipped: continue
++       if max_llm_calls reached: write summary; return
++       G' <- gold graph with h removed
++       S <- fresh strategy from factory
++       E <- MeteredEmbedder(fresh embedder)
++       S.setup(G', E)                 # untimed
++       gc.collect()
++       snapshot LLM meter before
++       t0 <- now()
++       result <- insert_node(S, G', D, h, metered_embedder=E)
++       wall <- now() - t0
++       snapshot LLM meter after; delta = after - before
++       score <- score_node_insertion(h, gold graph, judgments,
++                                     result.shortlist.candidates, result.edges)
++       append success record to raw.jsonl (flush)
++   on setup error: append failed record, write summary, abort
++   on LLMTransportError: append failed record; abort only if fail_fast
++   on any other error: append failed record, write summary, abort
++7. regenerate summary.csv
++```
++
++### 3.3 Sweep mode (cost-only scaling)
++
++```
++INPUT: HarnessConfig(mode="sweep"), name pool, strategy, decision step
++
++1. require confirm=True unless dry_run
++2. write manifest
++3. for each size n in sweep_sizes, each trial t in 0..trials-1:
++       seed <- config.seed + n*1000 + t
++       sample n+1 unique names from pool
++       existing <- first n; new_name <- last
++       G <- names-only ConceptGraph(domain_context="computer science")
++       S <- fresh strategy; E <- MeteredEmbedder(fresh embedder)
++       S.setup(G, E)
++       gc.collect()
++       result <- insert_node(S, G, D, new_name, metered_embedder=E)
++       append success/failed record with metrics + LLM snapshot delta
++4. regenerate summary.csv
++```
++
++### 3.4 CLI decision flow (`scripts/run_experiment.py main`)
++
++```
++parse args
++  └─ resolve strategy factory from STRATEGY_FACTORIES
++  └─ reject inapplicable flags (e.g. --theta on brute_force) -> exit 2
++  └─ instantiate probe strategy (no setup) -> catches bad params
++  └─ if --live and strategy uses embeddings and --embedder fake: refuse
++  └─ derive default run id from (mode, strategy, config)
++  └─ build HarnessConfig
++  └─ inspect sidecar; if resuming into existing dir, require same
++     strategy/config/mode/embedder -> else exit 1
++  └─ choose corpora (DSA / Metacademy / both)
++  └─ if --live sweep and no --names-file: refuse
++  └─ compute planned-call upper bound (strategy-aware, resume-aware)
++  └─ if --live:
++        print pre-flight estimate (calls, duration, cost)
++        check peak window; refuse unless --allow-peak
++        if --dry-run: print and exit 0
++        require --confirm
++        build DeepSeekClient + MeteredLLMClient + PairwiseDecisionStep
++     else:
++        FakeLLMClient + MeteredLLMClient + PairwiseDecisionStep
++  └─ build sweep name source (validated --names-file or placeholders)
++  └─ if --dry-run: print plan, resolved dir, exit 0
++  └─ require --confirm
++  └─ build embedder factory:
++        no embeddings or --embedder fake -> FakeEmbedder(dim=32)
++        else -> MiniLMEmbedder(); pin_cpu_threads(1)
++  └─ build ProgressReporter; attach on_call hook
++  └─ warmup writes strategy_config.json sidecar if dir fresh
++  └─ run_experiment(...)
++```
++
++### 3.5 Analysis pipeline
++
++```
++run_analysis.py --results-dir R --output-dir O
++  └─ STEP 1 validate_all_runs(R)                  # fail-closed
++        if any run fails: print errors, exit 1, write nothing
++  └─ create O/tables, O/figures; write O/RUN_INFO.txt
++  └─ if --only posthoc:
++        build T1/T2 in memory
++        run_posthoc_stage(...)                     # T5–T9b, F7–F9
++        exit
++  └─ write T3 from validator CSV
++  └─ if accuracy runs: T1, T4; F4, F5, F6, F6b
++  └─ if sweep runs: T2 + slope fits; F1, F2, F3, F1b, F2b
++  └─ print success
++```
++
++### 3.6 Strategy lifecycle (normative; see `strategy-interface.md`)
++
++```
++construct strategy(config..., seed)
++    |
++    |  max_candidates(n_existing) may be called BEFORE setup
++    v
++setup(graph, embedder)          # untimed; graph read-only; may embed batch
++    |
++    v
++loop for each inserted node:
++    shortlist(new_name)         # timed; embeds once; caches vector
++    on_inserted(new_name, edges)# timed; reuses cache; never re-embeds
++```
++
++---
++
++## 4. Core runtime reference
++
++### 4.1 `src/graph_insertion/__init__.py`
++
++**Purpose:** the package's public API. Everything an external script should
++import is re-exported here. It also triggers import of `harness`, `llm`, and
++`decision` at the bottom, so importing `graph_insertion` gives access to the
++full runtime surface.
++
++**Symbol map**
++
++| Symbol group | Exported names |
++|---|---|
++| Graph | `ConceptGraph`, `GoldJudgmentSet`, `SourceKind`, `embed_text`, `oriented_edge` |
++| Embedding | `Embedder`, `MeteredEmbedder`, `FakeEmbedder` |
++| Strategy | `Shortlist`, `DecisionOutcome`, `InsertionMetrics`, `InsertionResult`, `DecisionStep`, `NarrowingStrategy`, `candidate_upper_bound`, `insert_node` |
++| Loader | `CorpusSpec`, `CorpusStats`, `LoadedCorpus`, `discover_corpora`, `load_corpus`, `derive_domain_context`, `DEFAULT_DATASET_ROOT`, `CORPUS_DOMAIN_CONTEXT_MAP`, `TAG_DOMAIN_CONTEXT_MAP` |
++| LLM / decision | `LLMResponse`, `LLMSnapshot`, `LLMClient`, `MeteredLLMClient`, `DeepSeekClient`, `FakeLLMClient`, `LLMTransportError`, `resolve_model_alias`, `PairwiseDecisionStep`, `DecisionParseError`, `PROMPT_VERSION`, `SYSTEM_PROMPT`, `CALLS_PER_CANDIDATE` |
++| Harness helpers | `sweep_trial_key`, `accuracy_trial_key`, `sample_heldout_nodes` |
++
++No functions of its own.
++
++---
++
++### 4.2 `src/graph_insertion/graph_representation.py`
++
++**Purpose:** the in-memory domain model. Backing store is a NetworkX
++`DiGraph`; nodes are bare concept-name strings; an edge `(u, v)` means *u is
++a prerequisite of v* ([D-22], [D-23], [D-21]). Also stores the full pairwise
++gold judgment set, including explicit label-0 pairs and unjudged pairs.
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `SourceKind` | 29 | Enum | `GOLD`, `MEKG_EXAMPLE`; selects column-orientation mapping |
++| `oriented_edge` | 48 | function | label-1 file row -> canonical `(prereq, dependent)` |
++| `embed_text` | 91 | function | bare name -> embedding payload (underscores to spaces) |
++| `_validate_concept_name` | 113 | function | non-empty `str`, no `.txt` suffix |
++| `ConceptGraph` | 130 | dataclass | graph wrapper |
++| `ConceptGraph.add_node` | 158 | method | add node after validation |
++| `.has_node` | 163 | method | membership |
++| `.nodes` | 166 | method | node view |
++| `.num_nodes` | 170 | method | count |
++| `.add_prereq_edge` | 177 | method | add `prereq -> dependent`, rejects self-loop |
++| `.has_prereq_edge` | 190 | method | edge membership |
++| `.prerequisites_of` | 194 | method | in-neighbours |
++| `.dependents_of` | 198 | method | out-neighbours |
++| `.num_edges` | 202 | method | edge count |
++| `.edges` | 205 | method | edge view |
++| `.is_acyclic` | 213 | method | DAG check |
++| `.nx_graph` | 221 | property | raw `nx.DiGraph` (read-only by convention) |
++| `.copy` | 229 | method | independent deep copy |
++| `.without_node` | 240 | method | copy with one node and incident edges removed |
++| `_Label` | 271 | Enum | `ZERO=0`, `ONE=1`, `MISSING=-1` |
++| `GoldJudgmentSet` | 277 | dataclass | full pairwise judgment set |
++| `.record` | 308 | method | record `(col1,col2,label)`, reject conflicting duplicate |
++| `.get` | 339 | method | return `_Label`, default `MISSING` |
++| `.is_prerequisite` | 346 | method | `True` / `False` / `None` |
++| `.judgment_for_edge` | 357 | method | canonical-edge lookup via `oriented_edge` |
++| `.all_judged_pairs` | 382 | method | `(col1, col2, int_label)` list |
++| `.num_labeled_one` | 386 | method | count of label-1 pairs |
++| `.num_labeled_zero` | 389 | method | count of label-0 pairs |
++
++**Pseudocode**
++
++```
++oriented_edge(kind, col1, col2):
++    if kind == GOLD:          return (col2, col1)   # D-15
++    if kind == MEKG_EXAMPLE:  return (col1, col2)   # D-19
++    raise ValueError
++
++embed_text(name):
++    return name.replace("_", " ")                   # D-21; no domain context
++
++_validate_concept_name(name):
++    if not str or empty: raise ValueError
++    if endswith(".txt"): raise ValueError            # D-16 / D-21
++
++ConceptGraph.add_node(name):
++    validate(name); _g.add_node(name)
++
++ConceptGraph.has_node(name): return _g.has_node(name)
++ConceptGraph.nodes():        return _g.nodes()
++ConceptGraph.num_nodes():    return _g.number_of_nodes()
++
++ConceptGraph.add_prereq_edge(prereq, dependent):
++    validate both; if prereq == dependent: raise ValueError
++    _g.add_edge(prereq, dependent)                   # auto-adds endpoints
++
++ConceptGraph.has_prereq_edge(p, d): return _g.has_edge(p, d)
++ConceptGraph.prerequisites_of(name): return list(_g.predecessors(name))
++ConceptGraph.dependents_of(name):    return list(_g.successors(name))
++ConceptGraph.num_edges():            return _g.number_of_edges()
++ConceptGraph.edges():                return _g.edges()
++ConceptGraph.is_acyclic():           return nx.is_directed_acyclic_graph(_g)
++
++ConceptGraph.copy():
++    return ConceptGraph(_g=_g.copy(), domain_context=domain_context)
++
++ConceptGraph.without_node(name):
++    validate(name)
++    if not has_node(name): raise KeyError
++    new <- copy(); new._g.remove_node(name); return new
++
++GoldJudgmentSet.record(col1, col2, label):
++    if label not in (0, 1): raise ValueError
++    if existing label for (col1,col2) exists and differs: raise ValueError
++    _judgments[(col1,col2)] <- _Label(label)
++
++GoldJudgmentSet.get(col1, col2):
++    return _judgments.get((col1,col2), MISSING)
++
++GoldJudgmentSet.is_prerequisite(col1, col2):
++    label <- get(col1,col2)
++    if MISSING: return None
++    return label == ONE
++
++GoldJudgmentSet.judgment_for_edge(prereq, dependent):
++    # invert the file-orientation mapping, then look up the file columns
++    col1, col2 <- oriented_edge(source_kind, prereq, dependent)
++    return is_prerequisite(col1, col2)
++
++all_judged_pairs():  return [(c1,c2,lbl.value) for each pair]
++num_labeled_one():   count labels == ONE
++num_labeled_zero():  count labels == ZERO
++```
++
++**Important detail.** `judgment_for_edge` applies `oriented_edge` in the
++*forward* direction to recover the file's column order. For GOLD,
++`oriented_edge(GOLD, prereq, dependent)` returns `(dependent, prereq)`, which
++is the original file order for a label-1 row. This lets scoring check both
++directions of a predicted edge without storing direction twice.
++
++---
++
++### 4.3 `src/graph_insertion/loader.py`
++
++**Purpose:** discover and strictly parse the 12 corpora into `ConceptGraph`
++and `GoldJudgmentSet`, applying the verified per-file conventions
++([D-15], [D-16], [D-19], [D-21], [D-23], [D-27]).
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `DEFAULT_DATASET_ROOT` | 26 | constant | `<repo>/repositories/dataset/EKG-Dataset` |
++| `CORPUS_DOMAIN_CONTEXT_MAP` | 31 | constant | exact corpus stem -> domain string |
++| `TAG_DOMAIN_CONTEXT_MAP` | 46 | constant | `DS` / `ML` / `logic` tag -> domain string |
++| `derive_domain_context` | 53 | function | stem or tagged filename -> domain or `None` |
++| `CorpusSpec` | 79 | frozen dataclass | name, path, source kind, context, delimiter, suffix flag |
++| `CorpusStats` | 107 | frozen dataclass | line/node/pair/duplicate/self-loop/positive counts |
++| `LoadedCorpus` | 120 | dataclass | graph + judgments + context + stats |
++| `discover_corpora` | 148 | function | exactly 12 specs in canonical order |
++| `_spec_from_path` | 228 | function | infer `CorpusSpec` from a path |
++| `load_corpus` | 254 | function | resolve target and parse |
++| `_parse_corpus_file` | 312 | function | strict line-by-line parser |
++
++**Pseudocode**
++
++```
++derive_domain_context(filename_or_stem):
++    stem <- basename without extension
++    if stem in CORPUS_DOMAIN_CONTEXT_MAP: return map[stem]
++    tag <- first parenthesised substring of stem
++    if tag starts "DS":    return "data structures and algorithms"
++    if tag starts "ML":    return "machine learning"
++    if tag == "logic":     return "mathematical logic"
++    return None
++
++discover_corpora(root=None):
++    dir <- root or DEFAULT_DATASET_ROOT
++    require dir exists, DSA file exists, Metacademy file exists
++    examples <- sorted(glob("MEKG_with*.txt"))
++    require len(examples) == 10
++    specs <- [DSA spec (GOLD, ";", no suffix, DSA context),
++              Metacademy spec (GOLD, " ", no suffix, ML-math context)]
++    for p in examples:
++        specs.append(CorpusSpec(p.stem, p, MEKG_EXAMPLE,
++                                derive_domain_context(p.stem),
++                                delimiter=";", has_txt_suffix=True))
++    return specs                                 # order is stable
++
++_spec_from_path(path):
++    if "gold_standard" in stem:
++        kind <- GOLD; delimiter <- " " if "metacademy" else ";"; suffix <- False
++    else if stem starts "MEKG_with":
++        kind <- MEKG_EXAMPLE; delimiter <- ";"; suffix <- True
++    else:
++        kind <- GOLD; delimiter <- ";"; suffix <- False
++    return CorpusSpec(..., domain=derive_domain_context(stem))
++
++load_corpus(target, root=None):
++    if target is str:
++        if it names an existing file: spec <- _spec_from_path(path)
++        else:
++            specs <- discover_corpora(root)
++            match exact name, else case-insensitive exact, else substring
++            if none: ValueError; if ambiguous exact tie: ValueError
++    else if target is Path: spec <- _spec_from_path(target)
++    else if target is CorpusSpec: spec <- target
++    else: TypeError
++    return _parse_corpus_file(spec)
++
++_parse_corpus_file(spec):
++    require file exists
++    graph <- ConceptGraph(domain_context=spec.domain_context)
++    judgments <- GoldJudgmentSet(source_kind=spec.source_kind)
++    counters <- zeros; seen_nodes <- set(); distinct_pairs <- set()
++    for line_no, raw in enumerate(file, 1):
++        line <- strip(raw); if empty: continue
++        line_count += 1
++        parts <- split(line, spec.delimiter)
++        if len(parts) != 3: ValueError with file/line
++        label_str must be "0" or "1"; label <- int
++        if spec.has_txt_suffix:
++            both columns must end ".txt"; strip suffix
++        add each concept to graph on first appearance
++        if c1 == c2:
++            self_loop_rows += 1
++            if label == 1: ValueError
++        if pair seen: duplicate_rows += 1 else record pair
++        judgments.record(c1, c2, label)              # conflicting labels abort
++        if label == 1:
++            positive_row_count += 1
++            prereq, dependent <- oriented_edge(kind, c1, c2)
++            graph.add_prereq_edge(prereq, dependent)
++    stats <- counts from counters + graph.num_edges()
++    return LoadedCorpus(...)
++```
++
++**Delimiter warning.** Metacademy is space-delimited. Concept names in that
++file contain no spaces, so `split(" ")` is safe; this is verified in
++`data-formats.md`. DSA and all `MEKG_with*` files are semicolon-delimited.
++
++---
++
++### 4.4 `src/graph_insertion/strategy.py`
++
++**Purpose:** the formal strategy contract, result/metrics dataclasses, and
++the shared `insert_node` driver. This is the timing and validation centre of
++the experiment.
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `Shortlist` | 22 | frozen dataclass | candidates tuple + optional scores tuple |
++| `DecisionOutcome` | 39 | frozen dataclass | edges, llm_calls, llm_seconds |
++| `InsertionMetrics` | 58 | frozen dataclass | all timing/call counters |
++| `InsertionResult` | 110 | frozen dataclass | new name, shortlist, edges, metrics |
++| `DecisionStep` | 131 | Protocol | `decide(new_name, candidates, domain_context)` |
++| `NarrowingStrategy` | 145 | Protocol | `setup`, `shortlist`, `on_inserted`, `config`, `diagnostics`; optional `max_candidates` |
++| `candidate_upper_bound` | 187 | function | clamp `max_candidates` to `[0, n_existing]` |
++| `insert_node` | 204 | function | canonical insertion pipeline |
++
++**Pseudocode**
++
++```
++candidate_upper_bound(strategy, n_existing):
++    if strategy has callable max_candidates:
++        try: bound <- int(strategy.max_candidates(n_existing))
++        except Exception: bound <- n_existing
++    else: bound <- n_existing
++    return max(0, min(n_existing, bound))
++
++insert_node(strategy, graph, decision_step, new_name, *, metered_embedder):
++    # --- Step 0: identity and preconditions ---
++    if metered_embedder is not MeteredEmbedder: TypeError
++    if strategy._embedder is not None and is not metered_embedder:
++        ValueError                                    # D-28
++    validate(new_name)
++    if graph.has_node(new_name): ValueError
++    n_before <- graph.num_nodes()
++    embed_calls_start <- meter.calls; embed_time_start <- meter.seconds
++
++    # --- Step 1: narrowing (timed) ---
++    t0 <- now(); shortlist <- strategy.shortlist(new_name); t1 <- now()
++    shortlist_s <- t1 - t0
++
++    # --- Step 1b: shortlist contract (timed into validate_s) ---
++    tv0 <- now()
++    candidates must be tuple; must not contain new_name; no duplicates;
++    every candidate must be in graph;
++    if scores is not None: len(scores) == len(candidates)
++    val_shortlist_s <- now() - tv0
++
++    # --- Step 2: shared decision ---
++    if candidates empty:
++        outcome <- DecisionOutcome((), 0, 0.0); decide_s <- 0.0
++    else:
++        t2 <- now()
++        outcome <- decision_step.decide(new_name, candidates, graph.domain_context)
++        t3 <- now(); decide_s <- t3 - t2
++
++    # --- Step 2b: edge contract (timed into validate_s) ---
++    tv1 <- now()
++    edges must be tuple; no duplicate edges; each is a 2-tuple of str;
++    no self-loop; each edge involves new_name;
++    other endpoint must be in candidates
++    validate_s <- val_shortlist_s + (now() - tv1)
++
++    # --- Step 3: mutate (timed) ---
++    ta <- now()
++    graph.add_node(new_name)
++    for (p, d) in outcome.edges: graph.add_prereq_edge(p, d)
++    apply_s <- now() - ta
++
++    # --- Step 4: strategy update (timed) ---
++    record meter before update
++    tu0 <- now(); strategy.on_inserted(new_name, outcome.edges); tu1 <- now()
++    update_s <- tu1 - tu0
++    embedding_calls_in_update <- meter.calls delta
++    embed_in_update_s <- meter.seconds delta
++
++    # --- Step 5: metrics ---
++    total_s <- shortlist_s + decide_s + apply_s + update_s
++    embed_s <- meter.seconds since start
++    embedding_calls <- meter.calls since start
++    diagnostics <- strategy.diagnostics() or error dict
++    return InsertionResult(new_name, shortlist, outcome.edges, metrics)
++```
++
++**Timing contract.** `total_s` deliberately excludes `validate_s`; the
++harness separately computes `unaccounted_s = harness_wall_s - (total_s +
++validate_s)`. Validation cost scales with shortlist length and must not be
++charged to the strategy.
++
++**Empty shortlist.** Zero candidates skips the LLM entirely: zero calls, zero
++edges. This is a legitimate research outcome, especially for Strategy 2.
++
++---
++
++### 4.5 `src/graph_insertion/embedding.py`
++
++**Purpose:** the `Embedder` protocol, a metering decorator, and a deterministic
++offline embedder.
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `Embedder` | 21 | Protocol | `embed(str) -> 1-D ndarray`, `embed_many(seq) -> 2-D ndarray` |
++| `MeteredEmbedder` | 34 | class | counts calls/texts/seconds; optional text log |
++| `.embed` | 62 | method | timed single embed |
++| `.embed_many` | 73 | method | timed batch embed |
++| `.reset` | 84 | method | zero all meters |
++| `FakeEmbedder` | 93 | class | hash-seeded deterministic unit vectors |
++| `._embed_single` | 111 | method | SHA-256-derived RNG -> L2-normalised float32 |
++| `.embed` | 122 | method | single vector |
++| `.embed_many` | 125 | method | stacked matrix, shape `(0, dim)` for empty input |
++
++**Pseudocode**
++
++```
++MeteredEmbedder.embed(text):
++    t0 <- now(); result <- underlying.embed(text); elapsed <- now() - t0
++    calls += 1; texts_embedded += 1; cumulative_seconds += elapsed
++    if texts_log is not None: append(text)
++    return result
++
++MeteredEmbedder.embed_many(texts):
++    t0 <- now(); result <- underlying.embed_many(texts); elapsed <- now() - t0
++    calls += 1; texts_embedded += len(texts); cumulative_seconds += elapsed
++    if texts_log is not None: extend(texts)
++    return result
++
++MeteredEmbedder.reset():
++    calls <- 0; texts_embedded <- 0; cumulative_seconds <- 0.0
++    if texts_log is not None: clear
++
++FakeEmbedder._embed_single(text):
++    digest <- sha256(f"{seed}:{text}")[:8]
++    rng <- default_rng(int(digest, little-endian))
++    v <- rng.standard_normal(dim); v <- v / ||v|| if ||v|| > 0
++    return float32(v)
++
++FakeEmbedder.embed(text): return _embed_single(text)
++
++FakeEmbedder.embed_many(texts):
++    if empty: return empty((0, dim), float32)
++    return vstack([_embed_single(t) for t in texts])
++```
++
++**Note.** `MeteredEmbedder.calls` increments once per `embed`/`embed_many`
++call, not per text. `texts_embedded` is the per-string count. The single
++embedding invariant is checked with `calls` delta, not `texts_embedded`.
++
++---
++
++### 4.6 `src/graph_insertion/embedding_minilm.py`
++
++**Purpose:** production embedding backend. Loads
++`sentence-transformers/all-MiniLM-L6-v2` on CPU at a pinned revision, with
++fail-closed version checks.
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `SENTENCE_TRANSFORMERS_VERSION_PIN` | 30 | constant | `"6.1.0"` |
++| `MODEL_REVISION_PIN` | 33 | constant | HF commit hash |
++| `MODEL_NAME` | 35 | constant | `"all-MiniLM-L6-v2"` |
++| `MODEL_DIM` | 36 | constant | `384` |
++| `MiniLMEmbedder` | 41 | class | embedder implementation |
++| `.__init__` | 70 | method | pin checks, lazy import, version check, CPU model |
++| `.embed` | 114 | method | 1-D float32 `(384,)` |
++| `.embed_many` | 124 | method | 2-D float32 `(N, 384)` |
++| `.identity` | 138 | method | sidecar metadata |
++
++**Pseudocode**
++
++```
++MiniLMEmbedder.__init__(revision=_UNSET):
++    require SENTENCE_TRANSFORMERS_VERSION_PIN is a non-blank str
++    actual_revision <- MODEL_REVISION_PIN if revision is _UNSET else revision
++    require actual_revision is a non-blank str
++    import sentence_transformers; import SentenceTransformer   # lazy
++    require installed __version__ == pin
++    model <- SentenceTransformer(MODEL_NAME, revision=actual_revision,
++                                 device="cpu")
++
++MiniLMEmbedder.embed(text):
++    arr <- float32(model.encode(text)).reshape(-1)
++    require arr.shape == (384,)
++    return arr
++
++MiniLMEmbedder.embed_many(texts):
++    if empty: return empty((0, 384), float32)
++    arr <- float32(model.encode(list(texts)))
++    if single text and 1-D: reshape(1, -1)
++    require arr.shape == (len(texts), 384)
++    return arr
++
++MiniLMEmbedder.identity():
++    return {model_name, dim, revision, sentence_transformers_version,
++            version_pin, device="cpu", dtype="float32"}
++```
++
++**Deliberate failure mode.** Any missing or mismatched pin raises rather than
++silently falling back. This protects cross-run comparability.
++
++---
++
++### 4.7 `src/graph_insertion/cpu_threads.py`
++
++**Purpose:** pin PyTorch intra-op CPU threads so embedding latency is
++comparable across runs and strategies ([D-72]).
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `CPU_THREAD_PIN` | 20 | `1` |
++| `pin_cpu_threads` | 23 | set `torch.set_num_threads(n)`, read back and verify |
++
++```
++pin_cpu_threads(n=1):
++    import torch                           # ImportError propagates
++    torch.set_num_threads(n)
++    observed <- torch.get_num_threads()
++    if observed != n: RuntimeError
++    return {"requested": n, "torch_threads": observed}
++```
++
++Called once after constructing `MiniLMEmbedder`, before any trials.
++
++---
++
++### 4.8 `src/graph_insertion/decision.py`
++
++**Purpose:** the shared final step. Exactly one LLM call per shortlisted
++candidate, sequential, strict token parsing, canonical edge construction
++([D-29], [D-23], [D-21]).
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `PROMPT_VERSION` | 26 | constant | `"v2"` |
++| `CALLS_PER_CANDIDATE` | 28 | constant | `1` |
++| `SYSTEM_PROMPT` | 30 | constant | prerequisite definition + 3 few-shot examples |
++| `VALID_TOKENS` | 42 | constant | `X_PREREQ_Y`, `Y_PREREQ_X`, `NONE` |
++| `parse_token` | 45 | function | strip/upper -> token or `None` |
++| `DecisionParseError` | 68 | exception | strict-mode parse failure |
++| `PairwiseDecisionStep` | 76 | class | `DecisionStep` implementation |
++| `.__init__` | 83 | method | store client + strict flag |
++| `.build_user_prompt` | 87 | method | optional subject line + two concepts |
++| `.decide` | 100 | method | loop over candidates |
++
++**Pseudocode**
++
++```
++parse_token(text):
++    token <- upper(strip(text))
++    return token if token in VALID_TOKENS else None
++
++PairwiseDecisionStep.build_user_prompt(new_name, cand, domain_context):
++    x <- embed_text(new_name); y <- embed_text(cand)
++    if domain_context is not None:
++        return "Subject area: {domain}\nConcept X: {x}\nConcept Y: {y}"
++    return "Concept X: {x}\nConcept Y: {y}"
++
++PairwiseDecisionStep.decide(new_name, candidates, domain_context):
++    if candidates empty: return ((), 0, 0.0)
++    edges <- []; total_seconds <- 0
++    for cand in candidates:                      # strictly sequential
++        prompt <- build_user_prompt(new_name, cand, domain_context)
++        resp <- llm_client.complete(SYSTEM_PROMPT, prompt)
++        total_seconds += resp.latency_s
++        token <- parse_token(resp.text)
++        if token == X_PREREQ_Y: edges.append((new_name, cand))
++        elif token == Y_PREREQ_X: edges.append((cand, new_name))
++        elif token == NONE: pass
++        else:
++            if strict: raise DecisionParseError
++            if client has record_parse_failure: client.record_parse_failure(resp.text)
++    return DecisionOutcome(tuple(edges), len(candidates), total_seconds)
++```
++
++**Parse-failure policy.** Default is non-strict: an unparseable response
++produces no edge and is counted on the meter. `--strict` mode aborts. The
++official runs use the default.
++
++---
++
++### 4.9 `src/graph_insertion/llm.py`
++
++**Purpose:** LLM transport abstraction. `MeteredLLMClient` wraps any client
++and accounts calls, attempts, retries, latency, tokens, cache hits, model IDs,
++and parse failures. `DeepSeekClient` is the live OpenAI-compatible HTTP
++client with retry/backoff.
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `LLMTransportError` | 27 | exception | carries `attempts`, `retry_wait_s` |
++| `LLMResponse` | 46 | frozen dataclass | text + token/latency/model metadata |
++| `LLMSnapshot` | 85 | frozen dataclass | cumulative meter snapshot |
++| `.__sub__` | 105 | method | pointwise delta; parse-failure list suffix diff |
++| `LLMClient` | 133 | Protocol | `complete(system, user) -> LLMResponse` |
++| `MeteredLLMClient` | 146 | class | metering decorator |
++| `.set_on_call` | 176 | method | register heartbeat callback |
++| `._invoke_on_call` | 180 | method | call callback; count errors; warn once |
++| `.complete` | 192 | method | delegate + account success/failure |
++| `.record_parse_failure` | 227 | method | count and store raw text |
++| `.snapshot` | 232 | method | immutable snapshot |
++| `.reset` | 249 | method | zero all meters |
++| `resolve_model_alias` | 273 | function | explicit > env > `deepseek-flash` |
++| `DeepSeekClient` | 284 | class | live HTTP client |
++| `.__init__` | 293 | method | key/base URL/model/retry config |
++| `.close` | 324 | method | close internally owned httpx client |
++| `.__enter__` / `.__exit__` | 329/332 | methods | context manager |
++| `.complete` | 335 | method | POST + retry/backoff |
++| `FakeLLMClient` | 452 | class | scripted test client |
++| `.complete` | 488 | method | canned response or scripted error |
++
++**Pseudocode**
++
++```
++MeteredLLMClient.complete(system, user):
++    try:
++        resp <- client.complete(system, user)
++    except Exception as exc:
++        calls += 1
++        attempts += getattr(exc, "attempts", 1)
++        retries += max(0, attempts_delta - 1)
++        retry_wait += getattr(exc, "retry_wait_s", 0)
++        failed_calls.append({attempts, retry_wait, error_type, message})
++        invoke_on_call()
++        raise
++    calls += 1
++    attempts += resp.attempts
++    retries += max(0, resp.attempts - 1)
++    latency += resp.latency_s; retry_wait += resp.retry_wait_s
++    token counters += resp fields
++    if resp.model_id: model_ids_seen.add(resp.model_id)
++    invoke_on_call()
++    return resp
++
++LLMSnapshot.__sub__(other):
++    return snapshot with every numeric field subtracted and
++    failed_parses = self.failed_parses[len(other.failed_parses):]
++
++resolve_model_alias(model=None):
++    return model or env("DEEPSEEK_MODEL") or "deepseek-flash"
++
++DeepSeekClient.complete(system, user):
++    build URL / headers / payload (model, system+user messages,
++        temperature=0.0, max_tokens=16, thinking={"type":"disabled"})
++    attempts <- 0; retry_wait <- 0; last_error <- None
++    while attempts <= max_retries:
++        attempts += 1
++        t0 <- now()
++        try:
++            resp <- http_client.post(url, json=payload, headers=headers)
++            latency <- now() - t0
++            if status == 200:
++                parse JSON; validate choices non-empty
++                extract content, prompt/completion/reasoning/cache tokens, model
++                return LLMResponse(..., attempts, retry_wait)
++            elif status in {429, 500, 502, 503, 504}:
++                last_error <- LLMTransportError(...)
++            else:
++                raise LLMTransportError(non-retryable)
++        except (TimeoutException, NetworkError) as e:
++            last_error <- e
++        except LLMTransportError:
++            raise
++        if attempts <= max_retries:
++            delay <- backoff[min(attempts-1, len(backoff)-1)]
++            sleep(delay); retry_wait += delay
++    raise LLMTransportError("failed after N attempts", attempts, retry_wait)
++
++FakeLLMClient.complete(system, user):
++    record (system, user) in call_history
++    if scripted errors: pop and raise
++    text <- responses(system,user) if callable
++            else dict lookup by (system,user) then user
++            else fixed str
++            else "NONE"
++    return LLMResponse(text, canned token counts, canned latency, model_id)
++```
++
++**Retry semantics.** Non-retryable 4xx raises immediately. Timeouts and
++network errors are retried. A 200 with invalid JSON or missing `choices` is
++retried. `attempts` in the final error includes the failed final attempt.
++
++---
++
++### 4.10 `src/graph_insertion/schedule.py`
++
++**Purpose:** refuse live runs that would overlap DeepSeek peak pricing
++([D-37]). Peak is Mon–Fri, 01:00–04:00 and 06:00–10:00 UTC.
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `_PEAK_WINDOWS` | 21 | `[(1,4), (6,10)]` |
++| `is_deepseek_peak` | 24 | weekday check + fractional-hour window check |
++| `window_intersects_peak` | 51 | sample start/end and every minute |
++| `format_peak_status` | 81 | human-readable UTC / PHT status |
++
++```
++is_deepseek_peak(dt):
++    if dt.weekday() >= 5: return False
++    h <- dt.hour + dt.minute/60
++    return any(start <= h < end for (start,end) in windows)
++
++window_intersects_peak(start, duration_s):
++    if duration_s < 0: ValueError
++    end <- start + duration_s
++    if is_peak(start) or is_peak(end): return True
++    for each whole minute strictly between start and end:
++        if is_peak(t): return True
++    return False
++
++format_peak_status(dt):
++    return formatted UTC time, UTC+8 time, and peak/off-peak status
++```
++
++**Conservative choice.** Chinese public holidays are not modelled; they are
++off-peak in reality, so the guard can over-report peak but never under-report.
++
++---
++
++### 4.11 `src/graph_insertion/scoring.py`
++
++**Purpose:** pure accuracy functions. Compares predicted edges and shortlist
++against the full gold graph and judgment set, with an explicit sensitivity
++variant for unjudged pairs ([D-30]).
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `NodeScore` | 20 | frozen dataclass | per-held-out-node metrics |
++| `AggregateScore` | 83 | frozen dataclass | micro/macro + sensitivity aggregates |
++| `compute_gold_incident_edges` | 125 | function | all directed gold edges touching node |
++| `compute_gold_neighbours` | 135 | function | all distinct adjacent gold nodes |
++| `score_node_insertion` | 142 | function | score one trial |
++| `aggregate_scores` | 243 | function | micro + macro aggregation |
++
++**Pseudocode**
++
++```
++compute_gold_incident_edges(graph, node):
++    return {(p, node) for p in graph.prerequisites_of(node)}
++         | {(node, d) for d in graph.dependents_of(node)}
++
++compute_gold_neighbours(graph, node):
++    return set(graph.prerequisites_of(node)) | set(graph.dependents_of(node))
++
++score_node_insertion(node, gold_graph, judgments,
++                     shortlist_candidates, decided_edges):
++    gold_incident <- compute_gold_incident_edges(gold_graph, node)
++    gold_neighbours <- compute_gold_neighbours(gold_graph, node)
++    shortlist_set <- set(shortlist_candidates); decided_set <- set(decided_edges)
++
++    shortlist_hits <- |gold_neighbours ∩ shortlist_set|
++    shortlist_recall <- hits / |gold_neighbours|, or None if no neighbours
++
++    tp <- fp <- excluded <- 0
++    for (prereq, dep) in decided_set:
++        j_fwd <- judgments.judgment_for_edge(prereq, dep)
++        j_rev <- judgments.judgment_for_edge(dep, prereq)
++        if either is None:      excluded += 1        # unjudged direction
++        elif j_fwd is True:     tp += 1
++        else:                   fp += 1
++
++    fn <- |gold_incident \ decided_set|
++
++    precision <- tp/(tp+fp) if tp+fp > 0 else None
++    recall    <- tp/(tp+fn) if tp+fn > 0 else None
++    f1        <- 2tp/(2tp+fp+fn) if denominator > 0 else None
++
++    # sensitivity: unjudged predictions count as false positives
++    fp_sens <- fp + excluded
++    precision_sens <- tp/(tp+fp_sens) if denominator > 0 else None
++    recall_sens <- recall
++    f1_sens <- 2tp/(2tp+fp_sens+fn) if denominator > 0 else None
++    return NodeScore(...)
++
++aggregate_scores(node_scores):
++    if empty: return all zeros / None with zero defined-counts
++    totals <- sum every count across nodes
++    micro shortlist recall <- hits/gold_neighbours (1.0 if none)
++    micro precision <- tp/(tp+fp) (0.0 if none)
++    micro recall <- tp/(tp+fn) (1.0 if none)
++    micro f1 <- harmonic mean, 0.0 if both zero
++    macro metric <- mean of defined per-node values, or None
++    repeat micro/macro for sensitivity (fp_sens instead of fp)
++    return AggregateScore(...)
++```
++
++**Why both `j_forward` and `j_reverse` are checked.** A predicted edge is only
++counted as judged if neither ordered direction is missing from the file. If
++either is missing, the pair is set aside as `excluded_predictions`; the
++standard metric ignores it, while the sensitivity metric counts it as a false
++positive. This is the D-30 handling of the one missing DSA pair.
++
++---
++
++### 4.12 `src/graph_insertion/harness.py`
++
++**Purpose:** trial orchestration and persistence for both experiment modes.
++This is the largest runtime module. It owns trial isolation, resumability,
++safety limits, manifests, and summary aggregation.
++
++**Symbol map**
++
++| Symbol | Line | Kind | Contract |
++|---|---:|---|---|
++| `REPO_ROOT` | 52 | constant | repository root |
++| `SyntheticNameSource` | 59 | frozen dataclass | non-empty unique names + domain context |
++| `HarnessConfig` | 84 | dataclass | mode/run/output/seed/repeats/limits/flags |
++| `SECRET_KEY_PATTERN` | 154 | constant | secret-looking metadata keys |
++| `sanitize_metadata` | 160 | function | recursive redaction |
++| `get_git_info` | 182 | function | commit + dirty flag |
++| `get_library_versions` | 203 | function | installed versions of 7 packages |
++| `_extract_metered_llm` | 224 | function | find `MeteredLLMClient` in decision step |
++| `_extract_model_and_prompt_info` | 233 | function | model/base URL/prompt/temperature metadata |
++| `load_existing_results` | 312 | function | key -> record map from `raw.jsonl` |
++| `sweep_trial_key` | 332 | function | `sweep:<strategy>:<n>:t<trial>` |
++| `accuracy_trial_key` | 337 | function | `accuracy:<strategy>:<corpus>:<node>:r<rep>` |
++| `sample_heldout_nodes` | 342 | function | all nodes, or deterministic Metacademy sample |
++| `_load_existing_keys` | 362 | function | keys to skip on resume |
++| `compute_metric_stats` | 379 | function | mean/median/stdev/min/max or zeros |
++| `write_manifest` | 396 | function | sanitized `manifest.json` |
++| `generate_summary_csv` | 439 | function | grouped summary from `raw.jsonl` |
++| `estimate_and_print_plan` | 605 | function | dry-run plan + upper bound |
++| `run_accuracy_experiment` | 699 | function | leave-one-out runner |
++| `run_sweep_experiment` | 940 | function | scaling runner |
++| `run_experiment` | 1165 | function | mode dispatch |
++
++**Pseudocode: helpers**
++
++```
++sanitize_metadata(obj):
++    if str: redact if starts "sk-" or contains "bearer "
++    if dict: redact values whose key matches SECRET_KEY_PATTERN;
++             recurse into other values
++    if list/tuple: recurse elementwise
++    else: return unchanged
++
++get_git_info(cwd=REPO_ROOT):
++    try: return {git_commit: HEAD, git_dirty: bool(porcelain output)}
++    except: return {"git_commit": "unknown", "git_dirty": False}
++
++get_library_versions(packages=7 defaults):
++    return {pkg: importlib.metadata.version(pkg)} for found packages
++
++load_existing_results(jsonl_path):
++    if missing: return {}
++    read each non-empty line; parse JSON; map key -> record
++    skip malformed lines
++
++sample_heldout_nodes(graph, corpus_name, seed, metacademy_sample_size):
++    all_nodes <- sorted(graph.nodes())
++    if "metacademy" in corpus_name.lower():
++        rng <- Random(seed)
++        k <- min(metacademy_sample_size, len(all_nodes))
++        return sorted(rng.sample(all_nodes, k))
++    return all_nodes
++
++_load_existing_keys(raw_jsonl, retry_failed=False):
++    skipped <- set()
++    for key, rec in load_existing_results(raw_jsonl):
++        if rec.status == "success": skipped.add(key)
++        elif rec.status in ("failed","error") and not retry_failed: skipped.add(key)
++    return skipped
++
++compute_metric_stats(values):
++    if empty: return {mean:0, median:0, std:0, min:0, max:0}
++    return mean, median, sample stdev (0 if n<2), min, max
++
++write_manifest(output_dir, config, strategy_config, decision_step):
++    mkdir output_dir
++    gather git info, library versions, model/prompt metadata
++    build data dict (run id, timestamp, mode, provenance, config,
++                     sizes/sample size, repeats, dry_run)
++    write sanitize_metadata(data) as indented JSON
++
++generate_summary_csv(jsonl_path, csv_path, mode):
++    read latest record per key
++    group by (strategy, corpus) for accuracy or (strategy, size) for sweep
++    for each group:
++        count trials/successes/failures/retries
++        mean n_before over successes
++        stats for timing keys
++        stats for zero-retry total_s
++        stats for harness_wall_s and unaccounted_s
++        mean/median/sum/min/max for llm_calls, shortlist_size, embedding_calls
++        if accuracy: rebuild NodeScore objects from records and aggregate
++    write CSV with union of keys
++```
++
++**Pseudocode: `estimate_and_print_plan`**
++
++```
++estimate_and_print_plan(config, strategy, corpora=None, name_source=None):
++    print header
++    if mode == accuracy:
++        if corpora not supplied: load DSA and Metacademy
++        for each corpus:
++            nodes <- graph size
++            sample_k <- min(metacademy_sample_size, nodes) for Metacademy,
++                        else nodes
++            trials <- sample_k * repeats
++            max_cands <- candidate_upper_bound(strategy, nodes - 1)
++            max_llm <- trials * max_cands
++            print and append detail
++    elif mode == sweep:
++        require name_source
++        for each size:
++            max_cands <- candidate_upper_bound(strategy, size)
++            max_llm <- trials_per_size * max_cands
++            print and append detail
++    print totals; return plan
++```
++
++**Pseudocode: `run_accuracy_experiment`**
++
++```
++run_accuracy_experiment(config, strategy_factory, decision_step,
++                        embedder_factory, corpora=None, warmup_fn=None,
++                        progress_callback=None):
++    if not dry_run and not confirm: RuntimeError
++    resolve output dir, raw.jsonl, summary.csv
++    load DSA + Metacademy if corpora not supplied
++    probe <- strategy_factory(); capture name + config
++    if dry_run:
++        plan <- estimate_and_print_plan(...); write_manifest(...); return plan
++    write_manifest(...)
++    if warmup_fn: warmup_fn()
++    skipped <- existing keys if resume else empty
++    llm_meter <- extract MeteredLLMClient
++    planned keys <- all (corpus, held-out node, repeat) keys
++    total_trials <- planned keys not skipped
++    open raw.jsonl in append mode
++    for each corpus in corpora:
++        for rep in repeats:
++            for h in sampled nodes:
++                key <- accuracy key
++                if key in skipped: continue
++                if max_llm_calls reached: summary; return "max_llm_calls_reached"
++                G' <- gold graph.without_node(h)
++                strategy <- strategy_factory()
++                meter <- MeteredEmbedder(embedder_factory())
++                try: strategy.setup(G', meter)
++                except: write failed record; summary; raise
++                gc.collect()
++                snap_before <- llm_meter.snapshot() if present
++                t0 <- now()
++                try:
++                    res <- insert_node(strategy, G', decision_step, h, meter)
++                    wall <- now() - t0
++                    unaccounted <- wall - res.metrics.total_s - res.metrics.validate_s
++                    delta <- snapshot_after - snap_before
++                    cumulative_llm_calls += res.metrics.llm_calls
++                    score <- score_node_insertion(...)
++                    write success record; flush; progress_callback
++                except LLMTransportError:
++                    write failed record; flush; progress_callback
++                    if fail_fast: summary; raise
++                except Exception:
++                    write failed record; flush; progress_callback
++                    summary; raise
++    summary; return completed
++```
++
++**Pseudocode: `run_sweep_experiment`**
++
++```
++run_sweep_experiment(config, strategy_factory, decision_step,
++                     embedder_factory, name_source, ...):
++    same safety, output, manifest, warmup, resume setup as accuracy
++    for each size n:
++        require pool has >= n+1 names
++        for each trial t:
++            key <- sweep key
++            if skipped: continue
++            if max_llm_calls reached: summary; return
++            trial_seed <- seed + n*1000 + t
++            sampled <- Random(trial_seed).sample(pool, n+1)
++            G <- names-only graph over sampled[:n],
++                 domain_context = name_source.domain_context
++            strategy <- fresh; meter <- MeteredEmbedder(fresh embedder)
++            strategy.setup(G, meter)
++            gc.collect()
++            snap_before <- ...
++            t0 <- now()
++            try:
++                res <- insert_node(strategy, G, decision_step, sampled[n], meter)
++                wall; unaccounted; delta; cumulative calls
++                write success record; flush; progress
++            except LLMTransportError: write failed; if fail_fast: summary, raise
++            except Exception: write failed; summary; raise
++    summary; return completed
++
++run_experiment(...):
++    dispatch to accuracy or sweep; sweep requires name_source
++```
++
++**Trial isolation.** Every trial gets (a) a fresh graph copy or names-only
++graph, (b) a fresh strategy instance, (c) a fresh raw embedder wrapped in a
++new `MeteredEmbedder`, and (d) `gc.collect()` before the timed window. Setup
++cost is excluded from the trial timer; only `insert_node` is timed.
++
++---
++
++### 4.13 Strategy implementations
++
++All strategies implement the same lifecycle. The table summarises behaviour;
++per-file pseudocode follows.
++
++| Strategy | `uses_embeddings` | `max_candidates` | Shortlist rule | Update rule |
++|---|---|---|---|---|
++| `null` | False | `min(k, n)` | random k from sorted nodes | no-op |
++| `stub` | False | `min(top_k, n)` | first `top_k` sorted nodes | no-op |
++| `brute_force` | False | `n` | every existing node, sorted | no-op |
++| `embedding_threshold` | True | fallback `n` | all nodes with cosine `> theta`, sorted by `(-score, name)` | append cached vector to matrix |
++| `ann_retrieval` | True | `min(k, n)` | FAISS HNSW top-k, sorted by `(-score, name)` | add cached vector to index |
++| `bounded_bucket` | True | `min(s_max, n)` | members of home segment, sorted by `(-score, name)` | insert into home segment; split if overflow |
++
++#### 4.13.1 `strategies/null.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `NullStrategy` | 28 | random-k control, no embeddings |
++| `.__init__` | 50 | store seed/k; `_embedder = None` |
++| `.setup` | 58 | bind graph; deliberately discard embedder |
++| `.shortlist` | 73 | sorted nodes, re-seeded sample of k |
++| `.on_inserted` | 97 | no-op |
++| `.config` | 100 | `{seed, k}` |
++| `.diagnostics` | 104 | `{k, candidate_count}` |
++| `.max_candidates` | 109 | `min(k, n)` |
++
++```
++setup(graph, embedder): self._graph <- graph; self._embedder <- None
++
++shortlist(new_name):
++    existing <- [n for n in sorted(graph.nodes()) if n != new_name]
++    if empty: return Shortlist((), ())
++    rng <- Random(seed)                     # re-seeded every call
++    selected <- rng.sample(existing, min(k, len(existing)))
++    return Shortlist(tuple(selected), tuple(0.0 for each))
++```
++
++**Determinism.** Re-seeding per call means the result depends only on
++`(seed, graph contents, new_name)`, not on call history. Sorting makes it
++independent of `PYTHONHASHSEED`.
++
++#### 4.13.2 `strategies/stub.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `StubNarrowingStrategy` | 15 | deterministic test strategy |
++| `.__init__` | 21 | `top_k` |
++| `.setup` | 26 | bind graph; `_embedder = None` |
++| `.shortlist` | 30 | first `top_k` sorted nodes |
++| `.on_inserted` | 37 | no-op |
++| `.config` | 40 | `{name, top_k}` |
++| `.diagnostics` | 43 | `{}` |
++| `.max_candidates` | 46 | `min(top_k, n)` |
++
++```
++shortlist(new_name):
++    if no graph: return Shortlist(())
++    return Shortlist(tuple(sorted(nodes)[:top_k]))
++```
++
++#### 4.13.3 `strategies/brute_force.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `BruteForceStrategy` | 41 | Strategy 1, exhaustive shortlist |
++| `.__init__` | 57 | seed, cached last count |
++| `.setup` | 63 | bind graph; discard embedder |
++| `.shortlist` | 72 | all existing nodes sorted, uniform scores |
++| `.on_inserted` | 85 | no-op |
++| `.max_candidates` | 88 | `max(0, n)` |
++| `.config` | 96 | `{seed}` |
++| `.diagnostics` | 100 | `{candidate_count}` |
++
++```
++shortlist(new_name):
++    require setup called
++    candidates <- tuple(sorted(n for n in graph.nodes() if n != new_name))
++    last_candidate_count <- len(candidates)
++    return Shortlist(candidates, tuple(0.0 for each))
++```
++
++**Cost.** Exactly `n_existing` decision calls per insertion by construction.
++
++#### 4.13.4 `strategies/embedding_threshold.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `DEFAULT_THETA` | 59 | `0.6` |
++| `EmbeddingThresholdStrategy` | 62 | Strategy 2 |
++| `.__init__` | 80 | validate `theta` in `[-1,1]` |
++| `.setup` | 106 | batch embed all nodes, L2-normalise, preallocate matrix |
++| `.shortlist` | 176 | embed query once, cosine > theta, sort |
++| `.on_inserted` | 267 | append cached vector; capacity doubling |
++| `.config` | 309 | `{theta, seed}` |
++| `.diagnostics` | 313 | comparisons/threshold/size/max cosine/index size |
++
++**Internal state:** `_mat` is a row-major `float32` matrix of L2-normalised
++vectors with capacity `max(16, 2n)` initially. `_names[i]` is the name at row
++`i`; `_name_to_idx` maps names to rows; `_n` is the number of live rows.
++
++```
++setup(graph, embedder):
++    reset all state to not-set-up
++    nodes <- sorted(graph.nodes()); n <- len(nodes)
++    if n == 0: mark set-up; return
++    raw <- embedder.embed_many([embed_text(node) for node in nodes])
++    require 2-D, n rows, all finite
++    norms <- row norms; require every norm > 0
++    normed <- raw / norms[:, None] as float32
++    capacity <- max(16, 2n)
++    _mat <- zeros((capacity, dim)); _mat[:n] <- normed
++    _names <- nodes; _name_to_idx <- {name: i}
++    _n <- n; _embedder <- embedder; mark set-up
++
++shortlist(new_name):
++    clear cache and failure state first
++    require set-up; validate(new_name)
++    raw <- embedder.embed(embed_text(new_name))       # exactly one call
++    require 1-D, finite, norm > 0; check/establish dim
++    q <- raw / ||raw||
++    cache (new_name, q)
++    if _n == 0: return empty
++    scores <- _mat[:_n] @ q
++    max_cos <- max(scores); comparisons <- _n
++    mask <- float64(scores) > theta                   # strict >
++    qualifying <- indices where mask
++    items <- [(score, name) for qualifying indices if name != new_name]
++    sort items by (-score, name)
++    return Shortlist(names, scores)
++
++on_inserted(new_name, edges):
++    require cache matches new_name and vec exists
++    require new_name not already indexed
++    vec <- cached; clear cache
++    if capacity full: double capacity and copy
++    _mat[_n] <- vec; _name_to_idx[new_name] <- _n
++    _names.append(new_name); _n += 1
++```
++
++**Semantics.** Strict `>` threshold; zero-candidate shortlists are expected
++and valid. Scores are float32, so a cosine may exceed 1.0 by rounding error.
++`diagnostics()["max_cosine"]` is over the whole index, including a row for
++`new_name` only if it was already indexed — unreachable through `insert_node`.
++
++#### 4.13.5 `strategies/ann_retrieval.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `AnnRetrievalStrategy` | 83 | Strategy 3, FAISS HNSW |
++| `.__init__` | 108 | validate `k`, `M`, `ef_construction`, `ef_search`; require faiss |
++| `.max_candidates` | 161 | `min(k, n)` |
++| `.setup` | 168 | batch embed, normalise, single-threaded HNSW build |
++| `.shortlist` | 250 | embed query once, HNSW search, filter/pad, sort |
++| `.on_inserted` | 368 | add cached vector to HNSW index |
++| `.config` | 403 | all HNSW parameters + faiss identity |
++| `.diagnostics` | 417 | index size, max cosine, exact-top-k overlap |
++
++**Index:** `faiss.IndexHNSWFlat(dim, M, METRIC_INNER_PRODUCT)` over
++L2-normalised `float32` vectors. Inner product on unit vectors equals cosine
++similarity. `setup` calls `faiss.omp_set_num_threads(1)` before the batch add.
++
++```
++setup(graph, embedder):
++    reset state
++    nodes <- sorted(graph.nodes()); n <- len(nodes)
++    if n == 0: mark set-up; return
++    raw <- embedder.embed_many(texts)
++    validate 2-D, n rows, finite, positive norms, dim > 0
++    normed <- contiguous float32(raw / norms[:, None])
++    faiss.omp_set_num_threads(1)
++    index <- IndexHNSWFlat(dim, M, INNER_PRODUCT)
++    index.hnsw.efConstruction <- ef_construction
++    index.hnsw.efSearch <- ef_search
++    index.add(normed)
++    store dim/index/names/map; set-up
++
++shortlist(new_name):
++    clear per-query cache and diagnostic state first
++    require set-up; validate(new_name)
++    raw <- embedder.embed(embed_text(new_name))       # exactly one call
++    validate 1-D, finite, positive norm, dimension
++    if dim unknown: lazily create HNSW index
++    q <- contiguous float32(raw / ||raw||)
++    cache (new_name, q); record n_at_query, query name/vector
++    if index empty: return empty
++    index.hnsw.efSearch <- ef_search
++    k_eff <- min(k + (1 if new_name already indexed else 0), n_indexed)
++    distances, labels <- index.search(q.reshape(1,-1), k_eff)
++    for (dist, label):
++        if label == -1: continue
++        name <- _names[label]
++        if name == new_name or seen: continue
++        append (name, dist)
++    sort by (-score, name); take first k
++    record shortlist, max valid distance, returned candidates
++    return Shortlist(names, scores)
++
++on_inserted(new_name, edges):
++    require cached name matches and vector exists
++    require new_name not already in map
++    vec <- cached; clear cache
++    index.add(vec.reshape(1,-1))
++    append name; map name -> len(names)-1
++```
++
++**Diagnostics.** `exact_topk_overlap` is computed in `diagnostics()`, outside
++all timed windows, by reconstructing the first `n_at_query` vectors with
++`index.reconstruct_n` and comparing the exact top-k cosine set with what HNSW
++returned. This measures approximation fidelity, not shortlist cost.
++
++#### 4.13.6 `strategies/bounded_bucket.py`
++
++**Purpose:** Strategy 4. Nodes are ordered by inverse reflected-Gray rank of
++their random-hyperplane LSH code. That order is partitioned into contiguous
++segments of size at most `s_max` (and at least `s_min` after setup where
++possible). A query only touches the home segment. Segment overflow splits at
++the midpoint; setup merges undersize segments.
++
++**Symbol map**
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `DEFAULT_S_MIN` / `S_MAX` / `N_BITS` / `SEED` | 78–81 | `5`, `10`, `12`, `42` |
++| `BucketEntry` | 84 | frozen `(gray, name, code, row)`; sort key `(gray, name)` |
++| `BoundedBucketStrategy` | 98 | Strategy 4 |
++| `.__init__` | 123 | validate bounds; `s_max >= 2*s_min`, `1 <= n_bits <= 62` |
++| `.max_candidates` | 192 | `min(s_max, n)` |
++| `._draw_hyperplanes` | 199 | deterministic unit-normal matrix from seed |
++| `._gray_rank` | 212 | inverse reflected Gray code via prefix XOR |
++| `._hamming` | 221 | integer XOR popcount |
++| `._hash_vector` | 225 | float64 projection -> `(code, gray)` |
++| `._hash_matrix` | 237 | vectorised projection -> code/gray lists |
++| `._bisect_recursive` | 250 | split list until each piece <= `s_max` |
++| `._choose_neighbour` | 262 | proximity tuple chooses left/right |
++| `._locate_home` | 290 | binary search segment last-keys, return `(index, inside_span)` |
++| `._insert_entry` | 331 | sorted insertion; split if overflow |
++| `.setup` | 368 | batch build segments from initial graph |
++| `.shortlist` | 532 | hash query, locate home segment, score members |
++| `.on_inserted` | 667 | cache checks, matrix append, segment insert/split |
++| `._compute_exact_topk_overlap` | 729 | exact top-m overlap for diagnostics |
++| `.config` | 759 | `{s_min, s_max, n_bits, seed}` |
++| `.diagnostics` | 768 | bucket/segment/query details |
++
++**Pseudocode: hashing helpers**
++
++```
++_draw_hyperplanes(dim):
++    rng <- default_rng(seed)
++    raw <- rng.standard_normal((n_bits, dim), float64)
++    normalise rows (zero norm -> 1); return float64
++
++_gray_rank(code):
++    g <- code; shift <- 1
++    while shift < n_bits:
++        g ^= g >> shift; shift <<= 1
++    return g
++
++_hamming(a, b): return bit_count(a XOR b)
++
++_hash_vector(vec):
++    dots <- float64(vec) @ hyperplanes.T
++    code <- 0
++    for r in 0..n_bits-1:
++        bit <- 1 if dots[r] >= 0 else 0
++        code |= bit << (n_bits - 1 - r)
++    return code, _gray_rank(code)
++
++_hash_matrix(mat):
++    dots <- float64(mat) @ hyperplanes.T
++    codes <- vectorised sign bits as above
++    return codes, [_gray_rank(c) for c in codes]
++```
++
++**Pseudocode: ordering and neighbour choice**
++
++```
++_bisect_recursive(entries, s_max):
++    if len(entries) <= s_max: return [entries]
++    mid <- len(entries) // 2
++    return _bisect_recursive(entries[:mid], s_max)
++         + _bisect_recursive(entries[mid:], s_max)
++
++_choose_neighbour(left, right, cur_first_code, cur_first_gray,
++                  cur_last_code, cur_last_gray):
++    if left is None: return "right"
++    if right is None: return "left"
++    left_key  <- (hamming(left[-1].code, cur_first_code),
++                  cur_first_gray - left[-1].gray,
++                  len(left), 0)
++    right_key <- (hamming(cur_last_code, right[0].code),
++                  right[0].gray - cur_last_gray,
++                  len(right), 1)
++    return "left" if left_key <= right_key else "right"
++```
++
++**Pseudocode: home lookup**
++
++```
++_locate_home(gray, name, code):
++    require segments non-empty
++    key <- (gray, name)
++    binary search first segment whose last sort key >= key -> pos
++    if pos valid and segment[pos].first <= key <= segment[pos].last:
++        return pos, True
++    if pos == 0: return 0, False
++    if pos == len(segments): return len(segments)-1, False
++    side <- _choose_neighbour(segments[pos-1], segments[pos],
++                              code, gray, code, gray)
++    return (pos-1 if side == "left" else pos), False
++```
++
++**Pseudocode: insertion**
++
++```
++_insert_entry(entry):
++    prior_n <- self._n - 1
++    if no segments: segments <- [[entry]]; sizes/flags <- 1/False/False; return
++    home_idx, inside_span <- _locate_home(entry.gray, entry.name, entry.code)
++    merge_occurred <- (not inside_span) and prior_n >= 1
++    seg <- segments[home_idx]
++    ins_pos <- first index where seg[i].sort_key() >= entry.sort_key()
++    seg.insert(ins_pos, entry)
++    if len(seg) > s_max:
++        mid <- len(seg) // 2
++        segments[home_idx:home_idx+1] <- [seg[:mid], seg[mid:]]
++        split_occurred <- True
++        bucket_size <- len(left_half) if ins_pos < mid else len(right_half)
++    else:
++        split_occurred <- False; bucket_size <- len(seg)
++    merge_occurred flag recorded
++```
++
++**Pseudocode: setup**
++
++```
++setup(graph, embedder):
++    reset state
++    nodes <- sorted(graph.nodes()); n <- len(nodes)
++    if n == 0: mark set-up; return
++    raw <- embedder.embed_many(texts)
++    validate 2-D, n rows, finite, positive norms, dim > 0
++    normed <- float32(raw / norms[:, None])
++    hyperplanes <- _draw_hyperplanes(dim)
++    codes, grays <- _hash_matrix(normed)
++    entries <- [BucketEntry(gray[i], nodes[i], code[i], row=i)]
++    entry_by_name <- map by name
++    sort entries by (gray, name)
++
++    if n < s_min:
++        segments <- [entries]
++    else:
++        group consecutive entries with identical gray into raw buckets
++        segments <- concat(_bisect_recursive(bucket, s_max) for bucket in buckets)
++        i <- 0
++        while i < len(segments) and len(segments) > 1:
++            if len(segments[i]) < s_min:
++                choose left/right neighbour via proximity tuple
++                combine the two adjacent segments
++                if combined size <= s_max:
++                    replace both with one segment
++                else:
++                    replace both with two halves at len//2
++                i <- max(0, left_index)      # re-check merged region
++            else: i += 1
++
++    _mat <- zeros((max(16, 2n), dim)); _mat[:n] <- normed
++    store dim/mat/names/map/entries/segments/n; set-up
++```
++
++**Pseudocode: shortlist**
++
++```
++shortlist(new_name):
++    clear caches and per-query diagnostics first
++    require set-up; validate(new_name)
++    raw <- embedder.embed(embed_text(new_name))       # exactly one call
++    validate 1-D, finite, positive norm, dimension
++    if dim unknown: set dim, draw hyperplanes, allocate matrix
++    q <- contiguous float32(raw / ||raw||)
++    code, gray <- _hash_vector(q)
++    cache q/code/gray; record query diagnostics
++    if _n == 0: return empty
++    home_idx, inside_span <- _locate_home(gray, new_name, code)
++    seg <- segments[home_idx]
++    record bucket id, gray range, inside-span, sizes, whether code exists
++    filtered <- [e for e in seg if e.name != new_name]
++    if empty: return empty
++    scores <- _mat[[e.row for e in filtered]] @ q
++    paired <- [(score, name, code)]
++    sort by (-score, name)
++    return Shortlist(names, scores)                   # all members, <= s_max
++```
++
++**Pseudocode: update and diagnostics**
++
++```
++on_inserted(new_name, edges):
++    require cached name/vector/code/gray all match new_name
++    require new_name not already indexed
++    consume cache
++    if matrix full: double capacity and copy
++    row <- _n
++    _mat[row] <- vec; names.append; map[name] <- row; _n += 1
++    entry <- BucketEntry(gray, name, code, row)
++    entry_by_name[name] <- entry
++    _insert_entry(entry)
++
++_compute_exact_topk_overlap():
++    if shortlist never called or no query vector: return None
++    if n_at_query == 0: return 1.0
++    cosines <- _mat[:n_at_query] @ query
++    valid <- rows whose name != query_name
++    sort by (-cosine, name); m <- min(s_max, len(valid))
++    exact_set <- first m names
++    matched <- returned candidates in exact_set
++    return matched / m
++```
++
++**Why the Gray order.** Adjacent Gray codes differ by one bit, so ordering by
++inverse Gray rank keeps nearby LSH codes physically adjacent in the segment
++list. The home segment is therefore approximately a locality-preserving
++interval of embedding space. `exact_topk_overlap` measures the combined loss
++from partitioning and embedding approximation.
++
++---
++
++### 4.14 `src/graph_insertion/strategies/registry.py`
++
++**Purpose:** single source of truth for CLI strategy names, factory functions,
++parameter applicability, and deterministic run-directory slugs.
++
++**Symbol map**
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `_factory_null` | 24 | `NullStrategy`, `k` default 1 |
++| `_factory_stub` | 45 | `StubNarrowingStrategy`, `k` default 5 |
++| `_factory_brute_force` | 62 | `BruteForceStrategy` |
++| `_factory_embedding_threshold` | 80 | theta forwarded if provided |
++| `_factory_ann_retrieval` | 101 | k / ef_search forwarded if provided |
++| `_factory_bounded_bucket` | 123 | s_min / s_max / n_bits forwarded |
++| `STRATEGY_FACTORIES` | 150 | name -> factory |
++| `PARAM_APPLICABILITY` | 165 | parameter -> allowed strategy set |
++| `PARAM_CLI_FLAGS` | 174 | parameter -> CLI flag text |
++| `check_applicability` | 184 | is parameter allowed for strategy? |
++| `build_strategy_slug` | 192 | deterministic config slug |
++| `derive_default_run_id` | 230 | `<mode>_<strategy>[_<slug>]` |
++
++```
++check_applicability(strategy_name, param_name):
++    if param unknown: return True
++    return strategy_name in PARAM_APPLICABILITY[param]
++
++build_strategy_slug(strategy_name, config):
++    parts <- []
++    embedding_threshold -> ["theta{theta}"]
++    ann_retrieval       -> ["k{k}", "ef{ef_search}"]
++    bounded_bucket      -> ["smin{s_min}", "smax{s_max}", "nb{n_bits}"]
++    null                -> ["k{k}"]
++    stub                -> ["k{top_k or k}"]
++    brute_force         -> []
++    else: ValueError
++    if seed present and seed != 42: append "seed{seed}"
++    return "_".join(parts)
++
++derive_default_run_id(mode, strategy, config):
++    slug <- build_strategy_slug(...)
++    return f"{mode}_{strategy}_{slug}" if slug else f"{mode}_{strategy}"
++```
++
++**Lazy imports.** `ann_retrieval` and the other strategy modules are imported
++inside their factories, so the registry and `strategies` package load without
++faiss or sentence-transformers installed.
++
++---
++
++### 4.15 `src/graph_insertion/strategies/__init__.py`
++
++Eagerly exports only `NullStrategy`; all other names are resolved lazily
++through module `__getattr__`. This keeps `import graph_insertion.strategies`
++dependency-free apart from the standard library.
++
++```
++__getattr__(name):
++    BruteForceStrategy          -> import brute_force
++    EmbeddingThresholdStrategy  -> import embedding_threshold
++    AnnRetrievalStrategy        -> import ann_retrieval
++    BoundedBucketStrategy       -> import bounded_bucket
++    StubNarrowingStrategy       -> import stub
++    STRATEGY_FACTORIES          -> import registry
++    otherwise AttributeError
++```
++
++---
++
++### 4.16 `scripts/run_experiment.py`
++
++**Purpose:** user-facing experiment CLI. It wires strategies, embedders, LLM
++clients, safety guards, progress reporting, provenance sidecars, and the
++harness.
++
++**Symbol map**
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `_SNAKE_CASE_RE` | 74 | name validation regex |
++| `StubDecisionStep` | 84 | zero-cost decision step for offline/dry runs |
++| `STRATEGY_REGISTRY` | 107 | alias of `STRATEGY_FACTORIES` |
++| `ProgressReporter` | 114 | call-driven heartbeat + ETA |
++| `.on_llm_call` | 161 | update call counters; print if interval elapsed |
++| `.update` | 177 | trial completion callback; avoid retry double-count |
++| `._print_line` | 209 | format calls/trials/elapsed/ETA/retries |
++| `PlannedCallsBound` | 238 | `int` subclass carrying full/remaining plan metadata |
++| `compute_planned_calls_upper_bound` | 261 | strategy-aware, resume-aware call bound |
++| `compute_preflight_estimate` | 325 | duration + cost estimate |
++| `build_live_client` | 345 | require key; construct `DeepSeekClient` |
++| `load_and_validate_names_file` | 366 | strict names-file validation |
++| `build_parser` | 459 | all CLI flags |
++| `build_sidecar_payload` | 642 | JSON-safety-checked sidecar dict |
++| `get_current_embedder_info` | 661 | expected embedder block without model load |
++| `check_resume_or_existing_directory_guard` | 702 | sidecar compatibility check |
++| `main` | 814 | full CLI flow |
++
++**Pseudocode: progress reporting**
++
++```
++ProgressReporter.on_llm_call(calls_done, cumulative_retries):
++    hook_active <- True
++    calls_done <- calls_done; retries <- cumulative_retries
++    if now - last_print >= interval:
++        print line; last_print <- now; return True
++    return False
++
++ProgressReporter.update(trials_done, total_trials, delta_retries=0, size=None,
++                        force=False):
++    update counters/size
++    if not hook_active: retries += delta_retries     # hook is authoritative otherwise
++    should_print <- force or trials_done == total_trials
++                    or now - last_print >= interval
++    if should_print: print line
++
++_print_line(elapsed):
++    if 0 < calls_done < total_calls:
++        eta <- (elapsed / calls_done) * (total_calls - calls_done)
++    elif calls_done >= total_calls > 0: eta <- 0
++    elif 0 < trials_done < total_trials:
++        eta <- (elapsed / trials_done) * (total_trials - trials_done)
++    else: eta <- unknown
++    write "[strategy(/n)] calls/total (trial/total) elapsed ETA retries"
++```
++
++**Pseudocode: planned bound**
++
++```
++compute_planned_calls_upper_bound(config, corpora, strategy, raw_jsonl):
++    skipped <- existing keys if resume else empty
++    full <- 0; remaining <- 0; full_trials <- 0; remaining_trials <- 0
++    if sweep:
++        for each n:
++            trial_bound <- CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n)
++            for each trial index:
++                key <- sweep key
++                full += trial_bound; full_trials += 1
++                if key skipped: continue
++                remaining += trial_bound; remaining_trials += 1
++    elif accuracy:
++        for each corpus:
++            sampled <- sample_heldout_nodes(...)
++            n_existing <- len(graph.nodes()) - 1
++            trial_bound <- CALLS_PER_CANDIDATE * candidate_upper_bound(strategy, n_existing)
++            for each repeat and held-out node:
++                key <- accuracy key
++                full += trial_bound; full_trials += 1
++                if key skipped: continue
++                remaining += trial_bound; remaining_trials += 1
++    if max_llm_calls set: remaining <- min(remaining, max_llm_calls)
++    return PlannedCallsBound(remaining, full, remaining_trials, full_trials)
++```
++
++**Pseudocode: names-file validation**
++
++```
++load_and_validate_names_file(path, min_required):
++    require file exists; parse JSON
++    accept plain list, or object with "names"
++    require list of str
++    require len >= min_required
++    require no duplicates
++    require every name matches snake_case regex
++    load all 12 corpora; collect nodes and embed_text forms
++    require zero overlap in exact names
++    require zero overlap in embed_text forms
++    return names
++```
++
++**Pseudocode: sidecar guard**
++
++```
++check_resume_or_existing_directory_guard(...):
++    if no existing raw and not (resume and sidecar exists): return 0
++    if sidecar missing:
++        if existing raw: warn; proceed without mismatch check
++        return 0
++    parse sidecar; on parse error: error; return 1
++    require stored strategy == current strategy
++    require stored config == current config
++    require stored mode == current mode (if stored)
++    if stored embedder:
++        require embedder type matches
++        if minilm:
++            require model_name, dim, revision match
++            if sentence_transformers_version recorded: require match
++            if cpu_threads recorded: require match
++        if fake:
++            require dim and seed match
++    return 0
++```
++
++**Pseudocode: `main`**
++
++```
++main():
++    parse args
++    factory <- STRATEGY_REGISTRY.get(strategy) or error exit 1
++    for each parameter flag set:
++        if not check_applicability(strategy, param): parser.error (exit 2)
++    strategy_params <- theta/ef_search/s_min/s_max/n_bits
++    strategy_factory <- lambda: factory(seed, k, **strategy_params)
++    probe <- strategy_factory() or clean error exit 1
++    uses_embeddings <- probe.uses_embeddings
++    if live and uses_embeddings and embedder == "fake": error exit 1
++    resolve run id and output dir
++    config <- HarnessConfig(...)
++    current_embedder_info <- get_current_embedder_info(...)
++    guard_rc <- check_resume_or_existing_directory_guard(...)
++    if guard_rc: return guard_rc
++    if accuracy: choose corpora per --corpus
++    if live and sweep and no --names-file: error exit 1
++    planned <- compute_planned_calls_upper_bound(...)
++    if live:
++        print preflight estimate + peak status
++        refused <- window_intersects_peak(now, estimate) and not allow_peak
++        if dry_run: print note; return 0
++        if refused: error exit 1
++        if not confirm: error exit 1
++        raw_client <- build_live_client(model); metered <- MeteredLLMClient(raw)
++        decision_step <- PairwiseDecisionStep(metered)
++    else:
++        metered <- MeteredLLMClient(FakeLLMClient())
++        decision_step <- PairwiseDecisionStep(metered)
++    if sweep:
++        need <- max(sizes)+1
++        names <- validated --names-file or placeholders (max+100)
++        name_source <- SyntheticNameSource(names, "computer science")
++    if dry_run: print plan + output dir; return 0
++    if not confirm: error exit 1
++    choose embedder factory:
++        no embeddings or fake -> FakeEmbedder(dim=32, seed)
++        else -> MiniLMEmbedder(); pin_cpu_threads(1)
++    progress <- ProgressReporter(remaining bound, remaining trials, strategy)
++    metered.set_on_call(progress.on_llm_call)
++    sidecar payload if directory fresh
++    run_experiment(... warmup writes sidecar ...)
++    print result; return 0
++    on any exception: print error; return 1
++```
++
++**Safety layers, in order.** Inapplicable flags → bad strategy params →
++live-plus-fake-embedder refusal → resume/sidecar mismatch → live sweep without
++names file → peak-window refusal → missing `--confirm` → missing API key.
++None of these touch the network before passing.
++
++---
++
++## 5. Analysis pipeline (Phase 4)
++
++This section is an outline plus pseudocode for the dataflow-critical
++functions. Plotting functions share a common pattern: filter to primary
++variants, read precomputed table rows, draw, write `.pdf`, `.png`, and a
++figure CSV. They are listed by contract rather than reproduced line by line.
++
++### 5.1 `scripts/analysis/validate_runs.py`
++
++**Purpose:** fail-closed gate. No table or figure is produced from data that
++has not passed it. Implements the Phase 4 analysis plan, Section 2.
++
++**Checks**
++
++1. Exact trial counts: accuracy 59 total (29 DSA + 30 Metacademy), sweep 60
++   (10 per size), legacy DSA-only 29.
++2. Planned call bound keyed by sidecar strategy and config; directory name
++   must match manifest `run_id` and canonical sidecar slug.
++3. Independent recomputation of summary metrics from `raw.jsonl`:
++   micro/macro P/R/F1, shortlist recall, mean/median total time, mean/sum
++   calls, integer summary fields.
++4. Manifest/provenance: `git_dirty` false; commit uniform within mode; across
++   modes allowed only with `--src-diff-clean`; all 7 required libraries
++   present and uniform.
++5. Embedder identity and thread pin: embedding strategies must record
++   `cpu_threads == 1`, `torch_threads == 1`, model name and revision;
++   brute force must have no active embedding model or thread pin.
++6. Resume detection: duplicate keys where an earlier record succeeded are
++   corrupt; failed-then-succeeded keys are valid and reported.
++7. Optional external sha256 hashes for the four artifacts.
++8. Table T3 inventory with per-file and composite directory hashes.
++
++**Key symbols**
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `REQUIRED_LIBRARIES` | 58 | 7 package names |
++| `EXPECTED_EMBEDDER_MODEL` / `REVISION` | 68/69 | pinned identity |
++| `PLANNED_TRIAL_COUNTS` | 71 | expected trials per mode |
++| `compute_file_sha256` | 99 | file hash in 64 KB chunks |
++| `compute_directory_sha256` | 108 | name+hash composite |
++| `parse_hashes_file` | 118 | sha256sum-style lookup |
++| `build_strategy_slug` | 138 | must match runtime slug |
++| `derive_expected_run_id` | 176 | canonical run id |
++| `get_planned_call_bound` | 185 | D-68 bound by strategy/config/mode |
++| `parse_manifest` / `parse_sidecar` | 245/250 | JSON loaders |
++| `parse_raw_jsonl` | 255 | records, duplicate keys, key history |
++| `parse_summary_csv` | 276 | CSV rows |
++| `recompute_metrics` | 282 | independent summary recomputation |
++| `validate_single_run` | 398 | all checks for one run |
++| `validate_all_runs` | 768 | cross-run uniformity + T3 CSV |
++| `main` | 908 | CLI wrapper |
++
++**Pseudocode: `validate_single_run` (condensed)**
++
++```
++validate_single_run(run_dir, expected_hashes=None):
++    errors <- []
++    require manifest.json, strategy_config.json, raw.jsonl, summary.csv exist
++    manifest <- parse; sidecar <- parse; records <- parse_raw_jsonl
++    require manifest fields present and typed
++    require git_dirty is False
++    require sidecar strategy/config canonical; derive expected run id and
++        compare with directory/manifest
++    require trial key counts match PLANNED_TRIAL_COUNTS mode
++    require no corrupt duplicate key (a later key with earlier success)
++    recompute <- recompute_metrics(records, mode)
++    summary <- parse_summary_csv
++    for each recomputed aggregate:
++        compare to summary cell within tolerance; fail closed
++    require embedding-strategy thread pins and model identity
++    require brute-force absence of embedder/thread pin
++    if expected_hashes: verify four artifact hashes
++    build T3 inventory row (hashes, counts, status)
++    return (no errors, errors, info)
++
++validate_all_runs(results_dir, src_diff_clean=False, hashes_path=None):
++    discover run dirs (single dir or child dirs with manifest)
++    validate each; collect errors
++    require git commit uniform within mode
++    if commits differ across modes and not src_diff_clean: fail
++    require library block identical across all runs
++    build T3 CSV string
++    return (overall_passed, results, t3_csv)
++```
++
++### 5.2 `scripts/analysis/run_analysis.py`
++
++**Purpose:** one-command orchestration. Nothing is hand-edited.
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `_file_sha256` | 78 | hash one module file |
++| `main` | 87 | gate → directories → run info → tables/figures or post-hoc |
++
++The workflow is in §3.5. Important details:
++
++- The validation gate runs **before** creating `output_dir`; failure writes
++  nothing.
++- `RUN_INFO.txt` records argv, results dir, git commit, mode, crosscheck dir,
++  per-module sha256, hashes-file identity, and gate status.
++- `--only posthoc` requires `--crosscheck-dir` and writes only T5–T9b and
++  F7–F9; it rebuilds T1/T2 aggregates in memory but does not rewrite them.
++- Primary ANN `k` and bounded-bucket `s_max` are read from each primary run's
++  `strategy_config.json` for Figure F3; missing caps abort.
++
++### 5.3 `scripts/analysis/tables.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `_require_col` | 40 | strict column access, named error |
++| `extract_variant_label` | 47 | run directory name -> human variant label |
++| `write_csv` | 76 | deterministic column order |
++| `export_markdown_table` | 95 | GitHub-flavoured markdown |
++| `generate_t1_accuracy_table` | 134 | T1: all 12 accuracy configurations |
++| `generate_t4_sensitivity_table` | 217 | T4: sensitivity metrics + unjudged predictions |
++| `generate_t3_inventory_table` | 255 | T3: parse validator CSV |
++| `_fit_metric_slopes` | 275 | one log-log fit row |
++| `generate_t2_sweep_cost_table` | 324 | T2 distributions + slope fits; returns `(rows, slope_rows)` |
++
++**Pseudocode: T1**
++
++```
++generate_t1_accuracy_table(accuracy_run_dirs, output_csv=None):
++    rows <- []
++    for each run dir (sorted):
++        read summary.csv and strategy_config.json
++        skip runs without summary
++        variant <- extract_variant_label(dir name)
++        if variant is a sensitivity variant: skip (belongs to T4)
++        build row: strategy, corpus, variant, run name,
++            n, calls mean/median, time means,
++            precision/recall/F1 micro+macro and defined counts,
++            shortlist recall micro+macro,
++            sensitivity metrics,
++            random-baseline shortlist recall = min(k_or_cap, m)/m
++                (m = 28 DSA, 140 Metacademy),
++            retry/recovery counts
++    optionally write CSV; return rows
++```
++
++**Pseudocode: T2**
++
++```
++generate_t2_sweep_cost_table(sweep_run_dirs, output_csv=None):
++    for each run dir:
++        read summary.csv
++        for each (size, strategy) row:
++            emit distributions: calls, total_s, shortlist_s, decide_s
++            emit retry/recovery counts
++            emit timing sensitivity excluding retries > 0 and the flagged
++                peak trial
++        build size -> [calls] and size -> [total_s] maps
++        _fit_metric_slopes for each metric:
++            bootstrap_slope_ci(per-size trial values)
++            append slope, CI, category, r2, n_boot_used
++    optionally write T2 CSV; return (rows, slope_rows)
++```
++
++### 5.4 `scripts/analysis/figures.py`
++
++All functions call `apply_thesis_style()`, select primary variants (falling
++back to all rows), and write a PDF, PNG, and CSV via `export_figure`.
++
++| Symbol | Line | Figure |
++|---|---:|---|
++| `plot_f4_accuracy_comparison` | 29 | F4: precision/recall/F1/shortlist recall by strategy and corpus vs random baseline |
++| `plot_f5_sensitivity_panels` | 103 | F5: one-at-a-time sensitivity for theta, k, efSearch, bucket sizes |
++| `plot_f6_cost_vs_accuracy` | 236 | F6: calls vs F1, dominance labels, dominance CSV/MD |
++| `plot_f1_calls_scaling` | 345 | F1: calls vs n, log-x, bootstrap intervals |
++| `plot_f2_wallclock_scaling` | 408 | F2: total time vs n + shortlist/decide split |
++| `plot_f3_premise_check` | 485 | F3: S3/S4 calls and time vs n with cap reference lines |
++| `plot_f1b_calls_scaling_logy` | 552 | F1b: exploratory log-log calls |
++| `plot_f2b_wallclock_scaling_logy` | 647 | F2b: exploratory log-log time |
++| `plot_f6b_cost_vs_accuracy_logx` | 776 | F6b: exploratory log-x cost vs accuracy |
++
++### 5.5 `scripts/analysis/stats.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `classify_slope_flatness` | 25 | D2 bins: `<0.1` flat, `0.1–0.9` sub-linear, `>0.9` linear; NaN -> undefined |
++| `fit_log_log_slope` | 37 | OLS of `log(mean_cost)` on `log(n)`; undefined on non-positive/non-finite |
++| `bootstrap_slope_ci` | 80 | resample trials within each size; drop zero-mean resamples; report `n_boot_used` |
++| `evaluate_dominance` | 157 | R2 mechanical dominance with 0.025 F1 tolerance |
++
++```
++fit_log_log_slope(sizes, means):
++    if <2 points, length mismatch, any size <= 0/non-finite,
++       any mean <= 0/non-finite: return (NaN, NaN, NaN)
++    x <- log(sizes); y <- log(means)
++    slope <- sum((x-xbar)(y-ybar)) / sum((x-xbar)^2)
++    intercept <- ybar - slope*xbar
++    r2 <- correlation^2 (1.0 if y variance zero)
++    return slope, intercept, r2
++
++bootstrap_slope_ci(size_to_trials):
++    if <2 sizes: undefined
++    if any size has no trials: undefined, category names sizes
++    empirical means; if any <=0/non-finite: undefined, category names sizes
++    point slope <- fit_log_log_slope(sizes, empirical means)
++    for n_resamples:
++        for each size: resample trials with replacement; mean
++        if any resample mean <=0/non-finite: discard whole resample
++        fit slope on log(resample means) vs log(size)
++    CI <- percentile 2.5/97.5 of valid slopes
++    return point, low, high, category, r2, n_boot_used
++
++evaluate_dominance(a, b, threshold=0.025):
++    if |f1_a - f1_b| < threshold: return "not distinguishable"
++    if f1_a > f1_b and calls_a <= calls_b: return "A dominates B"
++    if f1_b > f1_a and calls_b <= calls_a: return "B dominates A"
++    return "trade-off"
++```
++
++### 5.6 `scripts/analysis/bootstrap.py`
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `bootstrap_ci` | 17 | percentile CI for mean/median/arbitrary statistic |
++| `compute_series_stats` | 57 | n/mean/std/min/max/median + mean and median CIs |
++
++```
++bootstrap_ci(data, statistic_fn=mean, n_resamples=10000, ci_level=0.95, seed=42):
++    drop None/NaN
++    if empty: (NaN, NaN)
++    if one value: (value, value)
++    rng <- default_rng(seed)
++    resample index matrix; compute statistic per resample
++    return percentiles at alpha/2 and 1-alpha/2
++```
++
++### 5.7 `scripts/analysis/posthoc.py`
++
++**Purpose:** post-hoc decision and ranking stage (Tables T5–T9b, Figures
++F7–F9). Explicitly marked `POST HOC: not pre-registered` in every output. No
++live calls; consumes T1/T2 aggregates and raw accuracy runs.
++
++**Core concepts**
++
++- Strategies: brute force, embedding threshold, ANN, bounded bucket, in
++  frozen order.
++- Corpora: DSA, Metacademy.
++- `A_i`: min-max normalised mean F1 (higher is better).
++- `C_i`: min-max normalised `log10(1 + mean calls)` (lower is better).
++- `w` scenarios: fixed weights across the cost/accuracy trade-off.
++- Gates: G1 relative accuracy, G2 call cap at `n=2000`, G3 non-dominance.
++- Rankings: weighted sum, TOPSIS, Kendall tau-b, Monte Carlo rank shares,
++  analytic rank shares, wall-clock-substituted sensitivity.
++
++**Key symbols**
++
++| Symbol | Line | Contract |
++|---|---:|---|
++| `extract_inputs` | 124 | frozen per-strategy inputs from T1/T2 |
++| `realised_shortlist_sizes` | 171 | mean realised shortlist size; asserts equals T1 calls |
++| `assert_matches_final_output` | 236 | cross-check every value against existing outputs |
++| `compute_A_C` | 339 | normalised accuracy and cost scores |
++| `weighted_scores` | 367 | `w*A + (1-w)*C` |
++| `rank_with_ties` | 373 | mean-of-occupied-ranks with tie tolerance |
++| `compute_gates` | 485 | G1/G2/G3 outcomes + class |
++| `size_matched_baselines` | 506 | random baseline at realised shortlist size |
++| `build_t5_rows` | 525 | gates and classes |
++| `build_t5b_rows` | 570 | gate sensitivity |
++| `build_t6_rows` | 687 | single-criterion ranks |
++| `build_t7_rows` | 712 | weighted scores and ranks |
++| `build_t8_rows` | 960 | Monte Carlo rank shares + exact comparison |
++| `mc_rank_shares` | 794 | random-weight Monte Carlo |
++| `exact_rank_shares` | 824 | analytic breakpoints |
++| `topsis_closeness` | 855 | weighted TOPSIS |
++| `kendall_tau_b` | 866 | hand-implemented tie-corrected tau-b |
++| `build_t9_rows` | 909 | TOPSIS + tau-b summary |
++| `build_t9b_rows` | 744 | wall-clock-substituted check |
++| `run_posthoc_stage` | 996 | orchestrate all of the above |
++
++**Pseudocode: `run_posthoc_stage`**
++
++```
++run_posthoc_stage(results_dir, accuracy_run_dirs, t1_rows, t2_rows,
++                  output_dir, crosscheck_dir):
++    inputs <- extract_inputs(t1_rows, t2_rows)
++    n_checks <- assert_matches_final_output(inputs, crosscheck_dir)
++    shortlist_means <- realised_shortlist_sizes(accuracy_run_dirs)
++    sm_baseline <- size_matched_baselines(inputs, shortlist_means)
++    mkdir tables, figures
++    gates <- compute_gates(inputs)
++    write T5, T5b
++    write T6
++    t7_rows, store <- build_t7_rows(inputs); write T7
++    t8_rows, mc_store, exact_store <- build_t8_rows(store)
++        write T8 (full precision CSV, 2-decimal MD), T8b (exact)
++    write T9, T9b
++    plot F7, F8, F9
++    return summary dict
++```
++
++**Pseudocode: `compute_A_C`**
++
++```
++compute_A_C(inputs, corpus):
++    f1 <- mean F1 per strategy
++    calls <- mean calls per strategy
++    g <- log10(1 + calls)
++    A <- min-max normalise(f1, higher better)
++    C <- min-max normalise(g, higher better=False)
++    degenerate flags if all values equal (all scores 0.5)
++    return {A, C, g, calls, f1,
++            degenerate: {"A": a_degenerate, "C": c_degenerate}}
++```
++
++### 5.8 `scripts/analysis/style.py`
++
++Shared matplotlib configuration: strategy palette, labels, markers, thesis
++style, and `export_figure` (PDF + PNG + CSV). No analytical logic.
++
++### 5.9 `scripts/analysis/posthoc_figures.py`
++
++| Function | Figure |
++|---|---|
++| `plot_f7_gates` | F7: gate outcomes by strategy and corpus |
++| `plot_f8_score_vs_weight` | F8: weighted score trajectories as `w` varies |
++| `plot_f9_rank_shares` | F9: Monte Carlo rank-share distributions |
++
++### 5.10 Diagnostic and redraw scripts
++
++| Script | Purpose |
++|---|---|
++| `apc_check_f_outputs.py` | Independent recomputation of F-table claims from results; 393 lines of assertions |
++| `apc_check_pipeline_outputs.py` | Cross-check pipeline outputs against independent expectations |
++| `redraw_thesis_figures.py` | Redraw thesis figures with overlap checks; not part of the official pipeline |
++
++These are verification aids, not inputs to the thesis results.
++
++---
++
++## 6. Supporting tooling (not core runtime)
++
++### 6.1 `scripts/generate_name_pool.py` (~2,400 lines)
++
++Generates the synthetic concept-name pool (`data/synthetic/cs_concept_names.json`)
++used by the sweep. Two backends: direct DeepSeek API, or an external command
++adapter. Supports sharding, cache/resume, deduplication, corpus-overlap
++validation, and a `--verify` mode.
++
++**High-level flow**
++
++```
++parse args
++  -> choose backend (DeepSeek or command adapter)
++  -> determine shard (subfield subset) if --shard I/N
++  -> load cache for (run_id, shard)
++  -> for each round and subfield:
++        build prompt asking for new snake_case CS concept names
++        call backend
++        parse JSON array
++        validate snake_case, dedupe, reject corpus overlap
++        append accepted names to cache and pool
++        stop when target reached or max calls
++  -> optionally merge shards into one pool
++  -> optionally verify pool against benchmark corpora
++```
++
++**Key symbols:** `ShardLockManager`, `CacheEntry`, `load_completed_cache`,
++`append_cache_record`, `load_benchmark_corpus_concepts`,
++`validate_and_dedupe_candidates`, `build_pool_from_cache`, `verify_pool`,
++`GenerationBackend`, `DeepSeekGenerationBackend`, `CommandGenerationBackend`,
++`run_generation_loop`, `main`.
++
++### 6.2 `scripts/name_pool_supervisor.py` (~1,300 lines)
++
++Runs multiple shard subprocesses unattended. Rotates rate-limited or busy
++profiles onto spare profiles, tracks cooldowns, writes atomic status JSON and
++a JSONL supervisor log, handles SIGINT/SIGTERM by terminating the descendant
++process tree, and automatically builds and verifies the merged pool when all
++shards finish.
++
++**Exit codes:** generator `0` ok, `1` error, `2` usage, `3` rate limit,
++`4` login required, `5` model mismatch, `6` consecutive failures, `7` profile
++in use. Supervisor `0` ok, `1` error, `2` usage, `3` stalled, `4` max total
++calls, `130` signal.
++
++### 6.3 Other scripts
++
++| Script | Purpose |
++|---|---|
++| `scripts/apc-bundle.sh` | Package repo file snapshots for the external APC AI; profiles and `--discover` |
++| `scripts/task-worktree.sh` | Create/status/diff/validate/merge/clean task worktrees |
++| `scripts/validate-report.py` | Lint a report file for required sections, diff presence, status alignment |
++| `scripts/manage-decisions.py` | Show/allocate/check decision IDs |
++| `scripts/pilot_dsa_zero_shot.py` | Historical DSA pilot runner (PILOT-001); not part of the main harness |
++
++---
++
++## 7. Test map
++
++`pytest` is configured with `testpaths = ["tests"]`, `pythonpath = ["src"]`.
++
++| Test file | Covers |
++|---|---|
++| `test_strategy_interface.py` | Reusable `StrategyConformanceSuite` for all strategies |
++| `test_null_strategy.py` | Null strategy semantics, determinism, bounds |
++| `test_brute_force_strategy.py` | S1 exhaustive shortlist, no embedding activity |
++| `test_embedding_threshold_strategy.py` | S2 threshold, ordering, cache reuse, matrix growth |
++| `test_ann_retrieval_strategy.py` | S3 HNSW behaviour, padding, overlap diagnostic |
++| `test_bounded_bucket_strategy.py` | S4 segmentation, split/merge, ordering, diagnostics |
++| `test_strategy_registry.py` | Factories, applicability, slugs, lazy imports |
++| `test_graph_representation.py` | Orientation, node/edge invariants, judgment set |
++| `test_loader.py` | Discovery, delimiters, suffix handling, statistics |
++| `test_decision.py` | Prompt construction, token parsing, strict mode |
++| `test_llm.py` | Retries, metering, snapshots, fake client |
++| `test_embedding_minilm.py` | Pins, version checks, shape contracts |
++| `test_cpu_threads.py` | Pin verification and import ordering |
++| `test_scoring.py` | TP/FP/FN, unjudged sensitivity, aggregation |
++| `test_harness.py` | Trial isolation, resume, manifests, summary generation |
++| `test_harness_embedding.py` | Embedding strategies through harness runners |
++| `test_dry_run_plan.py` | Dry-run bounds match live guard for every strategy |
++| `test_live_guard.py` | Peak-window and planned-call guard behaviour |
++| `test_run_experiment_cli.py` | CLI argument gates, sidecar guard, name validation |
++| `test_schedule.py` | Peak-window boundary logic |
++| `test_pilot.py` | Historical pilot helpers |
++| `test_analysis_validate_runs.py` | Validator, unit and mutation tests |
++| `test_analysis_pipeline.py` | Analysis pipeline end-to-end |
++| `test_posthoc.py` | Post-hoc gates, rankings, cross-checks |
++| `test_generate_name_pool.py` | Generator backends, shards, cache, validation |
++| `test_name_pool_supervisor.py` | Supervisor lifecycle, profile rotation, signals |
++| `test_controllable_embedder.py` | Test embedder helper |
++| `test_background_deck_static.py` | Presentation deck static guard (separate track) |
++
++**Test helpers**
++
++| File | Purpose |
++|---|---|
++| `tests/conftest.py` | Shared fixtures |
++| `tests/controllable_embedder.py` | Embedder whose output the test controls |
++| `tests/stub_prompt_adapter.py` | Fake command-adapter process for generator tests |
++
++---
++
++## 8. Invariants and gotchas
++
++These are the rules most likely to be broken by a well-meaning change.
++
++1. **Canonical edge direction is `prereq -> dependent` ([D-23]).** File
++   orientation differs by source family; always use `oriented_edge` and never
++   read raw columns as canonical edges.
++2. **Nodes are bare names ([D-21]).** No `.txt`, no per-node text, no
++   descriptions. Embedding payload is `embed_text(name)` only. Domain context
++   belongs in the decision prompt, not in the embedding.
++3. **`shortlist()` must not mutate the graph** and must not call the LLM.
++   The strategy is a narrowing component, not a decision maker ([D-24]).
++4. **One embedding per insertion ([D-26], [D-28]).** `shortlist()` embeds
++   `new_name` once and caches the vector; `on_inserted()` reuses it.
++   `embedding_calls_in_update` must be 0.
++5. **Embedder identity is checked.** The `MeteredEmbedder` passed to
++   `insert_node` must be the same object the strategy holds as `_embedder`.
++   Non-embedding strategies must leave `_embedder = None`.
++6. **`total_s` excludes validation.** `validate_s` is separate. Do not add
++   validation into `total_s`; the harness's `unaccounted_s` depends on the
++   split.
++7. **Empty shortlists are valid.** They produce zero LLM calls. Do not treat
++   them as errors; Strategy 2 at theta 0.6 may legitimately return none.
++8. **Determinism depends on ordering.** Strategies sort names and use
++   explicit tie-breaks `(-score, name)`. `null` re-seeds per call and samples
++   from sorted nodes. Removing any of this makes results depend on hash order
++   or call history.
++9. **FAISS and PyTorch thread pinning are load-bearing.** `setup()` calls
++   `faiss.omp_set_num_threads(1)` before HNSW build; the CLI calls
++   `pin_cpu_threads(1)` after constructing MiniLM. Removing either changes
++   measured latency and cross-strategy comparability ([D-47], [D-72]).
++10. **The validation gate is fail-closed.** `run_analysis.py` creates no
++    output directory until `validate_all_runs` passes. Do not weaken or
++    bypass it to "get figures out".
++11. **Resume semantics use the latest record per key.** Both
++    `harness.generate_summary_csv` and `validate_runs.recompute_metrics`
++    deduplicate by key, keeping the last record. A success followed by a
++    failure for the same key is not expected; the validator treats certain
++    duplicate patterns as corruption.
++12. **`raw.jsonl` is append-only during a run.** Records are flushed after
++    each trial. Do not buffer or rewrite it in place.
++13. **Sidecar config must match on resume.** Strategy name, config, mode, and
++    embedder identity are compared before any trial. Changing a parameter
++    without changing the output directory is refused.
++14. **Live embedding strategies require MiniLM.** `--live` with an embedding
++    strategy and `--embedder fake` is refused before any network or model
++    work.
++15. **Metacademy accuracy samples 30 nodes, not all 141.** DSA uses all 29.
++    Planned trial counts are 59 accuracy and 60 sweep; the validator enforces
++    them.
++
++---
++
++## 9. Change-impact guide
++
++### Adding a new strategy
++
++1. Implement `setup`, `shortlist`, `on_inserted`, `config`, `diagnostics`,
++   and optionally `max_candidates` in `src/graph_insertion/strategies/`.
++2. Honour the single-embedding invariant and leave the graph untouched in
++   `shortlist`.
++3. Add a factory and a name to `STRATEGY_FACTORIES` in `registry.py`.
++4. Add parameter applicability entries if the strategy takes CLI parameters.
++5. Add a slug branch in `build_strategy_slug` (runtime and validator copies
++   must agree).
++6. Subclass `StrategyConformanceSuite` in a new test module.
++7. Add the strategy to the analysis strategy order only if it is part of the
++   thesis comparison — that changes the frozen post-hoc specification.
++
++### Changing the decision prompt
++
++`decision.py` owns `SYSTEM_PROMPT`, `PROMPT_VERSION`, and `CALLS_PER_CANDIDATE`.
++A prompt change requires a version bump, a new pilot, and a manifest recorded
++with the new prompt version. The harness extracts `PROMPT_VERSION` into the
++manifest automatically; do not hard-code the version elsewhere.
++
++### Changing a metric
++
++`scoring.py` is the only place per-node and aggregate accuracy are defined.
++If a metric changes, update: `NodeScore` / `AggregateScore`, the summary CSV
++writer in `harness.py`, the validator's `recompute_metrics`, the analysis
++tables, and any figure that reads the affected column. The validator is
++designed to catch disagreement between the harness summary and an independent
++recomputation; expect it to fail loudly until all consumers agree.
++
++### Adding a corpus
++
++Add its spec to `discover_corpora`, its domain context to
++`CORPUS_DOMAIN_CONTEXT_MAP` (or ensure a tag is derivable), and its
++orientation to `SourceKind` / `oriented_edge` if it is a new family. Verify
++against the raw file before trusting the name. Update `data-formats.md` and
++the decision log.
++
++### Changing run-directory naming
++
++`registry.build_strategy_slug` and `validate_runs.build_strategy_slug` must
++stay byte-identical. The validator rejects directories whose name does not
++match the sidecar's canonical slug.
++
++### Changing the analysis pipeline
++
++Everything must remain reproducible from `raw.jsonl` through the gate. If you
++add a table or figure, add its inputs to `RUN_INFO.txt` implicitly through the
++module hash, add a test, and record the specification in the analysis plan or
++decision log. Post-hoc artifacts must remain labelled `POST HOC: not
++pre-registered`.
++
++---
++
++## Appendix A — Constants quick reference
++
++| Constant | File | Value |
++|---|---|---|
++| `PROMPT_VERSION` | `decision.py` | `"v2"` |
++| `CALLS_PER_CANDIDATE` | `decision.py` | `1` |
++| `DEFAULT_THETA` | `embedding_threshold.py` | `0.6` |
++| ANN default `k` / `M` / `efConstruction` / `efSearch` | `ann_retrieval.py` | `10` / `16` / `200` / `128` |
++| Bucket defaults `s_min` / `s_max` / `n_bits` / `seed` | `bounded_bucket.py` | `5` / `10` / `12` / `42` |
++| Sweep sizes | `HarnessConfig` | `(50, 100, 200, 500, 1000, 2000)` |
++| Sweep trials per size | `HarnessConfig` | `10` |
++| Metacademy sample size | `HarnessConfig` | `30` |
++| Accuracy repeats | `HarnessConfig` | `1` |
++| MiniLM model / dim / revision | `embedding_minilm.py` | `all-MiniLM-L6-v2` / `384` / pinned commit |
++| Sentence-transformers pin | `embedding_minilm.py` | `6.1.0` |
++| CPU thread pin | `cpu_threads.py` | `1` |
++| Peak windows (UTC, Mon–Fri) | `schedule.py` | `01:00–04:00`, `06:00–10:00` |
++| D2 slope bins | `stats.py` | flat `<0.1`, sub-linear `0.1–0.9`, linear `>0.9` |
++| R2 F1 tolerance | `stats.py` | `0.025` |
++| Bootstrap resamples | `bootstrap.py`, `stats.py` | `10,000` |
++| Bootstrap seed | `bootstrap.py`, `stats.py` | `42` |
++| Validator required libraries | `validate_runs.py` | networkx, pytest, httpx, numpy, torch, faiss-cpu, sentence-transformers |
++| Expected accuracy trials | `validate_runs.py` | `59` (29 DSA + 30 Metacademy) |
++| Expected sweep trials | `validate_runs.py` | `60` (10 × 6 sizes) |
++
++---
++
++## Appendix B — Decision index
++
++Only decisions directly visible in the core code are listed; the full log is
++`docs/decisions/decision-log.md`.
++
++| Decision | Where it shows up |
++|---|---|
++| D-15 | `oriented_edge` GOLD branch; loader |
++| D-16 | name validation; `.txt` stripping |
++| D-19 | `oriented_edge` MEKG_EXAMPLE branch |
++| D-21 | `embed_text`, node validation, loader domain context |
++| D-22 | `ConceptGraph` NetworkX backing |
++| D-23 | canonical `(prereq, dependent)` everywhere |
++| D-24 | strategy protocol; no LLM in strategies |
++| D-25 | timing model in `InsertionMetrics` |
++| D-26 / D-28 | single-embedding invariant; meter identity; validation timing |
++| D-29 | `PairwiseDecisionStep`; one call per candidate |
++| D-30 | scoring unjudged-pair handling |
++| D-31 | harness trial isolation and safety controls |
++| D-35 | sweep matrix; embedder choice; Strategy 2 theta |
++| D-37 | prompt v2; peak windows |
++| D-38 | null strategy semantics |
++| D-41 | `max_candidates` and planned-call bounds |
++| D-46 | Strategy 2 semantics |
++| D-47 | Strategy 3 HNSW specification |
++| D-55 | Strategy 3 review amendments |
++| D-58 | cache clearing on `shortlist` entry |
++| D-59 | Strategy 4 specification |
++| D-64 | CLI wiring and embedder gate |
++| D-67 | MiniLM pins |
++| D-68 | run plan and bounds |
++| D-72 | CPU thread pin |
++| D-80 | validation gate |
++| D-89 | post-hoc specification |
++| D-90 | post-hoc implementation/results |
++
++---
++
++*End of map. If a symbol or workflow here disagrees with the code, the code
++wins; correct this document and note the discrepancy in the report for the
++task that found it.*
+diff --git c/docs/decisions/decision-log.md w/docs/decisions/decision-log.md
+index 7da91e8..fae150d 100644
+--- c/docs/decisions/decision-log.md
++++ w/docs/decisions/decision-log.md
+@@ -964,3 +964,10 @@ Reasoning: adds the requested S3 search-depth teaching without presenting the me
+ (3) The Trial chip moved from the bootstrap scene to Scene 19, where the term is now introduced; the bootstrap scene uses plain "trials". To keep term-first-use ordering honest, "primary" and "sensitivity" were removed from the efSearch copy, "run" was removed from the seed and table copy, and the Mode gloss no longer says "run". The stale internal answer-key ids `s17*` were normalised to `s20*`, and the shared-judge `s15ex` id to `s16ex`, so internal ids again match their scenes.
+ (4) The static guard now expects 26 scenes and 98 terms, checks the new terms and the `24 runs` / `60 trials` / `59 trials` wording, and the V4 made-up-scene indices moved to 7, 9, 10, 11, 17, 21 and 22. Browser QA passed in Chromium and Firefox: 176 states (26 scene starts plus 150 step maxima), no page or console errors, no overflow at 1920x1080, 1366x768 or 1280x720, 26 overview cards and 98 term rows. The only term-before-chip warning remains the accepted `mean` case from [D-95].
+ Reasoning: adds the requested experimental-setup vocabulary at the point where the deck has finished comparing the four strategies and is about to explain scoring, without presenting any measured result. Affects: `docs/presentation/background-deck/background-concepts.html`, `tests/test_background_deck_static.py`, `docs/tasks/status.md`, `docs/reports/PRES-002-claude-code-configuration-mode-scenes.md`.
++
++**[D-98]** Codebase map document: scope, authority rule, and maintenance contract (DOC-013):
++(1) `docs/context/codebase-map.md` is a descriptive onboarding and maintenance aid, not a normative specification. Where it disagrees with source code, the code is authoritative; the reader must correct the map and record the discrepancy rather than change code to match the map. The normative strategy contract remains `docs/context/strategy-interface.md`, and dataset facts remain in `docs/context/data-formats.md`.
++(2) Coverage tiers are deliberate. The runtime package (`src/graph_insertion/**`) and `scripts/run_experiment.py` receive full symbol maps and function-level pseudocode. The Phase 4 analysis pipeline receives module-level maps, entry-point workflows, and pseudocode for the dataflow-critical functions (validation gate, orchestration, table builders, slope/bootstrap statistics, post-hoc stage); plotting internals are listed by contract. Data-generation tooling is summarised with its workflows and exit-code contract only. This keeps the document useful without duplicating every plotting implementation detail.
++(3) The document is expected to drift. Structural changes (new strategy, new corpus, new metric, new run-directory slug, new analysis artifact) must update the affected section in the same task that makes the change. Pure refactors that preserve symbols and workflows do not require an immediate rewrite, but line-number pointers will be stale and should be treated as approximations.
++(4) No experimental decision is made or changed by this document. Constants, thresholds, prompts, and bounds are quoted from code; the decision log remains the source of truth for *why* they have those values.
++Reasoning: records why a second, code-level map exists alongside the decision log and strategy-interface spec, and fixes the rule that prevents the map from becoming a competing source of truth. Affects: `docs/context/codebase-map.md`, `docs/tasks/status.md`, `docs/reports/DOC-013-claude-code-codebase-map.md`.
+diff --git c/docs/tasks/status.md w/docs/tasks/status.md
+index ca84682..8435e52 100644
+--- c/docs/tasks/status.md
++++ w/docs/tasks/status.md
+@@ -132,4 +132,5 @@ Status: **in-progress**
+ | DOC-006 | Close DOC-002 with the DOC-002-B text; record [D-69] (D-33 hold-out clarification, confirmed data counts, corrections to D-19 and DATA-002); narrow the `data-formats.md` orientation sentence to the nine checkable files; fix the Phase 2 header; errata for the DOC-002-B, DOC-002-A and DATA-002 reports. | **needs-review** | Completed by Gemini; see [`docs/reports/DOC-006-gemini.md`](docs/reports/DOC-006-gemini.md). |
+ | DOC-008 | Freeze Phase 4 analysis plan (`docs/context/analysis-plan.md`), record [D-79], and draft adviser briefing on Decisions D1–D6 (`docs/context/adviser-briefing-d1-d6.md`). | **done** | Completed by Gemini. Pre-registered analysis plan frozen with Decisions D1–D6 adopted for initial defense; comprehensive briefing prepared for adviser review. |
+ | DOC-011 | Record sweep campaign, analysis pipeline provenance, and analysis plan Amendment 3 ([D-84]) | **done** | Completed by Gemini; branch `task/DOC-011` at commit `79046eb`. See report [`docs/reports/DOC-011-gemini-campaign-record.md`](docs/reports/DOC-011-gemini-campaign-record.md). |
++| DOC-013 | Create `docs/context/codebase-map.md`: annotated core-file tree, per-file symbol maps and pseudocode for every runtime function, end-to-end experiment/analysis workflows, analysis-pipeline outline, test map, invariants, and change-impact guide ([D-98]). | **done** | Completed by Claude Code; branch `task/DOC-013`, worktree `../llm-graph-insertion-complexity-DOC-013`. Docs only; no code, data, or result changes. See report [`docs/reports/DOC-013-claude-code-codebase-map.md`](docs/reports/DOC-013-claude-code-codebase-map.md). |
+ 
