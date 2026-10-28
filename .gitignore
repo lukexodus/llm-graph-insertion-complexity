@@ -18,3 +18,4 @@ patch/
 
 results/
 *.log
+.aider*
