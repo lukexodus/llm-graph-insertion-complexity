@@ -302,6 +302,50 @@ done
 
 ---
 
+## Defense Demo (`scripts/demo_trial.py`)
+
+`scripts/demo_trial.py` is an offline, deterministic terminal demonstration for
+thesis panelists. It performs one leave-one-out insertion on the DSA corpus
+(default held-out node `binary_search_tree`) through all four narrowing
+strategies. The narrowing, graph update, shared decision step and scoring use
+the production code; only the LLM transport is replaced by a replay client that
+looks up each answer by exact prompt text in the recorded PILOT-001 cache.
+
+```bash
+# Full demo (all four strategies, default node)
+.venv-ann/bin/python scripts/demo_trial.py
+
+# One strategy / a different node / plain ASCII / pauses between phases
+.venv-ann/bin/python scripts/demo_trial.py --strategies s1,s3 --node graph --ascii --pause
+
+# Offline pre-flight: provenance, corpus, node, embedder (no trial)
+.venv-ann/bin/python scripts/demo_trial.py --check
+
+# Save the machine-readable report outside results/
+.venv-ann/bin/python scripts/demo_trial.py --json /tmp/demo.json
+```
+
+Options: `--node NAME`, `--strategies LIST` (`s1`–`s4` or canonical names),
+`--pilot-dir DIR`, `--no-color`, `--ascii`, `--pause`, `--show-all-calls`,
+`--json PATH`, `--check`, `--traceback`. Colour is used only on a TTY unless
+`--no-color` or `NO_COLOR` is set. The demo sets `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`; it never calls the API, reads `DEEPSEEK_API_KEY`, or
+writes under `results/`.
+
+Exit codes: `0` ok, `2` usage, `3` pilot cache/provenance failure, `4` corpus or
+node problem, `5` missing dependency/embedder, `6` internal consistency check,
+`7` refused output path.
+
+The demo is an illustration, not a new result. Decisions are real recorded
+PILOT-001 answers (2026-10-07, prompt v2, `deepseek-flash`); latency, tokens and
+cost are recorded values, not measurements from the demo run.
+
+Operator guide, including defense-day flow, flags, troubleshooting, exit codes
+and suggested counter-nodes:
+[`docs/presentation/information/DEMO-001-OPERATOR-GUIDE.md`](../docs/presentation/information/DEMO-001-OPERATOR-GUIDE.md).
+
+---
+
 ## Operational Tooling
 
 In addition to `apc-bundle.sh`, this directory provides workflow automation scripts that enforce the APC + Local Agent operational protocol:
