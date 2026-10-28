@@ -49,6 +49,7 @@ try:
         plot_f6_cost_vs_accuracy,
         plot_f6b_cost_vs_accuracy_logx,
     )
+    from .posthoc import run_posthoc_stage
 except ImportError:
     from validate_runs import validate_all_runs
     from tables import (
@@ -71,6 +72,7 @@ except ImportError:
         plot_f6_cost_vs_accuracy,
         plot_f6b_cost_vs_accuracy_logx,
     )
+    from posthoc import run_posthoc_stage
 
 
 def _file_sha256(path: Path) -> str:
@@ -108,7 +110,28 @@ def main() -> int:
         default=None,
         help="Optional path to machine-written sha256 hashes file to verify against",
     )
+    parser.add_argument(
+        "--only",
+        choices=["posthoc"],
+        default=None,
+        help=(
+            "Run only the post-hoc stage (gate, in-memory T1/T2 aggregates, then Tables "
+            "T5-T9b and Figures F7-F9); no pre-registered artifact is written"
+        ),
+    )
+    parser.add_argument(
+        "--crosscheck-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Existing pipeline output directory whose T1/T2/F6 CSV cells the post-hoc "
+            "inputs are asserted against (required with --only posthoc)"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.only == "posthoc" and args.crosscheck_dir is None:
+        parser.error("--only posthoc requires --crosscheck-dir")
 
     results_dir = args.results_dir.resolve()
     output_dir = args.output_dir.resolve()
@@ -152,6 +175,8 @@ def main() -> int:
         "stats.py",
         "bootstrap.py",
         "style.py",
+        "posthoc.py",
+        "posthoc_figures.py",
     ]
     module_hashes = {}
     for mod in pipeline_modules:
@@ -177,6 +202,8 @@ def main() -> int:
         f"argv: {' '.join(sys.argv)}",
         f"results_dir: {results_dir}",
         f"git_commit: {git_head}",
+        f"only: {args.only or 'all'}",
+        f"crosscheck_dir: {args.crosscheck_dir.resolve() if args.crosscheck_dir else 'NOT SUPPLIED'}",
         "pipeline_modules_sha256:",
     ]
     for mod, h in module_hashes.items():
@@ -198,6 +225,32 @@ def main() -> int:
     sweep_runs = [d for d in all_runs if "sweep" in d.name]
 
     print(f"Discovered: {len(all_runs)} total runs ({len(acc_runs)} accuracy, {len(sweep_runs)} sweep)\n")
+
+    # Post-hoc-only stage (ANALYSIS-004, [D-89]): gate already passed above.
+    # Build the T1/T2 aggregates in memory and write only the new artifacts.
+    if args.only == "posthoc":
+        print(">>> STEP 1b: Post-hoc decision and ranking stage (POST HOC, not pre-registered)...")
+        t1_rows = generate_t1_accuracy_table(acc_runs)
+        t2_rows, _ = generate_t2_sweep_cost_table(sweep_runs)
+        summary = run_posthoc_stage(
+            results_dir=results_dir,
+            accuracy_run_dirs=acc_runs,
+            t1_rows=t1_rows,
+            t2_rows=t2_rows,
+            output_dir=output_dir,
+            crosscheck_dir=args.crosscheck_dir,
+        )
+        classes_txt = ", ".join(
+            f"{s}={info['class']}" for s, info in summary["gates"].items()
+        )
+        print(f"    Cross-check cells matched against {args.crosscheck_dir}: {summary['n_crosschecks']}")
+        print(f"    Gate classes: {classes_txt}")
+        print(f"    Saved: {tables_dir}/{{{', '.join(sorted(p.name for p in tables_dir.glob('T[5-9]*.csv')))}}}")
+        print(f"    Saved: {figures_dir}/F7_gates_g1_g2, F8_score_vs_weight, F9_rank_shares (.pdf, .png, .csv)")
+        print("\n" + "=" * 80)
+        print("POST-HOC STAGE COMPLETED SUCCESSFULLY (POST HOC, not pre-registered).")
+        print("=" * 80)
+        return 0
 
     # 2. Table T3: Run Inventory (write validator's t3_csv verbatim as T3_run_inventory.csv)
     print(">>> STEP 2: Generating Table T3 (Run Inventory)...")
