@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 HTML_PATH = Path(os.environ.get("DECK_HTML") or Path(__file__).resolve().parents[1] / "docs/presentation/background-deck/background-concepts.html")
-EXPECTED_SCENES = int(os.environ.get("DECK_SCENES", "22"))
+EXPECTED_SCENES = int(os.environ.get("DECK_SCENES", "24"))
 STARTER = os.environ.get("DECK_STARTER") == "1"
 PAYLOAD = re.compile(r"data:image/png;base64,[A-Za-z0-9+/=]+")
-TERMS = ["Empirical", "Complexity", "Analysis", "Narrowing", "Strategy", "Incremental", "LLM (Large Language Model)", "Graph construction", "Node", "Edge", "Graph", "Directed edge", "Prerequisite", "Knowledge graph", "Concept", "Domain expert", "Scale", "Prompt", "API call", "API", "Wall-clock time", "Database", "Batch construction", "Incremental insertion", "Insertion", "n", "Brute force", "Linear growth", "Control", "Shortlist", "Candidate", "Candidate narrowing", "Embedding", "Vector", "Local model", "Cosine similarity", "Threshold", "θ (theta)", "Top-k", "Cap", "Nearest neighbour", "ANN (approximate nearest-neighbour search)", "HNSW (Hierarchical Navigable Small World)", "Greedy", "FAISS", "Bucket", "Random hyperplane", "Bit", "Binary code", "Gray order", "Bounded", "EraRAG", "Seed", "Decision step", "Label", "Temperature 0", "Fair test", "Worst case", "Gold-standard graph", "Ground truth", "DSA (Data Structures and Algorithms)", "Metacademy", "Leave-one-out", "Synthetic data", "Precision", "Recall", "F1", "Harmonic mean", "Micro", "Macro", "Shortlist recall", "Neighbour", "Random baseline", "Research gap", "Aggregate", "Head-to-head", "Like-for-like", "Literature search", "Research question (RQ)", "Amortized cost", "Theorem", "Premise", "Conceptual framework", "Input / Process / Output"]
+TERMS = ["Empirical", "Complexity", "Analysis", "Narrowing", "Strategy", "Incremental", "LLM (Large Language Model)", "Graph construction", "Node", "Edge", "Graph", "Directed edge", "Prerequisite", "Knowledge graph", "Concept", "Domain expert", "Scale", "Prompt", "API call", "API", "Wall-clock time", "Database", "Batch construction", "Incremental insertion", "Insertion", "n", "Brute force", "Linear growth", "Control", "Shortlist", "Candidate", "Candidate narrowing", "Embedding", "Vector", "Local model", "Cosine similarity", "Threshold", "θ (theta)", "Top-k", "Cap", "Nearest neighbour", "ANN (approximate nearest-neighbour search)", "HNSW (Hierarchical Navigable Small World)", "efSearch", "efConstruction", "Greedy", "FAISS", "Bucket", "Random hyperplane", "Bit", "Binary code", "Gray order", "Bounded", "EraRAG", "Seed", "Decision step", "Label", "Temperature 0", "Fair test", "Worst case", "Gold-standard graph", "Ground truth", "DSA (Data Structures and Algorithms)", "Metacademy", "Leave-one-out", "Synthetic data", "Precision", "Recall", "F1", "Harmonic mean", "Micro", "Macro", "Shortlist recall", "Neighbour", "Random baseline", "Trial", "Mean", "Bootstrap", "With replacement", "Resample", "Percentile", "95% bootstrap interval", "Research gap", "Aggregate", "Head-to-head", "Like-for-like", "Literature search", "Research question (RQ)", "Amortized cost", "Theorem", "Premise", "Conceptual framework", "Input / Process / Output"]
 
 raw = HTML_PATH.read_text(encoding="utf-8")
 scan = PAYLOAD.sub("data:image/png;base64,PAYLOAD", raw)            # V3: never scan the logo bytes
@@ -63,17 +63,18 @@ def test_size_and_logos():
 def test_required_phrases():
     low = re.sub(r"\s+", " ", text.lower().replace("&mdash;", "\u2014").replace("&rsquo;", "\u2019"))
     for p in ("none of the studies we reviewed", "strictly above", "premise", "illustration", "made-up numbers",
-              "s3 and s4 both cap at 10", "not thesis data"):
+              "s3 and s4 both cap at 10", "not thesis data", "95% bootstrap interval", "with replacement",
+              "2.5th", "97.5th", "fixed seed", "efsearch = 128", "efconstruction"):
         assert p in low or p in scan.lower(), f"missing phrase: {p}"
 
 def test_tags_on_every_scene_that_needs_them():                         # V4
     secs = {int(m.group(1)): m.group(0) for m in re.finditer(r'<section class="scene[^"]*" id="s(\d\d)".*?</section>', scan, re.S)}
     miss = []
-    for n in list(range(4, 13)) + [15]:
+    for n in list(range(4, 15)) + [16]:
         s = secs.get(n, "")
         if ("data-ex=" in s and '"tag"' in s) or "not thesis data" in s: continue
-        if n in (4, 5, 6, 7, 8, 9, 10, 11, 12, 15) and "illustration" not in s: miss.append(("illustration", n))
-    for n in (7, 9, 10, 11, 16, 18):
+        if n in (4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16) and "illustration" not in s: miss.append(("illustration", n))
+    for n in (7, 9, 10, 11, 17, 19, 20):
         if "made-up numbers" not in secs.get(n, ""): miss.append(("made-up numbers", n))
     assert not miss, miss
 
