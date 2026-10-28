@@ -54,15 +54,15 @@ except ImportError:  # pragma: no cover - direct script execution
     )
 
 
-def _corner_label(ax: plt.Axes) -> None:
+def _corner_label(ax: plt.Axes, x: float = 0.98, y: float = 0.96) -> None:
     ax.text(
-        0.98,
-        0.03,
+        x,
+        y,
         POSTHOC_LABEL,
         transform=ax.transAxes,
         fontsize=7,
-        ha="right",
-        va="bottom",
+        ha="center" if abs(x - 0.5) <= 1e-9 else ("right" if x > 0.5 else "left"),
+        va="top" if y > 0.5 else "bottom",
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.9, edgecolor="gray"),
     )
 
@@ -127,7 +127,7 @@ def plot_f7_gates(inputs: Dict[str, Any], gates: Dict[str, Any], output_dir: Pat
         "Panel A — G1: shortlist recall vs pre-registered random baseline\n"
         "S1: whole-graph shortlist (no baseline); S2: no shortlist cap (not assessable)"
     )
-    _corner_label(ax_a)
+    _corner_label(ax_a, x=0.98, y=0.96)
 
     # Panel B: G2 mean calls at n = 2000 on a log x-axis.
     ys = np.arange(len(STRATEGY_ORDER))
@@ -174,7 +174,7 @@ def plot_f7_gates(inputs: Dict[str, Any], gates: Dict[str, Any], output_dir: Pat
     ax_b.set_ylim(-0.7, len(STRATEGY_ORDER) - 0.1)
     ax_b.set_xlabel("Mean LLM calls per insertion at n = 2000 (log scale)")
     ax_b.set_title("Panel B — G2: mean calls per insertion at n = 2000 against the 50-call limit")
-    _corner_label(ax_b)
+    _corner_label(ax_b, x=0.02, y=0.96)
 
     if omitted:
         fig.text(0.01, 0.005, "not plotted: " + "; ".join(omitted), fontsize=7, style="italic")
@@ -252,8 +252,9 @@ def plot_f8_score_vs_weight(store: Dict[str, Any], output_dir: Path) -> None:
         ax.set_xlabel("Weight on accuracy, w")
         ax.set_ylabel("Normalised score S(w)")
         ax.set_title(f"{CORPUS_SHORT[corpus]} (m = {CORPUS_M[corpus]})")
-        ax.legend(loc="lower right", fontsize=8, frameon=True)
-        _corner_label(ax)
+        # Direct end labels identify every line; a legend would collide with the
+        # S4 end label in the lower-right corner.
+        _corner_label(ax, x=0.5, y=0.02)
 
     if omitted:
         fig.text(0.01, 0.005, "not plotted: " + "; ".join(omitted), fontsize=7, style="italic")
@@ -328,7 +329,6 @@ def plot_f9_rank_shares(mc_store: Dict[str, Any], output_dir: Path) -> None:
         for r in range(1, 5)
     ]
     ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, -0.32), ncol=4, fontsize=8)
-    _corner_label(ax)
     fig.tight_layout()
     export_figure(fig, output_dir / "F9_rank_shares", csv_rows)
     plt.close(fig)
