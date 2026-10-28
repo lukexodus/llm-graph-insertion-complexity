@@ -5,6 +5,7 @@
 **Base:** `9283a9d` on `master`
 **Decision:** [D-100]
 **Status:** needs-review
+**Merged:** `a4b92a4` (merge commit on `master`); task branch tip `d49ca4a`.
 
 ---
 
@@ -1447,5 +1448,6 @@ index 5ad42c6..886c2e8 100644
    `demo_runs/live-<UTC>/`.
 2. Live mode costs roughly one tenth of a cent for the default 48-call trial at
    off-peak prices; the pre-flight prints a 76-call upper bound.
-3. Branch `task/DEMO-002` is ready to merge; no merge was performed before this
-   report was written.
+3. `task/DEMO-002` was merged into `master` at `a4b92a4` with
+   `git merge --no-ff` after this report was written. Branch `task/DEMO-002` is
+   retained; no rebase or worktree cleanup was performed.
