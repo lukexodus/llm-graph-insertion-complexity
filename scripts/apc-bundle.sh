@@ -38,12 +38,33 @@ PROFILE_FIX=(
   docs/context/prompt-adapter-contract.md
 )
 
+# presentation: background-concepts HTML deck sources and style references
+PROFILE_PRESENTATION=(
+  AGENTS.md
+  docs/context/complete-context.md
+  docs/context/apc-handoff-template.md
+  docs/context/apc-bundle-quickref.md
+  docs/context/repo-tree.txt
+  docs/decisions/decision-log.md
+  docs/tasks/status.md
+  docs/presentation/background-deck/BRIEF.md
+  docs/presentation/background-deck/CONTENT-PACK.md
+  docs/presentation/background-deck/DECK-EXTRACT.md
+  docs/presentation/background-deck/assets/mmsu-lockup.png
+  docs/presentation/background-deck/assets/mmsu-50-logo.png
+  docs/presentation/script/Defense_Script_and_Background_Guide.md
+  "docs/presentation/script/Defense_Script_and_Background_Guide—Comprehensive Version.md"
+  "docs/thesis/[REVISED] An Empirical Complexity Analysis of Candidate-Narrowing Strategies for Incremental LLM-Driven Graph Construction—With Chapter 4.md"
+  "docs/presentation/An Empirical Complexity Analysis Of Candidate-Narrowing Strategies For Incremental LLM-Driven Graph Construction—Presentation.pptx"
+)
+
 # full: union of all of the above, de-duplicated during resolution
 PROFILE_FULL=(
   "${PROFILE_CORE[@]}"
   "${PROFILE_STRAT[@]}"
   "${PROFILE_STRAT_DESIGN[@]}"
   "${PROFILE_FIX[@]}"
+  "${PROFILE_PRESENTATION[@]}"
 )
 
 # Optional reports: all commented out by default; included only with --with-reports
@@ -82,6 +103,7 @@ Profiles:
   strat         core + null strategy, interface tests, catalogue
   strat-design  strat + thesis markdown
   fix           core + prompt adapter contract
+  presentation  background-deck brief, content pack, scripts, thesis, pptx, logos
   full          union of all profiles, de-duplicated
 
 Options:
@@ -227,11 +249,14 @@ strat-design)
 fix)
   RAW_PROFILE_ITEMS=("${PROFILE_FIX[@]}")
   ;;
+presentation)
+  RAW_PROFILE_ITEMS=("${PROFILE_PRESENTATION[@]}")
+  ;;
 full)
   RAW_PROFILE_ITEMS=("${PROFILE_FULL[@]}")
   ;;
 *)
-  echo "ERROR: Unknown profile '$PROFILE'. Valid profiles: core, strat, strat-design, fix, full." >&2
+  echo "ERROR: Unknown profile '$PROFILE'. Valid profiles: core, strat, strat-design, fix, presentation, full." >&2
   exit 2
   ;;
 esac
@@ -239,7 +264,10 @@ esac
 # Resolve globs in profile items
 RESOLVED_RAW=()
 for item in "${RAW_PROFILE_ITEMS[@]}"; do
-  if [[ "$item" == "docs/thesis/*.md" ]]; then
+  if [[ -e "$item" ]]; then
+    # Literal path: keep spaces and bracket characters intact.
+    RESOLVED_RAW+=("$item")
+  elif [[ "$item" == "docs/thesis/*.md" ]]; then
     shopt -s nullglob
     matches=(docs/thesis/*.md)
     shopt -u nullglob

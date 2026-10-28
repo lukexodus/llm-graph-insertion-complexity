@@ -92,6 +92,13 @@ Status: **in-progress**
 | Chapter 4 — Results and Discussion                | not started (depends on Phase 3/4 code work)                                                                                                                                                                        |
 | Chapter 5 — Summary, Conclusions, Recommendations | not started                                                                                                                                                                                                         |
 
+## Presentation track (separate from the thesis/code work above)
+
+| ID | Task | Status | Notes / Report |
+| --- | --- | --- | --- |
+| PRES-001 | Consolidate the source material, requirements, style reference, and asset pack for the APC to plan a separate background-concepts HTML presentation for defense panelists (first-principles teaching; no Chapter 4 results). | **needs-review** | Completed by Claude Code; branch `task/PRES-001`, worktree `../llm-graph-insertion-complexity-PRES-001`. Materials in `docs/presentation/background-deck/` (`BRIEF.md`, `CONTENT-PACK.md`, `DECK-EXTRACT.md`, logos). See report [`docs/reports/PRES-001-claude-code-background-deck-materials.md`](docs/reports/PRES-001-claude-code-background-deck-materials.md). |
+| PRES-002 | Build the single-file, offline background-concepts HTML deck (22 scenes, no Chapter 4 results) from the APC prompt and starter kit, with the static guard test. | **needs-review** | Completed by Claude Code; branch `task/PRES-002`, worktree `../llm-graph-insertion-complexity-PRES-002`. See report [`docs/reports/PRES-002-claude-code-background-concepts-deck.md`](docs/reports/PRES-002-claude-code-background-concepts-deck.md). |
+
 ## Housekeeping
 
 | ID      | Task                                                                                                  | Status   | Notes / Report                                                                                                                               |
